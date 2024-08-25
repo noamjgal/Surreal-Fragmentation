@@ -24,68 +24,6 @@ def timer(func):
         return result
     return wrapper
 
-# Convert 'time' to time, handling potential errors
-def parse_time(t):
-    if pd.isna(t):
-        return pd.NaT
-    try:
-        # Parse time and truncate to seconds
-        return pd.to_datetime(t).floor('S').time()
-    except:
-        return pd.NaT
-        
-def preprocess_data(df):
-    df['time'] = df['time'].apply(parse_time)
-    df = df.dropna(subset=['time'])
-    df['Timestamp'] = pd.to_datetime(df['date'].astype(str) + ' ' + df['time'].astype(str))
-    df['speed'] = pd.to_numeric(df['speed'], errors='coerce')
-    df['movement_type'] = df['speed'].apply(classify_movement)
-    df['isapp'] = df['isapp'].astype(int)
-    return df 
-
-@timer
-def preprocess_and_split_data(input_path, output_dir):
-    print("Loading and preprocessing data...")
-    
-    columns_to_read = ['user', 'date', 'time', 'speed', 'indoors', 'isapp']
-    
-    try:
-        df = pd.read_excel(input_path, sheet_name='gpsappS_8', usecols=columns_to_read)
-    except Exception as e:
-        print(f"Error reading Excel file: {str(e)}")
-        return
-    
-    print("Initial data structure:")
-    print(df.dtypes)
-    print(df.head())
-    
-    # Convert 'date' to datetime
-    df['date'] = pd.to_datetime(df['date'])
-    
-    
-    df['time'] = df['time'].apply(parse_time)
-        
-    # Combine date and time, handling NaT values
-    df['Timestamp'] = df.apply(lambda row: 
-        pd.Timestamp.combine(row['date'], row['time']) if pd.notna(row['time']) else pd.NaT, 
-        axis=1
-    )
-    
-    # Drop rows with NaT timestamps
-    df = df.dropna(subset=['Timestamp'])
-    
-    preprocessed_dir = os.path.join(output_dir, 'preprocessed_data')
-    os.makedirs(preprocessed_dir, exist_ok=True)
-    
-    for (date, user), group in df.groupby([df['date'].dt.date, 'user']):
-        filename = f"{date}_{user}.csv"
-        filepath = os.path.join(preprocessed_dir, filename)
-        group.to_csv(filepath, index=False)
-    
-    print("Data preprocessing and splitting completed.")
-    print(f"Processed data shape: {df.shape}")
-   
-
 def classify_movement(speed):
     if pd.isna(speed):
         return 'Unknown'
@@ -142,6 +80,24 @@ def calculate_fragmentation_index(episodes_df, column):
     
     return fragmentation_indices
 
+def parse_time(t):
+    if pd.isna(t):
+        return pd.NaT
+    try:
+        # Parse time and truncate to seconds
+        return pd.to_datetime(t).floor('S').time()
+    except:
+        return pd.NaT
+
+def preprocess_data(df):
+    df['time'] = df['time'].apply(parse_time)
+    df = df.dropna(subset=['time'])
+    df['Timestamp'] = pd.to_datetime(df['date'].astype(str) + ' ' + df['time'].astype(str))
+    df['speed'] = pd.to_numeric(df['speed'], errors='coerce')
+    df['movement_type'] = df['speed'].apply(classify_movement)
+    df['isapp'] = df['isapp'].astype(int)
+    return df
+
 def analyze_participant_day(file_path):
     global error_count
     try:
@@ -188,18 +144,15 @@ def analyze_participant_day(file_path):
         if error_count == MAX_ERRORS:
             print("Maximum number of errors reached. Some files may not be processed.")
         return None, None
-   
 
+@timer
 def main():
-    input_path = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/gpsappS_9.1_excel.xlsx'
+    input_dir = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/preprocessed_data'
     output_dir = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/'
     episode_dir = os.path.join(output_dir, 'fragment-episodes')
     os.makedirs(episode_dir, exist_ok=True)
 
-    preprocess_and_split_data(input_path, output_dir)
-
-    preprocessed_dir = os.path.join(output_dir, 'preprocessed_data')
-    all_files = [os.path.join(preprocessed_dir, f) for f in os.listdir(preprocessed_dir) if f.endswith('.csv')]
+    all_files = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if f.endswith('.csv')]
 
     all_results = []
     
@@ -242,7 +195,6 @@ def main():
         print("Visualization saved as 'fragmentation_indices_distribution.png' in the output directory.")
     else:
         print("No valid results were generated. Please check your data and error messages.")
-
 
 if __name__ == "__main__":
     main()
