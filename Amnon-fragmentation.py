@@ -6,8 +6,13 @@ import seaborn as sns
 from ruptures import Pelt
 from scipy import stats
 import time
+import multiprocessing
 
-# Add timing function
+def limit_cpu():
+    max_processes = max(1, multiprocessing.cpu_count() // 2)
+    print(f"Limiting to {max_processes} concurrent processes")
+    return max_processes
+
 def timer(func):
     def wrapper(*args, **kwargs):
         start_time = time.time()
@@ -16,43 +21,6 @@ def timer(func):
         print(f"{func.__name__} took {end_time - start_time:.2f} seconds to run.")
         return result
     return wrapper
-
-# Load the data
-print("Loading data...")
-tlv_path = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/gpsappS_9.1_excel.xlsx'
-tlv_df = pd.read_excel(tlv_path, sheet_name='gpsappS_8')
-print("Data loaded successfully.")
-print(f"Shape of the DataFrame: {tlv_df.shape}")
-print("\nColumn names:")
-print(tlv_df.columns)
-
-# Create output directories
-output_dir = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/'
-episode_dir = os.path.join(output_dir, 'fragment-episodes')
-os.makedirs(episode_dir, exist_ok=True)
-
-
-# Add this code after loading the data and before the preprocessing step
-print("\nInspecting 'date' and 'time' columns:")
-print(tlv_df[['date', 'time']].dtypes)
-print("\nSample data:")
-print(tlv_df[['date', 'time']].head())
-
-# Check for any null values
-print("\nNull values:")
-print(tlv_df[['date', 'time']].isnull().sum())
-
-# Check unique values in each column
-print("\nUnique values in 'date' column:")
-print(tlv_df['date'].nunique())
-print("\nUnique values in 'time' column:")
-print(tlv_df['time'].nunique())
-
-# Display a few unique values from each column
-print("\nSample unique values in 'date' column:")
-print(tlv_df['date'].unique()[:5])
-print("\nSample unique values in 'time' column:")
-print(tlv_df['time'].unique()[:5])
 
 def classify_movement(speed):
     if pd.isna(speed):
@@ -118,34 +86,25 @@ def calculate_fragmentation_index(episodes_df, column):
     
     return fragmentation_indices
 
-
 def preprocess_data(df):
     print("Starting preprocessing...")
+    df = df.copy()  # Create a copy to avoid SettingWithCopyWarning
     
-    # Convert 'time' column to string if it's not already
-    df['time'] = df['time'].astype(str)
-    
-    # Combine date and time
-    df['Timestamp'] = df.apply(lambda row: pd.Timestamp.combine(row['date'].date(), pd.to_datetime(row['time']).time()), axis=1)
-    
-    # Drop rows with invalid timestamps
+    df.loc[:, 'time'] = df['time'].astype(str)
+    df.loc[:, 'Timestamp'] = df.apply(lambda row: pd.Timestamp.combine(row['date'].date(), pd.to_datetime(row['time']).time()), axis=1)
     df = df.dropna(subset=['Timestamp'])
-    
-    # Classify movement
-    df['movement_type'] = df['speed'].apply(classify_movement)
+    df.loc[:, 'movement_type'] = df['speed'].apply(classify_movement)
     
     print(f"Preprocessed data shape: {df.shape}")
     return df
 
-# Update the analyze_participant function
 @timer
-def analyze_participant(participant_df):
+def analyze_participant_day(participant_day_df):
     try:
-        print("Preprocessing data...")
-        participant_df = preprocess_data(participant_df)
+        print(f"Analyzing data for {participant_day_df['Timestamp'].dt.date.iloc[0]}")
         
-        change_points = detect_changepoints(participant_df, 'speed')
-        episodes_df = create_episodes(participant_df, change_points)
+        change_points = detect_changepoints(participant_day_df, 'speed')
+        episodes_df = create_episodes(participant_day_df, change_points)
 
         print("Calculating fragmentation indices...")
         fragmentation_indices_movement = calculate_fragmentation_index(episodes_df, 'movement_type')
@@ -156,63 +115,95 @@ def analyze_participant(participant_df):
 
         print("Calculating modes...")
         modes = {
-            'movement_mode': stats.mode(participant_df['movement_type'])[0][0],
-            'indoor_outdoor_mode': stats.mode(participant_df['indoors'])[0][0],
-            'digital_use_mode': 'Yes' if stats.mode(participant_df['isapp'])[0][0] == 1 else 'No'
+            'movement_mode': stats.mode(participant_day_df['movement_type'])[0][0],
+            'indoor_outdoor_mode': stats.mode(participant_day_df['indoors'])[0][0],
+            'digital_use_mode': 'Yes' if stats.mode(participant_day_df['isapp'])[0][0] == 1 else 'No'
         }
 
         return episodes_df, all_indices, modes
 
     except Exception as e:
-        print(f"Error processing participant: {str(e)}")
+        print(f"Error processing participant day: {str(e)}")
         return None, None, None
-    
-# Analyze all participants
-print("\nStarting analysis of all participants...")
-all_participants = tlv_df['user'].unique()
-all_results = []
 
-total_participants = len(all_participants)
-for i, participant_id in enumerate(all_participants, 1):
-    print(f"\nProcessing participant {participant_id} ({i}/{total_participants})")
-    start_time = time.time()
-    participant_df = tlv_df[tlv_df['user'] == participant_id]
+@timer
+def load_data(file_path):
+    print(f"Loading data from {file_path}")
+    return pd.read_excel(file_path, sheet_name='gpsappS_8')
+
+def process_participant_day(args):
+    participant_id, day_df, episode_dir, date = args
+    print(f"\nProcessing participant {participant_id} for date {date}")
     
-    episodes_df, fragmentation_indices, modes = analyze_participant(participant_df)
+    day_df = preprocess_data(day_df)
+    episodes_df, fragmentation_indices, modes = analyze_participant_day(day_df)
     
     if episodes_df is not None and fragmentation_indices is not None and modes is not None:
-        result = {'participant_id': participant_id, **fragmentation_indices, **modes}
-        all_results.append(result)
+        result = {
+            'participant_id': participant_id,
+            'date': date,
+            **fragmentation_indices,
+            **modes
+        }
         
-        # Save episode details
-        episodes_df.to_csv(os.path.join(episode_dir, f'participant_{participant_id}_episodes.csv'), index=False)
+        # Save episode details for each day
+        episodes_df.to_csv(os.path.join(episode_dir, f'participant_{participant_id}_day_{date}_episodes.csv'), index=False)
+        return result
+    else:
+        return None
+
+if __name__ == "__main__":
+    max_processes = limit_cpu()
     
-    end_time = time.time()
-    print(f"Participant {participant_id} processed in {end_time - start_time:.2f} seconds")
+    print("Loading data...")
+    tlv_path = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/gpsappS_9.1_excel.xlsx'
+    tlv_df = load_data(tlv_path)
+    print("Data loaded successfully.")
+    print(f"Shape of the DataFrame: {tlv_df.shape}")
+    
+    output_dir = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/'
+    episode_dir = os.path.join(output_dir, 'fragment-episodes')
+    os.makedirs(episode_dir, exist_ok=True)
+    
+    print("\nStarting analysis of all participants...")
+    
+    # Group data by user and date
+    grouped = tlv_df.groupby(['user', 'date'])
+    
+    # Prepare arguments for multiprocessing
+    args_list = [
+        (name[0], group, episode_dir, name[1]) 
+        for name, group in grouped
+    ]
+    
+    with multiprocessing.Pool(processes=max_processes) as pool:
+        all_results = pool.map(process_participant_day, args_list)
+    
+    # Filter out None results
+    all_results = [result for result in all_results if result is not None]
+    
+    print("\nCreating summary DataFrame...")
+    summary_df = pd.DataFrame(all_results)
 
-# Create summary DataFrame
-print("\nCreating summary DataFrame...")
-summary_df = pd.DataFrame(all_results)
+    if not summary_df.empty:
+        summary_df.to_csv(os.path.name(output_dir, 'fragmentation_summary.csv'), index=False)
+        print("Summary saved to CSV.")
 
-if not summary_df.empty:
-    summary_df.to_csv(os.path.join(output_dir, 'fragmentation_summary.csv'), index=False)
-    print("Summary saved to CSV.")
+        print("\nGenerating descriptive statistics...")
+        print(summary_df.describe())
 
-    print("\nGenerating descriptive statistics...")
-    print(summary_df.describe())
+        print("\nCreating visualizations...")
+        plt.figure(figsize=(12, 6))
+        sns.boxplot(data=summary_df[[col for col in summary_df.columns if col.endswith('_index')]])
+        plt.title('Distribution of Fragmentation Indices')
+        plt.ylabel('Fragmentation Index')
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'fragmentation_indices_distribution.png'))
+        plt.close()
 
-    print("\nCreating visualizations...")
-    plt.figure(figsize=(12, 6))
-    sns.boxplot(data=summary_df[[col for col in summary_df.columns if col.endswith('_index')]])
-    plt.title('Distribution of Fragmentation Indices')
-    plt.ylabel('Fragmentation Index')
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'fragmentation_indices_distribution.png'))
-    plt.close()
+        print("Visualization saved as 'fragmentation_indices_distribution.png' in the output directory.")
+    else:
+        print("No valid results were generated. Please check your data and error messages.")
 
-    print("Visualization saved as 'fragmentation_indices_distribution.png' in the output directory.")
-else:
-    print("No valid results were generated. Please check your data and error messages.")
-
-print("\nScript execution completed.")
+    print("\nScript execution completed.")
