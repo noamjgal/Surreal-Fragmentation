@@ -51,8 +51,8 @@ def create_episodes(df, change_points):
             'start_time': episode['Timestamp'].iloc[0],
             'end_time': episode['Timestamp'].iloc[-1],
             'duration': (episode['Timestamp'].iloc[-1] - episode['Timestamp'].iloc[0]).total_seconds() / 60,
-            'movement_type': stats.mode(episode['movement_type'])[0][0],
-            'indoor_outdoor': stats.mode(episode['indoors'])[0][0],
+            'movement_type': stats.mode(episode['movement_type'], keepdims=False)[0],
+            'indoor_outdoor': stats.mode(episode['indoors'], keepdims=False)[0],
             'digital_use': 'Yes' if (episode['isapp'] == 1).any() else 'No',
             'avg_speed': episode['speed'].mean()
         }
@@ -85,7 +85,7 @@ def parse_time(t):
         return pd.NaT
     try:
         # Parse time and truncate to seconds
-        return pd.to_datetime(t).floor('S').time()
+        return pd.to_datetime(t).floor('s').time()
     except:
         return pd.NaT
 
@@ -123,9 +123,9 @@ def analyze_participant_day(file_path):
         all_indices = {**fragmentation_indices_movement, **fragmentation_indices_io, **fragmentation_indices_digital}
 
         modes = {
-            'movement_mode': stats.mode(participant_df['movement_type'])[0][0],
-            'indoor_outdoor_mode': stats.mode(participant_df['indoors'])[0][0],
-            'digital_use_mode': 'Yes' if stats.mode(participant_df['isapp'])[0][0] == 1 else 'No'
+            'movement_mode': stats.mode(participant_df['movement_type'], keepdims=False)[0],
+            'indoor_outdoor_mode': stats.mode(participant_df['indoors'], keepdims=False)[0],
+            'digital_use_mode': 'Yes' if stats.mode(participant_df['isapp'], keepdims=False)[0] == 1 else 'No'
         }
 
         result = {

@@ -37,7 +37,7 @@ def preprocess_and_split_data(input_path, output_dir):
             return pd.NaT
         try:
             # Parse time and truncate to seconds
-            return pd.to_datetime(t).floor('S').time()
+            return pd.to_datetime(t).floor('s').time()
         except:
             return pd.NaT
 
