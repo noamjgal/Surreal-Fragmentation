@@ -24,16 +24,14 @@ def timer(func):
         return result
     return wrapper
 
-# Convert 'time' to time, handling potential errors
 def parse_time(t):
     if pd.isna(t):
         return pd.NaT
     try:
-        # Parse time and truncate to seconds
         return pd.to_datetime(t).floor('S').time()
     except:
         return pd.NaT
-        
+
 def preprocess_data(df):
     df['time'] = df['time'].apply(parse_time)
     df = df.dropna(subset=['time'])
@@ -41,7 +39,7 @@ def preprocess_data(df):
     df['speed'] = pd.to_numeric(df['speed'], errors='coerce')
     df['movement_type'] = df['speed'].apply(classify_movement)
     df['isapp'] = df['isapp'].astype(int)
-    return df 
+    return df
 
 @timer
 def preprocess_and_split_data(input_path, output_dir):
@@ -53,25 +51,18 @@ def preprocess_and_split_data(input_path, output_dir):
         df = pd.read_excel(input_path, sheet_name='gpsappS_8', usecols=columns_to_read)
     except Exception as e:
         print(f"Error reading Excel file: {str(e)}")
-        return
-    
+        return None
+
     print("Initial data structure:")
     print(df.dtypes)
     print(df.head())
     
-    # Convert 'date' to datetime
     df['date'] = pd.to_datetime(df['date'])
-    
-    
     df['time'] = df['time'].apply(parse_time)
-        
-    # Combine date and time, handling NaT values
     df['Timestamp'] = df.apply(lambda row: 
         pd.Timestamp.combine(row['date'], row['time']) if pd.notna(row['time']) else pd.NaT, 
         axis=1
     )
-    
-    # Drop rows with NaT timestamps
     df = df.dropna(subset=['Timestamp'])
     
     preprocessed_dir = os.path.join(output_dir, 'preprocessed_data')
@@ -84,7 +75,7 @@ def preprocess_and_split_data(input_path, output_dir):
     
     print("Data preprocessing and splitting completed.")
     print(f"Processed data shape: {df.shape}")
-   
+    return df
 
 def classify_movement(speed):
     if pd.isna(speed):
@@ -142,10 +133,9 @@ def calculate_fragmentation_index(episodes_df, column):
     
     return fragmentation_indices
 
-def analyze_participant_day(file_path):
+def analyze_participant_day(participant_df):
     global error_count
     try:
-        participant_df = pd.read_csv(file_path)
         if participant_df.empty:
             return None, None
 
@@ -184,11 +174,10 @@ def analyze_participant_day(file_path):
     except Exception as e:
         error_count += 1
         if error_count <= MAX_ERRORS:
-            print(f"Error processing file {os.path.basename(file_path)}: {str(e)}")
+            print(f"Error processing participant {participant_df['user'].iloc[0]}: {str(e)}")
         if error_count == MAX_ERRORS:
-            print("Maximum number of errors reached. Some files may not be processed.")
+            print("Maximum number of errors reached. Some participants may not be processed.")
         return None, None
-   
 
 def main():
     input_path = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/gpsappS_9.1_excel.xlsx'
@@ -196,10 +185,10 @@ def main():
     episode_dir = os.path.join(output_dir, 'fragment-episodes')
     os.makedirs(episode_dir, exist_ok=True)
 
-    preprocess_and_split_data(input_path, output_dir)
-
-    preprocessed_dir = os.path.join(output_dir, 'preprocessed_data')
-    all_files = [os.path.join(preprocessed_dir, f) for f in os.listdir(preprocessed_dir) if f.endswith('.csv')]
+    df = preprocess_and_split_data(input_path, output_dir)
+    if df is None:
+        print("Preprocessing failed. Exiting.")
+        return
 
     all_results = []
     
@@ -207,7 +196,7 @@ def main():
     print(f"Using {num_workers} workers for parallel processing")
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
-        futures = [executor.submit(analyze_participant_day, file) for file in all_files]
+        futures = [executor.submit(analyze_participant_day, group) for _, group in df.groupby('user')]
         
         for future in concurrent.futures.as_completed(futures):
             try:
@@ -242,7 +231,6 @@ def main():
         print("Visualization saved as 'fragmentation_indices_distribution.png' in the output directory.")
     else:
         print("No valid results were generated. Please check your data and error messages.")
-
 
 if __name__ == "__main__":
     main()
