@@ -66,8 +66,9 @@ def calculate_fragmentation_index(episodes_df, column):
         S = len(category_episodes)
         T = category_episodes['duration'].sum()
         
-        if S > 1:
+        if S > 1 and T > 0:
             index = (1 - sum((category_episodes['duration'] / T) ** 2)) / (1 - (1 / S))
+            index = max(0, min(1, index))  # Ensure index is between 0 and 1
         else:
             index = 0
         
@@ -178,75 +179,61 @@ def main():
             except Exception as e:
                 print(f"Error processing future: {str(e)}")
 
-    print(f"Number of results: {len(all_results)}")
-    print("Sample of first result:")
-    print(all_results[0] if all_results else "No results")
-
     summary_df = pd.DataFrame(all_results)
 
-    print("\nSummary DataFrame info:")
-    print(summary_df.info())
-
-    print("\nSummary DataFrame head:")
-    print(summary_df.head())
-
     if not summary_df.empty:
-        summary_df.to_csv(os.path.join(output_dir, 'fragmentation_summary.csv'), index=False)
-        print("Summary saved to CSV.")
+        # Save detailed CSV for each study day
+        summary_df.to_csv(os.path.join(output_dir, 'fragmentation_daily_summary.csv'), index=False)
+        print("Daily summary saved to CSV.")
 
         print("\nGenerating descriptive statistics...")
         print(summary_df.describe())
 
-        # Check if the expected columns exist
-        expected_columns = ['Stationary_index', 'Mobile_index', 'Stationary_AID', 'Mobile_AID']
-        missing_columns = [col for col in expected_columns if col not in summary_df.columns]
-        
-        if missing_columns:
-            print(f"Warning: The following expected columns are missing: {missing_columns}")
-            print("Available columns:")
-            print(summary_df.columns)
-        else:
-            print("\nSummary of fragmentation indices:")
-            fragmentation_columns = [col for col in summary_df.columns if col.endswith('_index')]
-            print(summary_df[fragmentation_columns].describe())
+        print("\nSummary of fragmentation indices:")
+        fragmentation_columns = [col for col in summary_df.columns if col.endswith('_index')]
+        print(summary_df[fragmentation_columns].describe())
 
-            print("\nSummary of average interepisode durations:")
-            aid_columns = [col for col in summary_df.columns if col.endswith('_AID')]
-            print(summary_df[aid_columns].describe())
+        print("\nSummary of average interepisode durations:")
+        aid_columns = [col for col in summary_df.columns if col.endswith('_AID')]
+        print(summary_df[aid_columns].describe())
 
-            print("\nCreating visualizations...")
-            create_boxplot(summary_df, fragmentation_columns, 'Fragmentation Indices', 'Fragmentation Index', output_dir)
-            create_boxplot(summary_df, aid_columns, 'Average Interepisode Durations', 'Duration (minutes)', output_dir)
+        print("\nCreating visualizations...")
+        plt.figure(figsize=(12, 6))
+        sns.boxplot(data=summary_df[fragmentation_columns])
+        plt.title('Distribution of Fragmentation Indices')
+        plt.ylabel('Fragmentation Index')
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'fragmentation_indices_distribution.png'))
+        plt.close()
 
-            print("\nParticipant summary:")
-            create_participant_summary(summary_df, output_dir)
+        plt.figure(figsize=(12, 6))
+        sns.boxplot(data=summary_df[aid_columns])
+        plt.title('Distribution of Average Interepisode Durations')
+        plt.ylabel('Duration (minutes)')
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'average_interepisode_durations_distribution.png'))
+        plt.close()
+
+        print("Visualizations saved in the output directory.")
+
+        print("\nParticipant summary:")
+        participant_summary = summary_df.groupby('participant_id').agg({
+            'date': 'count',
+            'total_episodes': 'mean',
+            'stationary_episodes': 'mean',
+            'mobile_episodes': 'mean',
+            'Stationary_index': 'mean',
+            'Mobile_index': 'mean',
+            'Stationary_AID': 'mean',
+            'Mobile_AID': 'mean'
+        }).reset_index()
+        participant_summary = participant_summary.rename(columns={'date': 'days_with_data'})
+        print(participant_summary)
+        participant_summary.to_csv(os.path.join(output_dir, 'participant_summary.csv'), index=False)
     else:
         print("No valid results were generated. Please check your data and error messages.")
-
-def create_boxplot(df, columns, title, ylabel, output_dir):
-    plt.figure(figsize=(12, 6))
-    sns.boxplot(data=df[columns])
-    plt.title(f'Distribution of {title}')
-    plt.ylabel(ylabel)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f'{title.lower().replace(" ", "_")}_distribution.png'))
-    plt.close()
-
-def create_participant_summary(df, output_dir):
-    participant_summary = df.groupby('participant_id').agg({
-        'date': 'count',
-        'total_episodes': 'mean',
-        'stationary_episodes': 'mean',
-        'mobile_episodes': 'mean',
-        'Stationary_index': 'mean',
-        'Mobile_index': 'mean',
-        'Stationary_AID': 'mean',
-        'Mobile_AID': 'mean'
-    }).reset_index()
-    participant_summary = participant_summary.rename(columns={'date': 'days_with_data'})
-    print(participant_summary)
-    participant_summary.to_csv(os.path.join(output_dir, 'participant_summary.csv'), index=False)
 
 if __name__ == "__main__":
     main()
