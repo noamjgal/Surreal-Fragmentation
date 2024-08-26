@@ -28,18 +28,11 @@ def parse_time(t):
     if pd.isna(t):
         return pd.NaT
     try:
+        # Parse time and truncate to seconds
         return pd.to_datetime(t).floor('S').time()
     except:
+        print(f"Failed to parse time: {t}")
         return pd.NaT
-
-def preprocess_data(df):
-    df['time'] = df['time'].apply(parse_time)
-    df = df.dropna(subset=['time'])
-    df['Timestamp'] = pd.to_datetime(df['date'].astype(str) + ' ' + df['time'].astype(str))
-    df['speed'] = pd.to_numeric(df['speed'], errors='coerce')
-    df['movement_type'] = df['speed'].apply(classify_movement)
-    df['isapp'] = df['isapp'].astype(int)
-    return df
 
 @timer
 def preprocess_and_split_data(input_path, output_dir):
@@ -56,14 +49,22 @@ def preprocess_and_split_data(input_path, output_dir):
     print("Initial data structure:")
     print(df.dtypes)
     print(df.head())
-    
+    print(f"Initial shape: {df.shape}")
+
     df['date'] = pd.to_datetime(df['date'])
     df['time'] = df['time'].apply(parse_time)
+    
+    # Combine date and time
     df['Timestamp'] = df.apply(lambda row: 
         pd.Timestamp.combine(row['date'], row['time']) if pd.notna(row['time']) else pd.NaT, 
         axis=1
     )
+    
+    # Drop rows with NaT timestamps
+    df_before_drop = df.copy()
     df = df.dropna(subset=['Timestamp'])
+    rows_dropped = len(df_before_drop) - len(df)
+    print(f"Rows dropped due to invalid timestamps: {rows_dropped}")
     
     preprocessed_dir = os.path.join(output_dir, 'preprocessed_data')
     os.makedirs(preprocessed_dir, exist_ok=True)
@@ -74,7 +75,8 @@ def preprocess_and_split_data(input_path, output_dir):
         group.to_csv(filepath, index=False)
     
     print("Data preprocessing and splitting completed.")
-    print(f"Processed data shape: {df.shape}")
+    print(f"Final processed data shape: {df.shape}")
+    
     return df
 
 def classify_movement(speed):
@@ -133,6 +135,12 @@ def calculate_fragmentation_index(episodes_df, column):
     
     return fragmentation_indices
 
+def preprocess_data(df):
+    df['speed'] = pd.to_numeric(df['speed'], errors='coerce')
+    df['movement_type'] = df['speed'].apply(classify_movement)
+    df['isapp'] = df['isapp'].astype(int)
+    return df
+
 def analyze_participant_day(participant_df):
     global error_count
     try:
@@ -186,8 +194,8 @@ def main():
     os.makedirs(episode_dir, exist_ok=True)
 
     df = preprocess_and_split_data(input_path, output_dir)
-    if df is None:
-        print("Preprocessing failed. Exiting.")
+    if df is None or df.empty:
+        print("Preprocessing failed or resulted in empty dataset. Exiting.")
         return
 
     all_results = []
