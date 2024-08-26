@@ -3,72 +3,96 @@ import numpy as np
 import os
 import matplotlib.pyplot as plt
 import seaborn as sns
-from ruptures import Pelt
 from scipy import stats
+from scipy.signal import medfilt
 import time
 import concurrent.futures
 import multiprocessing
+from tqdm import tqdm
+from functools import wraps
 
 MAX_ERRORS = 5
 error_count = 0
 
-def timer(func):
-    def wrapper(*args, **kwargs):
-        start_time = time.time()
+def timeit(func):
+    @wraps(func)
+    def timeit_wrapper(*args, **kwargs):
+        start_time = time.perf_counter()
         result = func(*args, **kwargs)
-        end_time = time.time()
-        print(f"{func.__name__} took {end_time - start_time:.2f} seconds to run.")
+        end_time = time.perf_counter()
+        total_time = end_time - start_time
+        print(f'Function {func.__name__} took {total_time:.4f} seconds')
         return result
-    return wrapper
+    return timeit_wrapper
 
-def classify_movement(speed):
+def smooth_data(data, window_size=5):
+    return medfilt(data, kernel_size=window_size)
+
+def classify_movement(speed, threshold=1.5):
     if pd.isna(speed):
         return 'Unknown'
-    elif speed < 1.5:
+    elif speed < threshold:
         return 'Stationary'
     else:
         return 'Mobile'
 
-def detect_changepoints(data, column, min_size=5, jump=5, pen=1):
-    model = Pelt(model="rbf", jump=jump, min_size=min_size).fit(data[column].values.reshape(-1, 1))
-    change_points = model.predict(pen=pen)
-    return change_points
-
-def create_episodes(df, change_points):
+@timeit
+def detect_episodes(df, movement_min_duration=5, digital_min_duration=1):
+    df['smoothed_speed'] = smooth_data(df['speed'].values)
+    df['movement_type'] = df['smoothed_speed'].apply(classify_movement)
+    
     episodes = []
-    for i in range(len(change_points) - 1):
-        start_idx = change_points[i]
-        end_idx = change_points[i + 1]
-        
-        episode = df.iloc[start_idx:end_idx]
-        
-        episode_summary = {
-            'start_time': episode['Timestamp'].iloc[0],
-            'end_time': episode['Timestamp'].iloc[-1],
-            'duration': (episode['Timestamp'].iloc[-1] - episode['Timestamp'].iloc[0]).total_seconds() / 60,
-            'movement_type': stats.mode(episode['movement_type'], keepdims=False)[0],
-            'indoor_outdoor': stats.mode(episode['indoors'], keepdims=False)[0],
-            'digital_use': 'Yes' if (episode['isapp'] == 1).any() else 'No',
-            'avg_speed': episode['speed'].mean()
-        }
-        
-        episodes.append(episode_summary)
+    current_episode = {
+        'start_time': df['Timestamp'].iloc[0],
+        'movement_type': df['movement_type'].iloc[0],
+        'indoor_outdoor': df['indoors'].iloc[0],
+        'digital_use': 'Yes' if df['isapp'].iloc[0] == 1 else 'No'
+    }
+    
+    for i in range(1, len(df)):
+        if (df['movement_type'].iloc[i] != current_episode['movement_type'] or
+            df['indoors'].iloc[i] != current_episode['indoor_outdoor'] or
+            (df['isapp'].iloc[i] == 1) != (current_episode['digital_use'] == 'Yes')):
+            
+            current_episode['end_time'] = df['Timestamp'].iloc[i-1]
+            current_episode['duration'] = (current_episode['end_time'] - current_episode['start_time']).total_seconds() / 60
+            current_episode['avg_speed'] = df.loc[df['Timestamp'].between(current_episode['start_time'], current_episode['end_time']), 'speed'].mean()
+            
+            if ((current_episode['movement_type'] != 'Unknown' and current_episode['duration'] >= movement_min_duration) or
+                (current_episode['digital_use'] == 'Yes' and current_episode['duration'] >= digital_min_duration)):
+                episodes.append(current_episode)
+            
+            current_episode = {
+                'start_time': df['Timestamp'].iloc[i],
+                'movement_type': df['movement_type'].iloc[i],
+                'indoor_outdoor': df['indoors'].iloc[i],
+                'digital_use': 'Yes' if df['isapp'].iloc[i] == 1 else 'No'
+            }
+    
+    # Add the last episode
+    current_episode['end_time'] = df['Timestamp'].iloc[-1]
+    current_episode['duration'] = (current_episode['end_time'] - current_episode['start_time']).total_seconds() / 60
+    current_episode['avg_speed'] = df.loc[df['Timestamp'].between(current_episode['start_time'], current_episode['end_time']), 'speed'].mean()
+    
+    if ((current_episode['movement_type'] != 'Unknown' and current_episode['duration'] >= movement_min_duration) or
+        (current_episode['digital_use'] == 'Yes' and current_episode['duration'] >= digital_min_duration)):
+        episodes.append(current_episode)
     
     return pd.DataFrame(episodes)
 
+@timeit
 def calculate_fragmentation_index(episodes_df, column):
-    total_duration = episodes_df['duration'].sum()
-    episode_counts = episodes_df[column].value_counts()
     fragmentation_indices = {}
     
-    for category in episode_counts.index:
+    for category in episodes_df[column].unique():
         category_episodes = episodes_df[episodes_df[column] == category]
         S = len(category_episodes)
         T = category_episodes['duration'].sum()
         
         if S > 1 and T > 0:
-            index = (1 - sum((category_episodes['duration'] / T) ** 2)) / (1 - (1 / S))
-            index = max(0, min(1, index))  # Ensure index is between 0 and 1
+            normalized_durations = category_episodes['duration'] / T
+            sum_squared = sum(normalized_durations ** 2)
+            index = (1 - sum_squared) / (1 - (1 / S))
         else:
             index = 0
         
@@ -94,20 +118,39 @@ def parse_time(t):
     if pd.isna(t):
         return pd.NaT
     try:
-        return pd.to_datetime(t).floor('s').time()
+        return pd.to_datetime(t).floor('s')
     except:
         return pd.NaT
 
 def preprocess_data(df):
-    df['time'] = df['time'].apply(parse_time)
-    df = df.dropna(subset=['time'])
+    df = df.copy()
     df['Timestamp'] = pd.to_datetime(df['date'].astype(str) + ' ' + df['time'].astype(str))
+    df['Timestamp'] = df['Timestamp'].apply(parse_time)
+    df = df.dropna(subset=['Timestamp'])
     df['speed'] = pd.to_numeric(df['speed'], errors='coerce')
-    df['movement_type'] = df['speed'].apply(classify_movement)
     df['isapp'] = df['isapp'].astype(int)
-    return df
+    df['indoors'] = df['indoors'].astype(str)
+    return df.sort_values('Timestamp')
 
-def analyze_participant_day(file_path):
+def visualize_data(df, episodes_df, output_path):
+    plt.figure(figsize=(15, 10))
+    plt.plot(df['Timestamp'], df['speed'], label='Original Speed', alpha=0.5)
+    plt.plot(df['Timestamp'], df['smoothed_speed'], label='Smoothed Speed')
+    plt.axhline(y=1.5, color='r', linestyle='--', label='Speed Threshold')
+    
+    for _, episode in episodes_df.iterrows():
+        color = 'green' if episode['movement_type'] == 'Stationary' else 'blue'
+        plt.axvspan(episode['start_time'], episode['end_time'], alpha=0.2, color=color)
+    
+    plt.title('Speed Over Time with Detected Episodes')
+    plt.xlabel('Time')
+    plt.ylabel('Speed')
+    plt.legend()
+    plt.savefig(output_path)
+    plt.close()
+
+@timeit
+def analyze_participant_day(file_path, output_dir):
     global error_count
     try:
         participant_df = pd.read_csv(file_path)
@@ -119,11 +162,7 @@ def analyze_participant_day(file_path):
         if 'speed' not in participant_df.columns or participant_df.empty:
             return None
 
-        change_points = detect_changepoints(participant_df, 'speed')
-        if not change_points:
-            return None
-
-        episodes_df = create_episodes(participant_df, change_points)
+        episodes_df = detect_episodes(participant_df)
 
         fragmentation_indices_movement = calculate_fragmentation_index(episodes_df, 'movement_type')
         fragmentation_indices_io = calculate_fragmentation_index(episodes_df, 'indoor_outdoor')
@@ -137,14 +176,21 @@ def analyze_participant_day(file_path):
             'total_episodes': len(episodes_df),
             'stationary_episodes': len(episodes_df[episodes_df['movement_type'] == 'Stationary']),
             'mobile_episodes': len(episodes_df[episodes_df['movement_type'] == 'Mobile']),
+            'unknown_episodes': len(episodes_df[episodes_df['movement_type'] == 'Unknown']),
             'total_duration': episodes_df['duration'].sum(),
             'stationary_duration': episodes_df[episodes_df['movement_type'] == 'Stationary']['duration'].sum(),
             'mobile_duration': episodes_df[episodes_df['movement_type'] == 'Mobile']['duration'].sum(),
+            'unknown_duration': episodes_df[episodes_df['movement_type'] == 'Unknown']['duration'].sum(),
             **fragmentation_indices_movement,
             **fragmentation_indices_io,
             **fragmentation_indices_digital,
             **average_interepisode_durations
         }
+
+        # Visualize data for the first 5 participants
+        if result['participant_id'] <= 5:
+            vis_output_path = os.path.join(output_dir, f"participant_{result['participant_id']}_{result['date']}_speed_visualization.png")
+            visualize_data(participant_df, episodes_df, vis_output_path)
 
         return result
 
@@ -156,12 +202,18 @@ def analyze_participant_day(file_path):
             print("Maximum number of errors reached. Some files may not be processed.")
         return None
 
-@timer
-def main():
+@timeit
+def main(test_mode=True, num_test_files=10):
     input_dir = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/preprocessed_data'
     output_dir = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/'
 
     all_files = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if f.endswith('.csv')]
+
+    if test_mode:
+        print(f"Running in test mode with {num_test_files} files")
+        all_files = all_files[:num_test_files]
+    else:
+        print(f"Running full analysis on {len(all_files)} files")
 
     all_results = []
     
@@ -169,9 +221,9 @@ def main():
     print(f"Using {num_workers} workers for parallel processing")
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
-        futures = [executor.submit(analyze_participant_day, file) for file in all_files]
+        futures = [executor.submit(analyze_participant_day, file, output_dir) for file in all_files]
         
-        for future in concurrent.futures.as_completed(futures):
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(all_files), desc="Processing files"):
             try:
                 result = future.result()
                 if result is not None:
@@ -179,10 +231,11 @@ def main():
             except Exception as e:
                 print(f"Error processing future: {str(e)}")
 
+    print(f"Processed {len(all_results)} files successfully.")
+
     summary_df = pd.DataFrame(all_results)
 
     if not summary_df.empty:
-        # Save detailed CSV for each study day
         summary_df.to_csv(os.path.join(output_dir, 'fragmentation_daily_summary.csv'), index=False)
         print("Daily summary saved to CSV.")
 
@@ -218,22 +271,27 @@ def main():
 
         print("Visualizations saved in the output directory.")
 
-        print("\nParticipant summary:")
-        participant_summary = summary_df.groupby('participant_id').agg({
+        print("\nGenerating participant summary...")
+        existing_columns = summary_df.columns
+        fragmentation_columns = [col for col in existing_columns if col.endswith('_index')]
+        aid_columns = [col for col in existing_columns if col.endswith('_AID')]
+        episode_columns = [col for col in existing_columns if col.endswith('_episodes')]
+        
+        agg_dict = {
             'date': 'count',
             'total_episodes': 'mean',
-            'stationary_episodes': 'mean',
-            'mobile_episodes': 'mean',
-            'Stationary_index': 'mean',
-            'Mobile_index': 'mean',
-            'Stationary_AID': 'mean',
-            'Mobile_AID': 'mean'
-        }).reset_index()
+            **{col: 'mean' for col in episode_columns},
+            **{col: 'mean' for col in fragmentation_columns},
+            **{col: 'mean' for col in aid_columns}
+        }
+        
+        participant_summary = summary_df.groupby('participant_id').agg(agg_dict).reset_index()
         participant_summary = participant_summary.rename(columns={'date': 'days_with_data'})
         print(participant_summary)
         participant_summary.to_csv(os.path.join(output_dir, 'participant_summary.csv'), index=False)
+        print("Participant summary saved to CSV.")
     else:
         print("No valid results were generated. Please check your data and error messages.")
 
 if __name__ == "__main__":
-    main()
+    main(test_mode=True, num_test_files=10)
