@@ -28,11 +28,19 @@ def parse_time(t):
     if pd.isna(t):
         return pd.NaT
     try:
-        # Parse time and truncate to seconds
-        return pd.to_datetime(t).floor('S').time()
+        # First, try to parse as a string
+        return pd.to_datetime(t).time()
     except:
-        print(f"Failed to parse time: {t}")
-        return pd.NaT
+        try:
+            # If that fails, check if it's already a time object
+            if isinstance(t, dt_time):
+                return t
+            # If it's neither, print detailed error info
+            print(f"Failed to parse time: {t}, Type: {type(t)}")
+            return pd.NaT
+        except:
+            print(f"Unexpected error parsing time: {t}, Type: {type(t)}")
+            return pd.NaT
 
 @timer
 def preprocess_and_split_data(input_path, output_dir):
@@ -54,11 +62,19 @@ def preprocess_and_split_data(input_path, output_dir):
     df['date'] = pd.to_datetime(df['date'])
     df['time'] = df['time'].apply(parse_time)
     
+    # Print sample of parsed times
+    print("Sample of parsed times:")
+    print(df[['time']].head(10))
+    
     # Combine date and time
     df['Timestamp'] = df.apply(lambda row: 
         pd.Timestamp.combine(row['date'], row['time']) if pd.notna(row['time']) else pd.NaT, 
         axis=1
     )
+    
+    # Print sample of timestamps
+    print("Sample of timestamps:")
+    print(df[['date', 'time', 'Timestamp']].head(10))
     
     # Drop rows with NaT timestamps
     df_before_drop = df.copy()
@@ -78,6 +94,7 @@ def preprocess_and_split_data(input_path, output_dir):
     print(f"Final processed data shape: {df.shape}")
     
     return df
+
 
 def classify_movement(speed):
     if pd.isna(speed):

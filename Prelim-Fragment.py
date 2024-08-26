@@ -8,9 +8,6 @@ from scipy import stats
 import time
 import concurrent.futures
 import multiprocessing
-import traceback
-import sys
-from datetime import datetime, time as dt_time
 
 MAX_ERRORS = 5
 error_count = 0
@@ -29,10 +26,8 @@ def classify_movement(speed):
         return 'Unknown'
     elif speed < 1.5:
         return 'Stationary'
-    elif speed < 7:
-        return 'Active Transport'
     else:
-        return 'Mechanized Transport'
+        return 'Mobile'
 
 def detect_changepoints(data, column, min_size=5, jump=5, pen=1):
     model = Pelt(model="rbf", jump=jump, min_size=min_size).fit(data[column].values.reshape(-1, 1))
@@ -80,11 +75,24 @@ def calculate_fragmentation_index(episodes_df, column):
     
     return fragmentation_indices
 
+def calculate_average_interepisode_duration(episodes_df, column):
+    episodes_df = episodes_df.sort_values('start_time')
+    interepisode_durations = {}
+    
+    for category in episodes_df[column].unique():
+        category_episodes = episodes_df[episodes_df[column] == category]
+        if len(category_episodes) > 1:
+            durations = category_episodes['start_time'].diff().dropna().dt.total_seconds() / 60
+            interepisode_durations[f"{category}_AID"] = durations.mean()
+        else:
+            interepisode_durations[f"{category}_AID"] = np.nan
+    
+    return interepisode_durations
+
 def parse_time(t):
     if pd.isna(t):
         return pd.NaT
     try:
-        # Parse time and truncate to seconds
         return pd.to_datetime(t).floor('s').time()
     except:
         return pd.NaT
@@ -103,16 +111,16 @@ def analyze_participant_day(file_path):
     try:
         participant_df = pd.read_csv(file_path)
         if participant_df.empty:
-            return None, None
+            return None
 
         participant_df = preprocess_data(participant_df)
         
         if 'speed' not in participant_df.columns or participant_df.empty:
-            return None, None
+            return None
 
         change_points = detect_changepoints(participant_df, 'speed')
         if not change_points:
-            return None, None
+            return None
 
         episodes_df = create_episodes(participant_df, change_points)
 
@@ -120,22 +128,24 @@ def analyze_participant_day(file_path):
         fragmentation_indices_io = calculate_fragmentation_index(episodes_df, 'indoor_outdoor')
         fragmentation_indices_digital = calculate_fragmentation_index(episodes_df, 'digital_use')
 
-        all_indices = {**fragmentation_indices_movement, **fragmentation_indices_io, **fragmentation_indices_digital}
-
-        modes = {
-            'movement_mode': stats.mode(participant_df['movement_type'], keepdims=False)[0],
-            'indoor_outdoor_mode': stats.mode(participant_df['indoors'], keepdims=False)[0],
-            'digital_use_mode': 'Yes' if stats.mode(participant_df['isapp'], keepdims=False)[0] == 1 else 'No'
-        }
+        average_interepisode_durations = calculate_average_interepisode_duration(episodes_df, 'movement_type')
 
         result = {
             'participant_id': participant_df['user'].iloc[0],
             'date': participant_df['date'].iloc[0],
-            **all_indices,
-            **modes
+            'total_episodes': len(episodes_df),
+            'stationary_episodes': len(episodes_df[episodes_df['movement_type'] == 'Stationary']),
+            'mobile_episodes': len(episodes_df[episodes_df['movement_type'] == 'Mobile']),
+            'total_duration': episodes_df['duration'].sum(),
+            'stationary_duration': episodes_df[episodes_df['movement_type'] == 'Stationary']['duration'].sum(),
+            'mobile_duration': episodes_df[episodes_df['movement_type'] == 'Mobile']['duration'].sum(),
+            **fragmentation_indices_movement,
+            **fragmentation_indices_io,
+            **fragmentation_indices_digital,
+            **average_interepisode_durations
         }
 
-        return result, episodes_df
+        return result
 
     except Exception as e:
         error_count += 1
@@ -143,14 +153,12 @@ def analyze_participant_day(file_path):
             print(f"Error processing file {os.path.basename(file_path)}: {str(e)}")
         if error_count == MAX_ERRORS:
             print("Maximum number of errors reached. Some files may not be processed.")
-        return None, None
+        return None
 
 @timer
 def main():
     input_dir = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/preprocessed_data'
     output_dir = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/'
-    episode_dir = os.path.join(output_dir, 'fragment-episodes')
-    os.makedirs(episode_dir, exist_ok=True)
 
     all_files = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if f.endswith('.csv')]
 
@@ -166,14 +174,21 @@ def main():
             try:
                 result = future.result()
                 if result is not None:
-                    result, episodes_df = result
-                    if result is not None and episodes_df is not None and not episodes_df.empty:
-                        all_results.append(result)
-                        episodes_df.to_csv(os.path.join(episode_dir, f"participant_{result['participant_id']}_{result['date']}_episodes.csv"), index=False)
+                    all_results.append(result)
             except Exception as e:
                 print(f"Error processing future: {str(e)}")
 
+    print(f"Number of results: {len(all_results)}")
+    print("Sample of first result:")
+    print(all_results[0] if all_results else "No results")
+
     summary_df = pd.DataFrame(all_results)
+
+    print("\nSummary DataFrame info:")
+    print(summary_df.info())
+
+    print("\nSummary DataFrame head:")
+    print(summary_df.head())
 
     if not summary_df.empty:
         summary_df.to_csv(os.path.join(output_dir, 'fragmentation_summary.csv'), index=False)
@@ -182,19 +197,56 @@ def main():
         print("\nGenerating descriptive statistics...")
         print(summary_df.describe())
 
-        print("\nCreating visualizations...")
-        plt.figure(figsize=(12, 6))
-        sns.boxplot(data=summary_df[[col for col in summary_df.columns if col.endswith('_index')]])
-        plt.title('Distribution of Fragmentation Indices')
-        plt.ylabel('Fragmentation Index')
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'fragmentation_indices_distribution.png'))
-        plt.close()
+        # Check if the expected columns exist
+        expected_columns = ['Stationary_index', 'Mobile_index', 'Stationary_AID', 'Mobile_AID']
+        missing_columns = [col for col in expected_columns if col not in summary_df.columns]
+        
+        if missing_columns:
+            print(f"Warning: The following expected columns are missing: {missing_columns}")
+            print("Available columns:")
+            print(summary_df.columns)
+        else:
+            print("\nSummary of fragmentation indices:")
+            fragmentation_columns = [col for col in summary_df.columns if col.endswith('_index')]
+            print(summary_df[fragmentation_columns].describe())
 
-        print("Visualization saved as 'fragmentation_indices_distribution.png' in the output directory.")
+            print("\nSummary of average interepisode durations:")
+            aid_columns = [col for col in summary_df.columns if col.endswith('_AID')]
+            print(summary_df[aid_columns].describe())
+
+            print("\nCreating visualizations...")
+            create_boxplot(summary_df, fragmentation_columns, 'Fragmentation Indices', 'Fragmentation Index', output_dir)
+            create_boxplot(summary_df, aid_columns, 'Average Interepisode Durations', 'Duration (minutes)', output_dir)
+
+            print("\nParticipant summary:")
+            create_participant_summary(summary_df, output_dir)
     else:
         print("No valid results were generated. Please check your data and error messages.")
+
+def create_boxplot(df, columns, title, ylabel, output_dir):
+    plt.figure(figsize=(12, 6))
+    sns.boxplot(data=df[columns])
+    plt.title(f'Distribution of {title}')
+    plt.ylabel(ylabel)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f'{title.lower().replace(" ", "_")}_distribution.png'))
+    plt.close()
+
+def create_participant_summary(df, output_dir):
+    participant_summary = df.groupby('participant_id').agg({
+        'date': 'count',
+        'total_episodes': 'mean',
+        'stationary_episodes': 'mean',
+        'mobile_episodes': 'mean',
+        'Stationary_index': 'mean',
+        'Mobile_index': 'mean',
+        'Stationary_AID': 'mean',
+        'Mobile_AID': 'mean'
+    }).reset_index()
+    participant_summary = participant_summary.rename(columns={'date': 'days_with_data'})
+    print(participant_summary)
+    participant_summary.to_csv(os.path.join(output_dir, 'participant_summary.csv'), index=False)
 
 if __name__ == "__main__":
     main()
