@@ -31,21 +31,20 @@ def preprocess_and_split_data(input_path, output_dir):
     # Convert 'date' to datetime
     df['date'] = pd.to_datetime(df['date'])
     
-    # Convert 'time' to time, handling potential errors
+    # Convert 'time' to time, handling potential errors and removing milliseconds
     def parse_time(t):
         if pd.isna(t):
             return pd.NaT
         try:
-            # Parse time and truncate to seconds
-            return pd.to_datetime(t).floor('s').time()
+            # Parse time, truncate to seconds, and convert to string format without milliseconds
+            return pd.to_datetime(t).floor('s').strftime('%H:%M:%S')
         except:
             return pd.NaT
-
     df['time'] = df['time'].apply(parse_time)
     
     # Combine date and time, handling NaT values
     df['Timestamp'] = df.apply(lambda row: 
-        pd.Timestamp.combine(row['date'], row['time']) if pd.notna(row['time']) else pd.NaT, 
+        pd.to_datetime(f"{row['date'].date()} {row['time']}") if pd.notna(row['time']) else pd.NaT, 
         axis=1
     )
     
