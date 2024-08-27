@@ -260,4 +260,4 @@ def main(test_mode=True, num_test_files=10):
         print("No valid results were generated. Please check your data and error messages.")
 
 if __name__ == "__main__":
-    main(test_mode=True, num_test_files=10)  # Process 10 files for testing
+    main(test_mode=False, num_test_files=10)  # Process 10 files for testing
