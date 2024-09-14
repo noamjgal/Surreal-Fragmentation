@@ -16,33 +16,31 @@ def timer(func):
 @timer
 def preprocess_and_split_data(input_path, output_dir):
     print("Loading and preprocessing data...")
-    
-    columns_to_read = ['user', 'date', 'time', 'speed', 'indoors', 'isapp']
-    
+    columns_to_read = ['user', 'date', 'time', 'speed', 'indoors', 'isapp', 'type', 'Travel_mode', 'long', 'lat', 'school_n', 'sex']
     try:
         df = pd.read_excel(input_path, sheet_name='gpsappS_8', usecols=columns_to_read)
     except Exception as e:
         print(f"Error reading Excel file: {str(e)}")
         return
-    
+
     print("Initial data structure:")
     print(df.dtypes)
     print(df.head())
     print(f"Initial shape: {df.shape}")
-    
+
     # Check data types and formats
     print("\nChecking data types and formats:")
     for column in df.columns:
         print(f"{column}:")
-        print(f"  Data type: {df[column].dtype}")
-        print(f"  Sample values: {df[column].head().tolist()}")
+        print(f" Data type: {df[column].dtype}")
+        print(f" Sample values: {df[column].head().tolist()}")
         if column in ['date', 'time']:
-            print(f"  Unique formats: {df[column].astype(str).unique()[:5]}")  # Show first 5 unique formats
-    
+            print(f" Unique formats: {df[column].astype(str).unique()[:5]}")  # Show first 5 unique formats
+
     # Convert 'date' to datetime if it's not already
     if not pd.api.types.is_datetime64_any_dtype(df['date']):
         df['date'] = pd.to_datetime(df['date'])
-    
+
     # Function to combine date and time
     def combine_date_time(row):
         if pd.isna(row['time']):
@@ -60,40 +58,53 @@ def preprocess_and_split_data(input_path, output_dir):
         except Exception as e:
             print(f"Error combining date {row['date']} and time {row['time']}: {str(e)}")
             return pd.NaT
-    
+
     # Combine date and time to create Timestamp
     df['Timestamp'] = df.apply(combine_date_time, axis=1)
     print(f"\nShape after creating Timestamp: {df.shape}")
     print("Sample of Timestamps:")
     print(df['Timestamp'].head())
-    
+
     # Drop rows with NaT timestamps
     df_cleaned = df.dropna(subset=['Timestamp'])
     print(f"Shape after dropping NaT Timestamps: {df_cleaned.shape}")
-    
+
     if df_cleaned.empty:
         print("Warning: All rows were dropped. Check the Timestamp creation process.")
         return
-    
+
     preprocessed_dir = os.path.join(output_dir, 'preprocessed_data')
     os.makedirs(preprocessed_dir, exist_ok=True)
-    
+
+    # Create participant info CSV
+    participant_info = df_cleaned[['user', 'school_n', 'sex']].drop_duplicates()
+    participant_info_path = os.path.join(output_dir, 'participant_info.csv')
+    participant_info.to_csv(participant_info_path, index=False)
+    print(f"\nParticipant info saved to {participant_info_path}")
+    print("Sample of participant info:")
+    print(participant_info.head())
+
     for (date, user), group in df_cleaned.groupby([df_cleaned['date'].dt.date, 'user']):
         filename = f"{date}_{user}.csv"
         filepath = os.path.join(preprocessed_dir, filename)
-        group.to_csv(filepath, index=False)
+        
+        # Sort by Timestamp
+        group_sorted = group.sort_values('Timestamp')
+        
+        # Select and reorder columns
+        columns_to_save = ['user', 'Timestamp', 'speed', 'indoors', 'isapp', 'type', 'Travel_mode', 'long', 'lat']
+        group_sorted[columns_to_save].to_csv(filepath, index=False)
         
         # Print head of each output file
         print(f"\nHead of {filename}:")
-        print(group.head())
-    
+        print(group_sorted[columns_to_save].head())
+
     print("\nData preprocessing and splitting completed.")
     print(f"Final processed data shape: {df_cleaned.shape}")
 
 def main():
-    input_path = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/gpsappS_9.1_excel.xlsx'
+    input_path = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/Survey/gpsappS_9.1_excel.xlsx'
     output_dir = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/'
-    
     preprocess_and_split_data(input_path, output_dir)
 
 if __name__ == "__main__":
