@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 from scipy import stats
 import os
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 # Define input and output directories
 input_dir = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/fragmentation'
@@ -11,120 +13,116 @@ output_dir = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/analysis_
 # Create the output directory if it doesn't exist
 os.makedirs(output_dir, exist_ok=True)
 
-# Load the fragmentation results
-mobility_frag = pd.read_csv(os.path.join(input_dir, 'mobility_episodes_fragmentation_summary.csv'))
-digital_frag = pd.read_csv(os.path.join(input_dir, 'digital_episodes_fragmentation_summary.csv'))
+def load_and_preprocess_data():
+    # Load the fragmentation results
+    mobility_frag = pd.read_csv(os.path.join(input_dir, 'mobility_episodes_fragmentation_summary.csv'))
+    digital_frag = pd.read_csv(os.path.join(input_dir, 'digital_episodes_fragmentation_summary.csv'))
 
-# Load the survey responses
-survey_responses = pd.read_excel(survey_file)
+    # Load the survey responses
+    survey_responses = pd.read_excel(survey_file)
 
-# Print information about input data
-print("Mobility Fragmentation Data:")
-print(mobility_frag.info())
-print("\nSample of mobility_frag['date']:")
-print(mobility_frag['date'].head())
+    # Ensure date columns are in datetime format
+    mobility_frag['date'] = pd.to_datetime(mobility_frag['date']).dt.date
+    digital_frag['date'] = pd.to_datetime(digital_frag['date']).dt.date
+    survey_responses['date'] = pd.to_datetime(survey_responses['StartDate']).dt.date
 
-print("\nDigital Fragmentation Data:")
-print(digital_frag.info())
-print("\nSample of digital_frag['date']:")
-print(digital_frag['date'].head())
+    # Ensure participant_id is treated as string in all dataframes
+    mobility_frag['participant_id'] = mobility_frag['participant_id'].astype(str)
+    digital_frag['participant_id'] = digital_frag['participant_id'].astype(str)
+    survey_responses['Participant_ID'] = survey_responses['Participant_ID'].astype(str)
 
-print("\nSurvey Responses Data:")
-print(survey_responses.info())
-print("\nSample of survey_responses['StartDate']:")
-print(survey_responses['StartDate'].head())
+    # Merge the datasets
+    merged_data = pd.merge(mobility_frag, digital_frag, on=['participant_id', 'date'], suffixes=('_mobility', '_digital'))
+    merged_data = pd.merge(merged_data, survey_responses, left_on=['participant_id', 'date'], right_on=['Participant_ID', 'date'], how='inner')
 
-# Data preprocessing
-def parse_frag_date(date_series):
-    # Assuming the date is just the day of the month
-    return date_series
+    return merged_data
 
-def parse_survey_date(date_series):
-    return pd.to_datetime(date_series).dt.day
+def calculate_stai6_score(df):
+    # STAI-6 items
+    stai6_items = ['TENSE', 'RELAXATION', 'WORRY', 'PEACE', 'IRRITATION', 'SATISFACTION']
+    
+    # Reverse score the positive items
+    for item in ['RELAXATION', 'PEACE', 'SATISFACTION']:
+        df[f'{item}_rev'] = 5 - df[item]
+    
+    # Calculate STAI-6 score
+    df['STAI6_score'] = df[['TENSE', 'WORRY', 'IRRITATION', 'RELAXATION_rev', 'PEACE_rev', 'SATISFACTION_rev']].mean(axis=1) * 20/6
+    
+    return df
 
-mobility_frag['date'] = parse_frag_date(mobility_frag['date'])
-digital_frag['date'] = parse_frag_date(digital_frag['date'])
-survey_responses['date'] = parse_survey_date(survey_responses['StartDate'])
-
-# Ensure participant_id is treated as string in all dataframes
-mobility_frag['participant_id'] = mobility_frag['participant_id'].astype(str)
-digital_frag['participant_id'] = digital_frag['participant_id'].astype(str)
-survey_responses['Participant_ID'] = survey_responses['Participant_ID'].astype(str)
-
-# Merge the datasets
-merged_data = pd.merge(mobility_frag, digital_frag, on=['participant_id', 'date'], suffixes=('_mobility', '_digital'))
-merged_data = pd.merge(merged_data, survey_responses, left_on=['participant_id', 'date'], right_on=['Participant_ID', 'date'], how='inner')
-
-print("\nMerged Data:")
-print(merged_data.info())
-print("\nSample of merged data:")
-print(merged_data.head())
-
-# Ensure emotional scores are numeric
-emotion_columns = ['PEACE', 'TENSE', 'IRRITATION', 'RELAXATION', 'SATISFACTION', 'WORRY', 'HAPPY']
-for col in emotion_columns:
-    merged_data[col] = pd.to_numeric(merged_data[col], errors='coerce')
-
-# Define fragmentation indices
-frag_columns = [
-    'Moving_fragmentation_index',
-    'Moving_AID_mean',
-    'Digital_fragmentation_index',
-    'Digital_AID_mean'
-]
-
-# Function to perform t-test and calculate effect size
-def perform_ttest(high_group, low_group, emotion):
-    t_stat, p_value = stats.ttest_ind(high_group[emotion].dropna(), low_group[emotion].dropna())
-    effect_size = (high_group[emotion].mean() - low_group[emotion].mean()) / np.sqrt((high_group[emotion].std()**2 + low_group[emotion].std()**2) / 2)
+def perform_ttest(high_group, low_group, metric):
+    t_stat, p_value = stats.ttest_ind(high_group[metric].dropna(), low_group[metric].dropna())
+    effect_size = (high_group[metric].mean() - low_group[metric].mean()) / np.sqrt((high_group[metric].std()**2 + low_group[metric].std()**2) / 2)
     return t_stat, p_value, effect_size
 
-# Perform t-tests for each fragmentation index
-results = []
-for frag_index in frag_columns:
-    print(f"\nAnalyzing {frag_index}:")
-    median = merged_data[frag_index].median()
-    high_frag = merged_data[merged_data[frag_index] > median]
-    low_frag = merged_data[merged_data[frag_index] <= median]
-    
-    print(f"  Median: {median}")
-    print(f"  High group size: {len(high_frag)}")
-    print(f"  Low group size: {len(low_frag)}")
-    
-    for emotion in emotion_columns:
-        t_stat, p_value, effect_size = perform_ttest(high_frag, low_frag, emotion)
-        results.append({
-            'Fragmentation Index': frag_index,
-            'Emotion': emotion,
-            't-statistic': t_stat,
-            'p-value': p_value,
-            'Effect Size': effect_size,
-            'High Group Mean': high_frag[emotion].mean(),
-            'Low Group Mean': low_frag[emotion].mean(),
-            'Significant': 'Yes' if p_value < 0.05 else 'No'
-        })
-        print(f"  {emotion}: p-value = {p_value:.4f}, effect size = {effect_size:.4f}, significant: {'Yes' if p_value < 0.05 else 'No'}")
+def analyze_fragmentation(merged_data):
+    merged_data = calculate_stai6_score(merged_data)
 
-# Convert results to DataFrame and sort by p-value
-results_df = pd.DataFrame(results)
-results_df = results_df.sort_values('p-value')
+    # Define fragmentation indices
+    frag_columns = [
+        'Moving_fragmentation_index',
+        'Moving_AID_mean',
+        'Digital_fragmentation_index',
+        'Digital_AID_mean'
+    ]
 
-# Save full results to CSV
-full_results_path = os.path.join(output_dir, 'full_significance_results.csv')
-results_df.to_csv(full_results_path, index=False)
-print(f"\nFull significance results saved as '{full_results_path}'")
+    # Define metrics to analyze
+    metrics = ['TENSE', 'RELAXATION', 'WORRY', 'PEACE', 'IRRITATION', 'SATISFACTION', 'STAI6_score', 'HAPPY']
 
-# Print all results sorted by p-value
-print("\nAll Results Sorted by p-value:")
-pd.set_option('display.max_rows', None)
-pd.set_option('display.max_columns', None)
-pd.set_option('display.width', None)
-pd.set_option('display.max_colwidth', None)
-print(results_df.to_string(index=False))
+    results = []
+    for frag_index in frag_columns:
+        print(f"\nAnalyzing {frag_index}:")
+        median = merged_data[frag_index].median()
+        high_frag = merged_data[merged_data[frag_index] > median]
+        low_frag = merged_data[merged_data[frag_index] <= median]
+        
+        print(f"  Median: {median}")
+        print(f"  High group size: {len(high_frag)}")
+        print(f"  Low group size: {len(low_frag)}")
+        
+        for metric in metrics:
+            t_stat, p_value, effect_size = perform_ttest(high_frag, low_frag, metric)
+            results.append({
+                'Fragmentation Index': frag_index,
+                'Metric': metric,
+                't-statistic': t_stat,
+                'p-value': p_value,
+                'Effect Size': effect_size,
+                'High Group Mean': high_frag[metric].mean(),
+                'Low Group Mean': low_frag[metric].mean(),
+                'Significant': 'Yes' if p_value < 0.05 else 'No'
+            })
+            print(f"  {metric}: p-value = {p_value:.4f}, effect size = {effect_size:.4f}, significant: {'Yes' if p_value < 0.05 else 'No'}")
 
-# Print significant results (p < 0.05)
-significant_results = results_df[results_df['p-value'] < 0.05]
-print("\nSignificant Results (p < 0.05):")
-print(significant_results.to_string(index=False))
+    return pd.DataFrame(results)
 
-print(f"\nAll analysis results have been saved in the directory: {output_dir}")
+def visualize_results(results_df):
+    plt.figure(figsize=(15, 10))
+    sns.barplot(x='Fragmentation Index', y='Effect Size', hue='Metric', data=results_df)
+    plt.title('Effect Sizes of Fragmentation Indices on Emotional Metrics')
+    plt.xticks(rotation=45)
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'effect_sizes_barplot.png'))
+    plt.close()
+
+def main():
+    merged_data = load_and_preprocess_data()
+    results_df = analyze_fragmentation(merged_data)
+
+    # Save full results to CSV
+    full_results_path = os.path.join(output_dir, 'comprehensive_significance_results.csv')
+    results_df.to_csv(full_results_path, index=False)
+    print(f"\nFull significance results saved as '{full_results_path}'")
+
+    # Print all results
+    print("\nAll Results:")
+    print(results_df.to_string(index=False))
+
+    # Visualize results
+    visualize_results(results_df)
+
+    print(f"\nAll analysis results have been saved in the directory: {output_dir}")
+
+if __name__ == "__main__":
+    main()

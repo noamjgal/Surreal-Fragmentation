@@ -3,6 +3,7 @@ import numpy as np
 import os
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from datetime import datetime
 
 def merge_short_episodes(df, column, threshold=60):
     merged = []
@@ -60,9 +61,11 @@ def calculate_aid(episodes_df, column, positive_category):
     
     return aid_mean, aid_median, aid_std, aid_min, aid_max, aid_counts
 
-def extract_info_from_file(df, filename):
-    participant_id = filename.split('_')[1]
-    date = pd.to_datetime(df['start_time'].iloc[0]).date()
+def extract_info_from_filename(filename):
+    parts = filename.split('_')
+    date_str = parts[-1].split('.')[0]  # Remove the .csv extension
+    participant_id = parts[-2]
+    date = datetime.strptime(date_str, "%Y-%m-%d").date()
     return participant_id, date
 
 def process_episode_summary(file_path, episode_type, print_sample=False):
@@ -93,7 +96,7 @@ def process_episode_summary(file_path, episode_type, print_sample=False):
             print(df_merged.head())
             print(f"\nTotal episodes after merging: {len(df_merged)}")
 
-        participant_id, date = extract_info_from_file(df, os.path.basename(file_path))
+        participant_id, date = extract_info_from_filename(os.path.basename(file_path))
 
         result = {
             'participant_id': participant_id,
@@ -122,7 +125,6 @@ def process_episode_summary(file_path, episode_type, print_sample=False):
     except Exception as e:
         print(f"Error processing file {file_path}: {str(e)}")
         return None
-
 
 def print_summary_statistics(df, episode_type):
     print(f"\nSummary Statistics for {episode_type}:")
@@ -170,7 +172,8 @@ def main(input_dir, output_dir):
                 file_path = os.path.join(input_dir, input_file)
                 # Print sample data for the first file of each episode type
                 results = process_episode_summary(file_path, episode_type, print_sample=(i==0))
-                all_results.append(results)
+                if results is not None:
+                    all_results.append(results)
             
             combined_results = pd.concat(all_results, ignore_index=True)
             output_file = os.path.join(output_dir, f'{episode_type}_fragmentation_summary.csv')
