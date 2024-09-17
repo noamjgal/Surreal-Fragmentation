@@ -15,24 +15,24 @@ os.makedirs(output_dir, exist_ok=True)
 
 def load_and_preprocess_data():
     # Load the fragmentation results
-    mobility_frag = pd.read_csv(os.path.join(input_dir, 'mobility_episodes_fragmentation_summary.csv'))
-    digital_frag = pd.read_csv(os.path.join(input_dir, 'digital_episodes_fragmentation_summary.csv'))
+    moving_frag = pd.read_csv(os.path.join(input_dir, 'moving_fragmentation_summary.csv'))
+    digital_frag = pd.read_csv(os.path.join(input_dir, 'digital_fragmentation_summary.csv'))
 
     # Load the survey responses
     survey_responses = pd.read_excel(survey_file)
 
     # Ensure date columns are in datetime format
-    mobility_frag['date'] = pd.to_datetime(mobility_frag['date']).dt.date
+    moving_frag['date'] = pd.to_datetime(moving_frag['date']).dt.date
     digital_frag['date'] = pd.to_datetime(digital_frag['date']).dt.date
     survey_responses['date'] = pd.to_datetime(survey_responses['StartDate']).dt.date
 
     # Ensure participant_id is treated as string in all dataframes
-    mobility_frag['participant_id'] = mobility_frag['participant_id'].astype(str)
+    moving_frag['participant_id'] = moving_frag['participant_id'].astype(str)
     digital_frag['participant_id'] = digital_frag['participant_id'].astype(str)
     survey_responses['Participant_ID'] = survey_responses['Participant_ID'].astype(str)
 
     # Merge the datasets
-    merged_data = pd.merge(mobility_frag, digital_frag, on=['participant_id', 'date'], suffixes=('_mobility', '_digital'))
+    merged_data = pd.merge(moving_frag, digital_frag, on=['participant_id', 'date'], suffixes=('_moving', '_digital'))
     merged_data = pd.merge(merged_data, survey_responses, left_on=['participant_id', 'date'], right_on=['Participant_ID', 'date'], how='inner')
 
     return merged_data
@@ -60,10 +60,10 @@ def analyze_fragmentation(merged_data):
 
     # Define fragmentation indices
     frag_columns = [
-        'Moving_fragmentation_index',
-        'Moving_AID_mean',
-        'Digital_fragmentation_index',
-        'Digital_AID_mean'
+        'fragmentation_index_moving',
+        'AID_mean_moving',
+        'fragmentation_index_digital',
+        'AID_mean_digital'
     ]
 
     # Define metrics to analyze

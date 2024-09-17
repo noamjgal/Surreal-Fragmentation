@@ -2,214 +2,157 @@ import pandas as pd
 import numpy as np
 import os
 from datetime import timedelta
+from tqdm import tqdm
 from collections import defaultdict
 
-def accumulate_value_counts(df, column, accumulator):
-    value_counts = df[column].value_counts(dropna=False)
-    for value, count in value_counts.items():
-        accumulator[column][value] += count
-
-def detect_mobility_episodes(df, min_episode_duration=5, accumulator=None):
-    df['mobility'] = np.where(df['Travel_mode'].isin(['AT', 'PT', 'Walking']), 'Moving', 
-                              np.where(df['Travel_mode'] == 'Staying', 'Stationary', np.nan))
-    
-    dropped_values = df[df['mobility'].isna()]['Travel_mode'].value_counts()
-    df_mobility = df.dropna(subset=['mobility'])
-    
-    if accumulator is not None:
-        accumulate_value_counts(df, 'Travel_mode', accumulator['before'])
-        accumulate_value_counts(df_mobility, 'mobility', accumulator['after'])
-    
+def detect_episodes(df, column, min_duration, merge_gap):
     episodes = []
-    current_episode = {'start_time': df_mobility['Timestamp'].iloc[0], 'mobility': df_mobility['mobility'].iloc[0]}
+    start_time = None
+    prev_time = None
+    in_episode = False
+    merged_count = 0
+    changed_values = 0
 
-    for i in range(1, len(df_mobility)):
-        if df_mobility['mobility'].iloc[i] != df_mobility['mobility'].iloc[i-1]:
-            current_episode['end_time'] = df_mobility['Timestamp'].iloc[i-1]
-            current_episode['duration'] = (current_episode['end_time'] - current_episode['start_time']).total_seconds() / 60
-            
-            if current_episode['duration'] >= min_episode_duration:
-                episodes.append(current_episode)
-            
-            current_episode = {'start_time': df_mobility['Timestamp'].iloc[i], 'mobility': df_mobility['mobility'].iloc[i]}
+    for idx, row in df.iterrows():
+        current_time = row['Timestamp']
+        current_state = row[column]
 
-    # Add the last episode
-    current_episode['end_time'] = df_mobility['Timestamp'].iloc[-1]
-    current_episode['duration'] = (current_episode['end_time'] - current_episode['start_time']).total_seconds() / 60
-    if current_episode['duration'] >= min_episode_duration:
-        episodes.append(current_episode)
+        if not in_episode and current_state:
+            start_time = current_time
+            in_episode = True
+            changed_values += 1
+        elif in_episode:
+            if not current_state or (idx == len(df) - 1):
+                end_time = current_time if current_state else prev_time
+                duration = end_time - start_time
+                if duration >= min_duration:
+                    episodes.append((start_time, end_time))
+                in_episode = False
+                start_time = None
+                changed_values += 1
 
-    return pd.DataFrame(episodes), dropped_values
+        prev_time = current_time
 
-def detect_indoor_outdoor_episodes(df, min_episode_duration=5, accumulator=None):
-    # Convert all variations of True/False to boolean
-    df['indoors'] = df['indoors'].map({'True': True, 'False': False, True: True, False: False})
-    
-    df['indoor_outdoor'] = np.where(df['indoors'] == True, 'Indoor', 
-                                    np.where(df['indoors'] == False, 'Outdoor', np.nan))
-    
-    dropped_values = df[df['indoor_outdoor'].isna()]['indoors'].value_counts()
-    df_io = df.dropna(subset=['indoor_outdoor'])
-    
-    if accumulator is not None:
-        accumulate_value_counts(df, 'indoors', accumulator['before'])
-        accumulate_value_counts(df_io, 'indoor_outdoor', accumulator['after'])
-    
-    episodes = []
-    current_episode = {'start_time': df_io['Timestamp'].iloc[0], 'indoor_outdoor': df_io['indoor_outdoor'].iloc[0]}
-
-    for i in range(1, len(df_io)):
-        if df_io['indoor_outdoor'].iloc[i] != df_io['indoor_outdoor'].iloc[i-1]:
-            current_episode['end_time'] = df_io['Timestamp'].iloc[i-1]
-            current_episode['duration'] = (current_episode['end_time'] - current_episode['start_time']).total_seconds() / 60
-            
-            if current_episode['duration'] >= min_episode_duration:
-                episodes.append(current_episode)
-            
-            current_episode = {'start_time': df_io['Timestamp'].iloc[i], 'indoor_outdoor': df_io['indoor_outdoor'].iloc[i]}
-
-    # Add the last episode
-    current_episode['end_time'] = df_io['Timestamp'].iloc[-1]
-    current_episode['duration'] = (current_episode['end_time'] - current_episode['start_time']).total_seconds() / 60
-    if current_episode['duration'] >= min_episode_duration:
-        episodes.append(current_episode)
-
-    return pd.DataFrame(episodes), dropped_values
-
-def detect_digital_episodes(df, min_episode_duration=0.5, accumulator=None):
-    digital_categories = ['Social', 'Productive', 'Process', 'Settings', 'School', 'Spatial', 'Screen on/off/lock']
-    
-    df['digital_use'] = np.where(df['type'].isin(digital_categories), 'Digital',
-                                 np.where(df['type'] == 'No use', 'Non-Digital', np.nan))
-    
-    dropped_values = df[df['digital_use'].isna()]['type'].value_counts()
-    df_digital = df.dropna(subset=['digital_use'])
-    
-    if accumulator is not None:
-        accumulate_value_counts(df, 'type', accumulator['before'])
-        accumulate_value_counts(df_digital, 'digital_use', accumulator['after'])
-    
-    episodes = []
-    current_episode = {'start_time': df_digital['Timestamp'].iloc[0], 'digital_use': df_digital['digital_use'].iloc[0]}
-
-    for i in range(1, len(df_digital)):
-        if df_digital['digital_use'].iloc[i] != df_digital['digital_use'].iloc[i-1]:
-            current_episode['end_time'] = df_digital['Timestamp'].iloc[i-1]
-            current_episode['duration'] = (current_episode['end_time'] - current_episode['start_time']).total_seconds() / 60
-            
-            if current_episode['duration'] >= min_episode_duration:
-                episodes.append(current_episode)
-            
-            current_episode = {'start_time': df_digital['Timestamp'].iloc[i], 'digital_use': df_digital['digital_use'].iloc[i]}
-
-    # Add the last episode
-    current_episode['end_time'] = df_digital['Timestamp'].iloc[-1]
-    current_episode['duration'] = (current_episode['end_time'] - current_episode['start_time']).total_seconds() / 60
-    if current_episode['duration'] >= min_episode_duration:
-        episodes.append(current_episode)
-
-    return pd.DataFrame(episodes), dropped_values
-
-def process_participant_day(file_path, output_dir, accumulators):
-    df = pd.read_csv(file_path)
-    df['Timestamp'] = pd.to_datetime(df['Timestamp'])
-    
-    mobility_episodes, mobility_dropped = detect_mobility_episodes(df, accumulator=accumulators['mobility'])
-    indoor_outdoor_episodes, indoor_outdoor_dropped = detect_indoor_outdoor_episodes(df, accumulator=accumulators['indoor_outdoor'])
-    digital_episodes, digital_dropped = detect_digital_episodes(df, accumulator=accumulators['digital'])
-    
-    participant_id = df['user'].iloc[0]
-    date = df['Timestamp'].dt.date.iloc[0]
-    
-    mobility_episodes.to_csv(os.path.join(output_dir, f'mobility_episodes_{participant_id}_{date}.csv'), index=False)
-    indoor_outdoor_episodes.to_csv(os.path.join(output_dir, f'indoor_outdoor_episodes_{participant_id}_{date}.csv'), index=False)
-    digital_episodes.to_csv(os.path.join(output_dir, f'digital_episodes_{participant_id}_{date}.csv'), index=False)
-
-    # Calculate total duration for each type of episode
-    day_start = df['Timestamp'].min()
-    day_end = df['Timestamp'].max()
-    total_duration = (day_end - day_start).total_seconds() / 3600  # in hours
-
-    return {
-        'participant_id': participant_id,
-        'date': date,
-        'mobility_dropped': mobility_dropped,
-        'indoor_outdoor_dropped': indoor_outdoor_dropped,
-        'digital_dropped': digital_dropped,
-        'mobility_episodes': len(mobility_episodes),
-        'indoor_outdoor_episodes': len(indoor_outdoor_episodes),
-        'digital_episodes': len(digital_episodes),
-        'total_duration': total_duration,
-        'indoor_outdoor_data': indoor_outdoor_episodes
-    }
-
-def main(input_dir, output_dir):
-    all_dropped_values = defaultdict(lambda: defaultdict(int))
-    single_episode_days = defaultdict(list)
-    
-    accumulators = {
-        'mobility': {'before': defaultdict(lambda: defaultdict(int)), 'after': defaultdict(lambda: defaultdict(int))},
-        'indoor_outdoor': {'before': defaultdict(lambda: defaultdict(int)), 'after': defaultdict(lambda: defaultdict(int))},
-        'digital': {'before': defaultdict(lambda: defaultdict(int)), 'after': defaultdict(lambda: defaultdict(int))}
-    }
-    
-    for filename in os.listdir(input_dir):
-        if filename.endswith('.csv'):
-            file_path = os.path.join(input_dir, filename)
-            result = process_participant_day(file_path, output_dir, accumulators)
-            
-            # Accumulate dropped values
-            for feature, dropped in result['mobility_dropped'].items():
-                all_dropped_values['mobility'][feature] += dropped
-            for feature, dropped in result['indoor_outdoor_dropped'].items():
-                all_dropped_values['indoor_outdoor'][feature] += dropped
-            for feature, dropped in result['digital_dropped'].items():
-                all_dropped_values['digital'][feature] += dropped
-            
-            # Check for single-episode days
-            if result['mobility_episodes'] == 1:
-                single_episode_days['mobility'].append((result['participant_id'], result['date'], result['total_duration']))
-            if result['indoor_outdoor_episodes'] == 1:
-                single_episode_days['indoor_outdoor'].append((result['participant_id'], result['date'], result['total_duration'], result['indoor_outdoor_data']))
-            if result['digital_episodes'] == 1:
-                single_episode_days['digital'].append((result['participant_id'], result['date'], result['total_duration']))
-
-    # Print accumulated value counts
-    for category in ['mobility', 'indoor_outdoor', 'digital']:
-        print(f"\n{category.capitalize()} data:")
-        print("Before processing:")
-        for column, counts in accumulators[category]['before'].items():
-            print(f"\n{column}:")
-            for value, count in counts.items():
-                print(f"  {value}: {count}")
-        print("\nAfter processing:")
-        for column, counts in accumulators[category]['after'].items():
-            print(f"\n{column}:")
-            for value, count in counts.items():
-                print(f"  {value}: {count}")
-
-    # Report dropped values
-    print("\nDropped values:")
-    for category, values in all_dropped_values.items():
-        print(f"\n{category.capitalize()}:")
-        for feature, count in values.items():
-            print(f"  {feature}: {count}")
-
-    # Report single-episode days with duration
-    print("\nSingle-episode days:")
-    for category, days in single_episode_days.items():
-        print(f"\n{category.capitalize()}: {len(days)}")
-        if category == 'indoor_outdoor':
-            for day in days:
-                participant_id, date, duration, episode_data = day
-                episode_type = episode_data['indoor_outdoor'].iloc[0] if not episode_data.empty else "Unknown"
-                print(f"  Participant: {participant_id}, Date: {date}, Duration: {duration:.2f} hours, Type: {episode_type}")
+    # Merge episodes
+    merged_episodes = []
+    for episode in episodes:
+        if not merged_episodes or (episode[0] - merged_episodes[-1][1]) > merge_gap:
+            merged_episodes.append(episode)
         else:
-            for day in days:
-                participant_id, date, duration = day
-                print(f"  Participant: {participant_id}, Date: {date}, Duration: {duration:.2f} hours")
+            merged_episodes[-1] = (merged_episodes[-1][0], episode[1])
+            merged_count += 1
+
+    return merged_episodes, merged_count, changed_values
+
+def process_user_day(file_path, verbose=False):
+    if verbose:
+        print(f"Processing file: {file_path}")
+    df = pd.read_csv(file_path, parse_dates=['Timestamp'])
+    df['Timestamp'] = pd.to_datetime(df['Timestamp']).dt.floor('s')  # Drop milliseconds, using 's' instead of 'S'  # Drop milliseconds
+    
+    if verbose:
+        print("Columns in the DataFrame:")
+        print(df.columns)
+        print("\nFirst few rows of the DataFrame:")
+        print(df.head())
+    
+    if 'is_digital' not in df.columns or 'is_moving' not in df.columns:
+        if verbose:
+            print("Warning: 'is_digital' or 'is_moving' column not found. Available columns are:")
+            print(df.columns)
+        return None
+
+    digital_episodes, digital_merged, digital_changed = detect_episodes(df, 'is_digital', 
+                                                                        min_duration=timedelta(minutes=1), 
+                                                                        merge_gap=timedelta(seconds=40))
+    moving_episodes, moving_merged, moving_changed = detect_episodes(df, 'is_moving', 
+                                                                     min_duration=timedelta(minutes=2), 
+                                                                     merge_gap=timedelta(seconds=80))
+    
+    return {
+        'digital_episodes': digital_episodes,
+        'moving_episodes': moving_episodes,
+        'date': df['Timestamp'].dt.date.iloc[0],
+        'user': df['user'].iloc[0],
+        'digital_merged': digital_merged,
+        'moving_merged': moving_merged,
+        'digital_changed': digital_changed,
+        'moving_changed': moving_changed
+    }
+
+def calculate_statistics(all_episodes):
+    stats = defaultdict(lambda: defaultdict(list))
+    
+    for day_data in all_episodes:
+        for episode_type in ['digital', 'moving']:
+            episodes = day_data[f'{episode_type}_episodes']
+            durations = [(end - start).total_seconds() / 60 for start, end in episodes]
+            
+            stats[episode_type]['total_episodes'].append(len(episodes))
+            stats[episode_type]['total_duration'].append(sum(durations))
+            if durations:
+                stats[episode_type]['min_duration'].append(min(durations))
+                stats[episode_type]['max_duration'].append(max(durations))
+            stats[episode_type]['merged_episodes'].append(day_data[f'{episode_type}_merged'])
+            stats[episode_type]['changed_values'].append(day_data[f'{episode_type}_changed'])
+    
+    for episode_type in ['digital', 'moving']:
+        stats[episode_type]['avg_episodes_per_day'] = np.mean(stats[episode_type]['total_episodes'])
+        stats[episode_type]['avg_total_duration_per_day'] = np.mean(stats[episode_type]['total_duration'])
+        stats[episode_type]['avg_duration_per_episode'] = (
+            np.sum(stats[episode_type]['total_duration']) / np.sum(stats[episode_type]['total_episodes'])
+            if np.sum(stats[episode_type]['total_episodes']) > 0 else 0
+        )
+        stats[episode_type]['min_duration'] = min(stats[episode_type]['min_duration']) if stats[episode_type]['min_duration'] else 0
+        stats[episode_type]['max_duration'] = max(stats[episode_type]['max_duration']) if stats[episode_type]['max_duration'] else 0
+        stats[episode_type]['total_merged_episodes'] = np.sum(stats[episode_type]['merged_episodes'])
+        stats[episode_type]['total_changed_values'] = np.sum(stats[episode_type]['changed_values'])
+    
+    return stats
+
+def main():
+    preprocessed_dir = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/preprocessed_data'
+    output_dir = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/episodes'
+    os.makedirs(output_dir, exist_ok=True)
+    all_episodes = []
+    
+    for i, file_name in enumerate(tqdm(os.listdir(preprocessed_dir))):
+        if file_name.endswith('.csv'):
+            file_path = os.path.join(preprocessed_dir, file_name)
+            day_episodes = process_user_day(file_path, verbose=(i < 3))  # Only print details for first 3 files
+            if day_episodes is not None:
+                all_episodes.append(day_episodes)
+                
+                # Save episodes to separate CSV files
+                for episode_type in ['digital', 'moving']:
+                    episodes_df = pd.DataFrame(day_episodes[f'{episode_type}_episodes'], 
+                                               columns=['start_time', 'end_time'])
+                    episodes_df['start_time'] = pd.to_datetime(episodes_df['start_time'])
+                    episodes_df['end_time'] = pd.to_datetime(episodes_df['end_time'])
+                    episodes_df['duration'] = (episodes_df['end_time'] - episodes_df['start_time']).dt.total_seconds() / 60
+                    episodes_df['user'] = day_episodes['user']
+                    episodes_df['date'] = day_episodes['date']
+                    episodes_df.to_csv(os.path.join(output_dir, f"{episode_type}_episodes_{day_episodes['user']}_{day_episodes['date']}.csv"), 
+                                       index=False)
+    
+    if not all_episodes:
+        print("No episodes were processed successfully. Check the data and column names.")
+        return
+
+    stats = calculate_statistics(all_episodes)
+    
+    print("\nDescriptive Statistics:")
+    for episode_type in ['digital', 'moving']:
+        print(f"\n{episode_type.capitalize()} Episodes:")
+        print(f"Total number of episodes: {int(np.sum(stats[episode_type]['total_episodes']))}")
+        print(f"Total duration (minutes): {np.sum(stats[episode_type]['total_duration']):.2f}")
+        print(f"Minimum episode duration (minutes): {stats[episode_type]['min_duration']:.2f}")
+        print(f"Maximum episode duration (minutes): {stats[episode_type]['max_duration']:.2f}")
+        print(f"Average duration per episode (minutes): {stats[episode_type]['avg_duration_per_episode']:.2f}")
+        print(f"Average total duration per day (minutes): {stats[episode_type]['avg_total_duration_per_day']:.2f}")
+        print(f"Average number of episodes per day: {stats[episode_type]['avg_episodes_per_day']:.2f}")
+        print(f"Total merged episodes: {stats[episode_type]['total_merged_episodes']}")
+        print(f"Total changed values: {stats[episode_type]['total_changed_values']}")
 
 if __name__ == "__main__":
-    input_dir = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/preprocessed_data'
-    output_dir = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/episodes'
-    main(input_dir, output_dir)
+    main()
