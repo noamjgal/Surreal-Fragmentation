@@ -5,16 +5,23 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from datetime import datetime
 
-def calculate_fragmentation_index(episodes_df, column):
+def calculate_fragmentation_index(episodes_df, column, min_episodes=5):
     S = len(episodes_df)
     T = episodes_df['duration'].sum()
-    if S > 1 and T > 0:
+    if S >= min_episodes and T > 0:
         normalized_durations = episodes_df['duration'] / T
         sum_squared = sum(normalized_durations ** 2)
         index = (1 - sum_squared) / (1 - (1 / S))
+        if index > 0.9999:
+            print(f"High fragmentation detected: {index}")
+            print(f"Number of episodes: {S}")
+            print(f"Total duration: {T}")
+            print(f"Normalized durations: {normalized_durations.tolist()}")
+            print(f"Sum of squared normalized durations: {sum_squared}")
+        return index
     else:
-        index = np.nan
-    return index
+        print(f"Insufficient data for fragmentation index: {S} episodes, {T} total duration")
+        return np.nan
 
 def calculate_aid(episodes_df):
     if len(episodes_df) > 1:
@@ -68,6 +75,15 @@ def process_episode_summary(file_path, episode_type, print_sample=False):
             'total_duration': df['duration'].sum(),
             'avg_episode_length': df['duration'].mean(),
         }
+
+        result['fragmentation_index'] = calculate_fragmentation_index(df, 'duration')
+        
+        # Add debugging for extreme fragmentation values
+        if result['fragmentation_index'] > 0.9999 or result['fragmentation_index'] < 0.0001:
+            print(f"Extreme fragmentation index detected: {result['fragmentation_index']}")
+            print(f"File: {file_path}")
+            print(f"Number of episodes: {len(df)}")
+            print(f"Episode durations: {df['duration'].tolist()}")
 
         result['fragmentation_index'] = calculate_fragmentation_index(df, 'duration')
         aid_mean, aid_median, aid_std, aid_min, aid_max, aid_counts = calculate_aid(df)
