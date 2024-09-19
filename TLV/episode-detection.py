@@ -5,33 +5,57 @@ from datetime import timedelta
 from tqdm import tqdm
 from collections import defaultdict
 
-def detect_episodes(df, column, min_duration, merge_gap):
+def detect_episodes(df, column, min_duration, merge_gap, max_gap=timedelta(minutes=10)):
     episodes = []
     start_time = None
     prev_time = None
     in_episode = False
     merged_count = 0
     changed_values = 0
+    false_state_count = 0
+    prev_state = False
 
     for idx, row in df.iterrows():
         current_time = row['Timestamp']
         current_state = row[column]
 
+        if start_time is not None:
+            time_gap = current_time - prev_time
+            if time_gap > max_gap:
+                # End the current episode if the gap is too large
+                if in_episode and (prev_time - start_time) >= min_duration:
+                    episodes.append((start_time, prev_time))
+                    changed_values += 1
+                in_episode = False
+                start_time = None
+                false_state_count = 0
+
         if not in_episode and current_state:
             start_time = current_time
             in_episode = True
             changed_values += 1
+            false_state_count = 0
         elif in_episode:
-            if not current_state or (idx == len(df) - 1):
-                end_time = current_time if current_state else prev_time
-                duration = end_time - start_time
-                if duration >= min_duration:
-                    episodes.append((start_time, end_time))
+            if not current_state:
+                false_state_count += 1
+            else:
+                false_state_count = 0
+
+            if false_state_count == 2:
+                if (prev_time - start_time) >= min_duration:
+                    episodes.append((start_time, prev_time))
+                    changed_values += 1
                 in_episode = False
                 start_time = None
-                changed_values += 1
+                false_state_count = 0
 
         prev_time = current_time
+        prev_state = current_state
+
+    # Handle the last episode if it's still open
+    if in_episode and (prev_time - start_time) >= min_duration:
+        episodes.append((start_time, prev_time))
+        changed_values += 1
 
     # Merge episodes
     merged_episodes = []
