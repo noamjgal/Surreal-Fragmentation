@@ -358,13 +358,13 @@ def main():
     # Analyze fragmentation impact using median split
     frag_impact_median = analyze_fragmentation_impact(merged_data, threshold='median')
     for frag_index, df in frag_impact_median.items():
-        df.to_csv(os.path.join(output_dir, f'fragmentation_impact_median_{frag_index}.csv'), index=False)
+        df.to_csv(os.path.join(output_dir, f'median_{frag_index}.csv'), index=False)
     visualize_fragmentation_impact(frag_impact_median, 'median')
 
     # Analyze fragmentation impact using 25th percentile split
     frag_impact_25th = analyze_fragmentation_impact(merged_data, threshold='25th')
     for frag_index, df in frag_impact_25th.items():
-        df.to_csv(os.path.join(output_dir, f'fragmentation_impact_25th_{frag_index}.csv'), index=False)
+        df.to_csv(os.path.join(output_dir, f'25th_{frag_index}.csv'), index=False)
     visualize_fragmentation_impact(frag_impact_25th, '25th')
 
     # Print group sizes for median and 25th percentile splits
