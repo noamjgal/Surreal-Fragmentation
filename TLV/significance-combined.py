@@ -16,20 +16,9 @@ output_dir = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/analysis_
 # Create the output directory if it doesn't exist
 os.makedirs(output_dir, exist_ok=True)
 
-import pandas as pd
-import numpy as np
-from scipy import stats
-import os
-import matplotlib.pyplot as plt
-import seaborn as sns
-import statsmodels.api as sm
-import statsmodels.formula.api as smf
-
-
 def load_and_preprocess_data():
     # Load the fragmentation results
-    moving_frag = pd.read_csv(os.path.join(input_dir, 'moving_fragmentation_summary.csv'))
-    digital_frag = pd.read_csv(os.path.join(input_dir, 'digital_fragmentation_summary.csv'))
+    frag_summary = pd.read_csv(os.path.join(input_dir, 'fragmentation_summary.csv'))
 
     # Load the survey responses
     survey_responses = pd.read_excel(survey_file)
@@ -38,19 +27,16 @@ def load_and_preprocess_data():
     participant_info = pd.read_csv(participant_info_file)
 
     # Ensure date columns are in datetime format
-    moving_frag['date'] = pd.to_datetime(moving_frag['date']).dt.date
-    digital_frag['date'] = pd.to_datetime(digital_frag['date']).dt.date
+    frag_summary['date'] = pd.to_datetime(frag_summary['date']).dt.date
     survey_responses['date'] = pd.to_datetime(survey_responses['StartDate']).dt.date
 
     # Ensure participant_id is treated as string in all dataframes
-    moving_frag['participant_id'] = moving_frag['participant_id'].astype(str)
-    digital_frag['participant_id'] = digital_frag['participant_id'].astype(str)
+    frag_summary['participant_id'] = frag_summary['participant_id'].astype(str)
     survey_responses['Participant_ID'] = survey_responses['Participant_ID'].astype(str)
     participant_info['user'] = participant_info['user'].astype(str)
 
     # Merge the datasets
-    merged_data = pd.merge(moving_frag, digital_frag, on=['participant_id', 'date'], suffixes=('_moving', '_digital'))
-    merged_data = pd.merge(merged_data, survey_responses, left_on=['participant_id', 'date'], right_on=['Participant_ID', 'date'], how='inner')
+    merged_data = pd.merge(frag_summary, survey_responses, left_on=['participant_id', 'date'], right_on=['Participant_ID', 'date'], how='inner')
     merged_data = pd.merge(merged_data, participant_info, left_on='participant_id', right_on='user', how='left')
 
     # Map Hebrew gender labels to binary
@@ -58,13 +44,6 @@ def load_and_preprocess_data():
 
     # Map school locations
     merged_data['School_location'] = merged_data['School'].map({'suburb': 0, 'city_center': 1})
-
-    print("Data types after merging:")
-    print(merged_data.dtypes)
-    print("\nUnique values in 'Gender' column:")
-    print(merged_data['Gender'].value_counts())
-    print("\nUnique values in 'School' column:")
-    print(merged_data['School'].value_counts())
 
     return merged_data
 
@@ -94,65 +73,57 @@ def preprocess_data(merged_data):
     merged_data = merged_data.drop(columns=[f'{item}_reversed' for item in ['RELAXATION', 'PEACE', 'SATISFACTION']])
     
     # Drop rows where STAI-6 items or fragmentation indices are still missing
-    frag_indices = ['fragmentation_index_moving', 'fragmentation_index_digital']
+    frag_indices = ['digital_fragmentation_index', 'moving_fragmentation_index', 'digital_frag_during_mobility']
     original_stai6_items = ['TENSE', 'RELAXATION', 'WORRY', 'PEACE', 'IRRITATION', 'SATISFACTION']
     merged_data_clean = merged_data.dropna(subset=original_stai6_items + frag_indices)
     
-    print(f"\nOriginal data shape: {merged_data.shape}")
-    print(f"Clean data shape: {merged_data_clean.shape}")
-    
     return merged_data_clean
 
-def perform_ttest(group1, group2, metric):
-    if len(group1) < 2 or len(group2) < 2:
-        print(f"Warning: Not enough samples for t-test on {metric}. Group sizes: {len(group1)}, {len(group2)}")
-        return np.nan, np.nan, np.nan
-    
-    t_stat, p_value = stats.ttest_ind(group1[metric].dropna(), group2[metric].dropna())
-    effect_size = (group1[metric].mean() - group2[metric].mean()) / np.sqrt((group1[metric].std()**2 + group2[metric].std()**2) / 2)
-    return t_stat, p_value, effect_size
-
-
-
-def perform_multilevel_analysis(merged_data, threshold='median'):
-    if threshold == 'median':
-        merged_data['high_frag_moving'] = merged_data['fragmentation_index_moving'] > merged_data['fragmentation_index_moving'].median()
-        merged_data['high_frag_digital'] = merged_data['fragmentation_index_digital'] > merged_data['fragmentation_index_digital'].median()
-    elif threshold == '25th':
-        merged_data['high_frag_moving'] = merged_data['fragmentation_index_moving'] > merged_data['fragmentation_index_moving'].quantile(0.25)
-        merged_data['high_frag_digital'] = merged_data['fragmentation_index_digital'] > merged_data['fragmentation_index_digital'].quantile(0.25)
-    
-    metrics = ['TENSE', 'RELAXATION', 'WORRY', 'PEACE', 'IRRITATION', 'SATISFACTION', 'STAI6_score', 'HAPPY']
+def analyze_digital_frag_mobility_relationship(merged_data):
+    digital_frag_metrics = ['digital_fragmentation_index', 'digital_frag_during_mobility']
+    mobility_metrics = ['total_duration_mobility', 'avg_duration_mobility', 'count_mobility']
     
     results = []
-    for metric in metrics:
-        for frag_type in ['moving', 'digital']:
-            formula = f"{metric} ~ high_frag_{frag_type} + C(Gender_binary) + C(Class) + C(School_location)"
-            model = smf.mixedlm(formula, data=merged_data, groups='participant_id')
+    for frag_metric in digital_frag_metrics:
+        for mobility_metric in mobility_metrics:
+            digital_frag = merged_data[frag_metric]
+            mobility_data = merged_data[mobility_metric]
+
+            # Perform Pearson correlation
+            corr, p_value = stats.pearsonr(digital_frag, mobility_data)
             
-            try:
-                fit = model.fit()
-                for var in [f'high_frag_{frag_type}', 'C(Gender_binary)[T.1]', 'C(Class)[T.2]', 'C(Class)[T.3]', 'C(School_location)[T.1]']:
-                    if var in fit.params:
-                        results.append({
-                            'Threshold': threshold,
-                            'Fragmentation Type': frag_type,
-                            'Outcome': metric,
-                            'Predictor': var,
-                            'Coefficient': fit.params[var],
-                            'p-value': fit.pvalues[var],
-                            'CI_Lower': fit.conf_int().loc[var, 0],
-                            'CI_Upper': fit.conf_int().loc[var, 1]
-                        })
-            except Exception as e:
-                print(f"Error fitting model for {metric} with {frag_type} fragmentation: {str(e)}")
+            # Perform linear regression
+            X = sm.add_constant(digital_frag)
+            y = mobility_data
+            model = sm.OLS(y, X).fit()
+            
+            # Perform two-population t-test based on 25th percentile split
+            split_value = digital_frag.quantile(0.25)
+            high_frag = merged_data[merged_data[frag_metric] > split_value][mobility_metric]
+            low_frag = merged_data[merged_data[frag_metric] <= split_value][mobility_metric]
+            t_stat, t_p_value = stats.ttest_ind(high_frag, low_frag)
+            
+            results.append({
+                'Fragmentation Metric': frag_metric,
+                'Mobility Metric': mobility_metric,
+                'Pearson Correlation': corr,
+                'Pearson p-value': p_value,
+                'Regression Coefficient': model.params[frag_metric],
+                'Regression p-value': model.pvalues[frag_metric],
+                'R-squared': model.rsquared,
+                'T-test statistic': t_stat,
+                'T-test p-value': t_p_value,
+                'High Frag Mean': high_frag.mean(),
+                'Low Frag Mean': low_frag.mean(),
+                'High Frag Count': len(high_frag),
+                'Low Frag Count': len(low_frag)
+            })
     
-    results_df = pd.DataFrame(results)
-    results_df = results_df.sort_values('p-value')
-    return results_df
+    return pd.DataFrame(results)
+
 
 def analyze_population_differences(merged_data):
-    frag_indices = ['fragmentation_index_moving', 'fragmentation_index_digital']
+    frag_indices = ['digital_fragmentation_index', 'moving_fragmentation_index', 'digital_frag_during_mobility']
     population_factors = ['Gender_binary', 'Class', 'School_location']
     
     results = []
@@ -161,7 +132,6 @@ def analyze_population_differences(merged_data):
             unique_values = sorted(merged_data[factor].unique())
             
             if factor == 'School_location':
-                # Handle School_location separately
                 group0 = merged_data[merged_data[factor] == unique_values[0]][frag_index]
                 group1 = merged_data[merged_data[factor] == unique_values[1]][frag_index]
                 
@@ -184,7 +154,6 @@ def analyze_population_differences(merged_data):
                     'Group2 Std': group1.std()
                 })
             elif factor == 'Gender_binary':
-                # Handle Gender_binary separately
                 group0 = merged_data[merged_data[factor] == 0][frag_index]
                 group1 = merged_data[merged_data[factor] == 1][frag_index]
                 
@@ -207,7 +176,6 @@ def analyze_population_differences(merged_data):
                     'Group2 Std': group1.std()
                 })
             else:
-                # Handle other factors (like Class) as before
                 for i in range(len(unique_values)):
                     for j in range(i+1, len(unique_values)):
                         group1 = merged_data[merged_data[factor] == unique_values[i]][frag_index]
@@ -233,105 +201,112 @@ def analyze_population_differences(merged_data):
                         })
     
     results_df = pd.DataFrame(results)
-    
-    # Format p-values: round to 0 if very small, otherwise show 6 decimal places
     results_df['p-value'] = results_df['p-value'].apply(lambda x: 0 if x < 0.000001 else round(x, 6))
-    
     results_df = results_df.sort_values('p-value')
-    
-    # Add a note about gender imbalance
-    gender_counts = merged_data['Gender_binary'].value_counts()
-    gender_imbalance_note = f"Note: Gender distribution is imbalanced. Counts: Female: {gender_counts[0]}, Male: {gender_counts[1]}"
-    print(gender_imbalance_note)
     
     return results_df
 
 
-def perform_regression_analysis(merged_data):
-    frag_indices = ['fragmentation_index_moving', 'fragmentation_index_digital']
-    metrics = ['TENSE', 'RELAXATION', 'WORRY', 'PEACE', 'IRRITATION', 'SATISFACTION', 'STAI6_score', 'HAPPY']
+def analyze_fragmentation_relationships(merged_data):
+    frag_indices = ['digital_fragmentation_index', 'moving_fragmentation_index', 'digital_frag_during_mobility']
     
     results = []
-    for frag_index in frag_indices:
-        for metric in metrics:
-            X = sm.add_constant(merged_data[frag_index])
-            y = merged_data[metric]
+    for i, index1 in enumerate(frag_indices):
+        for j, index2 in enumerate(frag_indices[i+1:], start=i+1):
+            # Perform Pearson correlation
+            corr, p_value = stats.pearsonr(merged_data[index1], merged_data[index2])
+            
+            # Perform linear regression
+            X = sm.add_constant(merged_data[index1])
+            y = merged_data[index2]
             model = sm.OLS(y, X).fit()
             
             results.append({
-                'Fragmentation Index': frag_index,
-                'Metric': metric,
-                'Coefficient': model.params[frag_index],
-                'p-value': model.pvalues[frag_index],
-                'R-squared': model.rsquared,
-                'CI_Lower': model.conf_int().loc[frag_index, 0],
-                'CI_Upper': model.conf_int().loc[frag_index, 1]
+                'Index1': index1,
+                'Index2': index2,
+                'Pearson Correlation': corr,
+                'Pearson p-value': p_value,
+                'Regression Coefficient': model.params[index1],
+                'Regression p-value': model.pvalues[index1],
+                'R-squared': model.rsquared
             })
+    
+    return pd.DataFrame(results)
+
+def analyze_frag_emotional_relationship(merged_data):
+    frag_indices = ['digital_fragmentation_index', 'moving_fragmentation_index', 'digital_frag_during_mobility']
+    emotional_outcomes = ['TENSE', 'RELAXATION', 'WORRY', 'PEACE', 'IRRITATION', 'SATISFACTION', 'STAI6_score', 'HAPPY']
+    
+    results = []
+    for frag_index in frag_indices:
+        for outcome in emotional_outcomes:
+            # Perform Pearson correlation
+            corr, p_value = stats.pearsonr(merged_data[frag_index], merged_data[outcome])
+            
+            # Perform linear regression
+            X = sm.add_constant(merged_data[frag_index])
+            y = merged_data[outcome]
+            model = sm.OLS(y, X).fit()
+            
+            # Perform two-population t-test based on median split
+            median = merged_data[frag_index].median()
+            high_frag = merged_data[merged_data[frag_index] > median][outcome]
+            low_frag = merged_data[merged_data[frag_index] <= median][outcome]
+            t_stat, t_p_value = stats.ttest_ind(high_frag, low_frag)
+            
+            results.append({
+                'Fragmentation Index': frag_index,
+                'Emotional Outcome': outcome,
+                'Pearson Correlation': corr,
+                'Pearson p-value': p_value,
+                'Regression Coefficient': model.params[frag_index],
+                'Regression p-value': model.pvalues[frag_index],
+                'R-squared': model.rsquared,
+                'T-test statistic': t_stat,
+                'T-test p-value': t_p_value,
+                'High Frag Mean': high_frag.mean(),
+                'Low Frag Mean': low_frag.mean()
+            })
+    
+    return pd.DataFrame(results)
+
+def perform_multilevel_analysis(merged_data, threshold='median'):
+    frag_types = ['digital_fragmentation_index', 'moving_fragmentation_index', 'digital_frag_during_mobility']
+    
+    for frag_type in frag_types:
+        if threshold == 'median':
+            merged_data[f'high_{frag_type}'] = merged_data[frag_type] > merged_data[frag_type].median()
+        elif threshold == '25th':
+            merged_data[f'high_{frag_type}'] = merged_data[frag_type] > merged_data[frag_type].quantile(0.25)
+    
+    metrics = ['TENSE', 'RELAXATION', 'WORRY', 'PEACE', 'IRRITATION', 'SATISFACTION', 'STAI6_score', 'HAPPY']
+    
+    results = []
+    for metric in metrics:
+        for frag_type in frag_types:
+            formula = f"{metric} ~ high_{frag_type} + C(Gender_binary) + C(Class) + C(School_location)"
+            model = smf.mixedlm(formula, data=merged_data, groups='participant_id')
+            
+            try:
+                fit = model.fit()
+                for var in [f'high_{frag_type}', 'C(Gender_binary)[T.1]', 'C(Class)[T.2]', 'C(Class)[T.3]', 'C(School_location)[T.1]']:
+                    if var in fit.params:
+                        results.append({
+                            'Threshold': threshold,
+                            'Fragmentation Type': frag_type,
+                            'Outcome': metric,
+                            'Predictor': var,
+                            'Coefficient': fit.params[var],
+                            'p-value': fit.pvalues[var],
+                            'CI_Lower': fit.conf_int().loc[var, 0],
+                            'CI_Upper': fit.conf_int().loc[var, 1]
+                        })
+            except Exception as e:
+                print(f"Error fitting model for {metric} with {frag_type}: {str(e)}")
     
     results_df = pd.DataFrame(results)
     results_df = results_df.sort_values('p-value')
     return results_df
-
-def visualize_fragmentation_differences(results_df):
-    plt.figure(figsize=(12, 6))
-    sns.barplot(x='Analysis', y='Effect Size', hue='Fragmentation Index', data=results_df)
-    plt.title('Effect Sizes of Fragmentation Differences Between Groups')
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'fragmentation_differences_barplot.png'))
-    plt.close()
-
-def visualize_fragmentation_impact(results_dfs, threshold):
-    plt.figure(figsize=(14, 7))
-    
-    # Prepare data for plotting
-    plot_data = []
-    for frag_index, df in results_dfs.items():
-        df['Fragmentation Index'] = frag_index
-        plot_data.append(df)
-    
-    plot_df = pd.concat(plot_data)
-    
-    # Create the plot
-    sns.barplot(x='Metric', y='Effect Size', hue='Fragmentation Index', data=plot_df)
-    plt.title(f'Effect Sizes of Fragmentation Impact on Emotional Metrics (Threshold: {threshold})')
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f'fragmentation_impact_barplot_{threshold}.png'))
-    plt.close()
-
-def analyze_fragmentation_impact(merged_data, threshold='median'):
-    frag_columns = ['fragmentation_index_moving', 'fragmentation_index_digital']
-    metrics = ['TENSE', 'RELAXATION', 'WORRY', 'PEACE', 'IRRITATION', 'SATISFACTION', 'STAI6_score', 'HAPPY']
-
-    results = {frag_index: [] for frag_index in frag_columns}
-    
-    for frag_index in frag_columns:
-        if threshold == 'median':
-            split_value = merged_data[frag_index].median()
-        elif threshold == '25th':
-            split_value = merged_data[frag_index].quantile(0.25)
-        
-        high_frag = merged_data[merged_data[frag_index] > split_value]
-        low_frag = merged_data[merged_data[frag_index] <= split_value]
-        
-        for metric in metrics:
-            t_stat, p_value, effect_size = perform_ttest(high_frag, low_frag, metric)
-            results[frag_index].append({
-                'Metric': metric,
-                'Threshold': threshold,
-                't-statistic': t_stat,
-                'p-value': p_value,
-                'Effect Size': effect_size,
-                'High Group Mean': high_frag[metric].mean(),
-                'Low Group Mean': low_frag[metric].mean(),
-                'High Group Count': len(high_frag),
-                'Low Group Count': len(low_frag)
-            })
-
-    results_dfs = {frag_index: pd.DataFrame(results[frag_index]).sort_values('p-value') 
-                   for frag_index in frag_columns}
-    return results_dfs
 
 def main():
     merged_data = load_and_preprocess_data()
@@ -342,7 +317,7 @@ def main():
         return
     
     # Print IQR statistics for fragmentation indices
-    frag_indices = ['fragmentation_index_moving', 'fragmentation_index_digital']
+    frag_indices = ['digital_fragmentation_index', 'moving_fragmentation_index', 'digital_frag_during_mobility']
     for index in frag_indices:
         q1 = merged_data[index].quantile(0.25)
         median = merged_data[index].median()
@@ -354,34 +329,17 @@ def main():
         print(f"75th percentile: {q3:.4f}")
         print(f"IQR: {iqr:.4f}")
     
-  
-    # Analyze fragmentation impact using median split
-    frag_impact_median = analyze_fragmentation_impact(merged_data, threshold='median')
-    for frag_index, df in frag_impact_median.items():
-        df.to_csv(os.path.join(output_dir, f'median_{frag_index}.csv'), index=False)
-    visualize_fragmentation_impact(frag_impact_median, 'median')
+    # Analyze relationship between digital fragmentation and mobility metrics
+    digital_frag_mobility_results = analyze_digital_frag_mobility_relationship(merged_data)
+    digital_frag_mobility_results.to_csv(os.path.join(output_dir, 'digital_frag_mobility_relationship.csv'), index=False)
 
-    # Analyze fragmentation impact using 25th percentile split
-    frag_impact_25th = analyze_fragmentation_impact(merged_data, threshold='25th')
-    for frag_index, df in frag_impact_25th.items():
-        df.to_csv(os.path.join(output_dir, f'25th_{frag_index}.csv'), index=False)
-    visualize_fragmentation_impact(frag_impact_25th, '25th')
+    # Analyze relationships between fragmentation indices
+    frag_relationships_results = analyze_fragmentation_relationships(merged_data)
+    frag_relationships_results.to_csv(os.path.join(output_dir, 'fragmentation_relationships.csv'), index=False)
 
-    # Print group sizes for median and 25th percentile splits
-    for index in frag_indices:
-        median = merged_data[index].median()
-        q1 = merged_data[index].quantile(0.25)
-        print(f"\nGroup sizes for {index}:")
-        print(f"Median split:")
-        print(f"  High group (> {median:.4f}): {sum(merged_data[index] > median)}")
-        print(f"  Low group (<= {median:.4f}): {sum(merged_data[index] <= median)}")
-        print(f"25th percentile split:")
-        print(f"  High group (> {q1:.4f}): {sum(merged_data[index] > q1)}")
-        print(f"  Low group (<= {q1:.4f}): {sum(merged_data[index] <= q1)}")
-
-    # Perform regression analysis
-    regression_results = perform_regression_analysis(merged_data)
-    regression_results.to_csv(os.path.join(output_dir, 'regression_analysis.csv'), index=False)
+    # Analyze relationships between fragmentation indices and emotional outcomes
+    frag_emotional_results = analyze_frag_emotional_relationship(merged_data)
+    frag_emotional_results.to_csv(os.path.join(output_dir, 'fragmentation_emotional_relationship.csv'), index=False)
 
     # Perform multilevel analysis for median split
     multilevel_results_median = perform_multilevel_analysis(merged_data, threshold='median')
