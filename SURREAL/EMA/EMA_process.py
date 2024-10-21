@@ -2,9 +2,9 @@ import pandas as pd
 import re
 import argparse
 import logging
-from fuzzywuzzy import fuzz
-from fuzzywuzzy import process
+from fuzzywuzzy import fuzz, process
 import ast
+import numpy as np
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -35,6 +35,12 @@ def clean_and_process_responses(responses):
 def fuzzy_match(x, choices, scorer=fuzz.token_sort_ratio):
     return process.extractOne(x, choices, scorer=scorer)[0]
 
+def fuzzy_match_question(question, choices, threshold=80):
+    matches = process.extractBests(question, choices, scorer=fuzz.token_sort_ratio, score_cutoff=threshold)
+    if matches:
+        return matches[0][0]
+    return None
+
 def process_response_mappings(response_eng_path):
     response_eng_df = load_data(response_eng_path)
     if response_eng_df is None:
@@ -57,6 +63,14 @@ def process_response_mappings(response_eng_path):
 
     return response_eng_df
 
+def safe_len(x):
+    if isinstance(x, dict):
+        return len(x)
+    elif pd.isna(x):
+        return 0
+    else:
+        return len(str(x))
+
 def safe_dict_convert(x):
     if isinstance(x, dict):
         return x
@@ -67,6 +81,34 @@ def safe_dict_convert(x):
             return {}
     return {}
 
+def fuzzy_match_question_and_responses(row, response_dict_df, question_threshold=80, response_threshold=70):
+    best_match = None
+    best_score = 0
+    
+    for _, ref_row in response_dict_df.iterrows():
+        question_score = fuzz.token_sort_ratio(row['Question name'], ref_row['Question'])
+        
+        if question_score >= question_threshold:
+            response_score = max(
+                fuzz.token_set_ratio(str(row['Responses name']), str(ref_row['Responses'])),
+                fuzz.token_set_ratio(str(row['Responses name']), ' '.join(ref_row['Hebrew_dict'].keys()))
+            )
+            
+            combined_score = (question_score + response_score) / 2
+            
+            if combined_score > best_score and response_score >= response_threshold:
+                best_score = combined_score
+                best_match = ref_row
+    
+    if best_match is None or best_score < 90:  # Log only if no match or low confidence match
+        logging.warning(f"Potential mismatch for '{row['Question name']}' with response '{row['Responses name']}'")
+        if best_match:
+            logging.warning(f"Best match: '{best_match['Question']}' with score {best_score}")
+            logging.warning(f"Matched response: '{best_match['Responses']}'")
+        logging.warning("---")
+    
+    return best_match
+
 def process_comprehensive_data(comprehensive_data_path, response_dict_df):
     comprehensive_data_df = load_data(comprehensive_data_path)
     if comprehensive_data_df is None:
@@ -75,27 +117,31 @@ def process_comprehensive_data(comprehensive_data_path, response_dict_df):
     comprehensive_data_df = comprehensive_data_df[comprehensive_data_df['Form name'].str.startswith('EMA', na=False)]
 
     comprehensive_data_df['Form_matched'] = comprehensive_data_df['Form name'].apply(lambda x: fuzzy_match(x, response_dict_df['Form']))
-    comprehensive_data_df['Question_matched'] = comprehensive_data_df['Question name'].apply(lambda x: fuzzy_match(x, response_dict_df['Question']))
+    
+    def match_and_fill(row):
+        best_match = fuzzy_match_question_and_responses(row, response_dict_df)
+        if best_match is not None:
+            return pd.Series({
+                'Question_matched': best_match['Question'],
+                'Hebrew_dict': best_match['Hebrew_dict'],
+                'English_dict': best_match['English_dict']
+            })
+        return pd.Series({'Question_matched': None, 'Hebrew_dict': None, 'English_dict': None})
 
-    merged_df = pd.merge(comprehensive_data_df, 
-                         response_dict_df[['Form', 'Question', 'Hebrew_dict', 'English_dict']], 
-                         left_on=['Form_matched', 'Question_matched'], 
-                         right_on=['Form', 'Question'], 
-                         how='left')
+    matched_data = comprehensive_data_df.apply(match_and_fill, axis=1)
+    comprehensive_data_df = pd.concat([comprehensive_data_df, matched_data], axis=1)
 
-    logging.info("Sample of Hebrew_dict before conversion:")
-    logging.info(merged_df['Hebrew_dict'].head())
+    logging.info("\nQuestions with empty Hebrew dictionary after matching:")
+    empty_hebrew = comprehensive_data_df[comprehensive_data_df['Hebrew_dict'].apply(lambda x: safe_len(x) == 0)]
+    for _, row in empty_hebrew[['Question name', 'Responses name', 'Question_matched', 'Hebrew_dict', 'English_dict']].drop_duplicates().iterrows():
+        logging.info(f"Original Question: {row['Question name']}")
+        logging.info(f"Original Response: {row['Responses name']}")
+        logging.info(f"Matched to: {row['Question_matched']}")
+        logging.info(f"Hebrew dict: {row['Hebrew_dict']}")
+        logging.info(f"English dict: {row['English_dict']}")
+        logging.info("---")
 
-    merged_df['Hebrew_dict'] = merged_df['Hebrew_dict'].fillna({}).apply(safe_dict_convert)
-    merged_df['English_dict'] = merged_df['English_dict'].fillna({}).apply(safe_dict_convert)
-
-    logging.info("Sample of Hebrew_dict after conversion:")
-    logging.info(merged_df['Hebrew_dict'].head())
-
-    columns_to_drop = ['Form_matched', 'Question_matched', 'Form', 'Question']
-    merged_df = merged_df.drop(columns=columns_to_drop)
-
-    return merged_df
+    return comprehensive_data_df
 
 def main(response_eng_path, comprehensive_data_path, output_dir):
     response_dict_df = process_response_mappings(response_eng_path)
@@ -110,16 +156,22 @@ def main(response_eng_path, comprehensive_data_path, output_dir):
     if comprehensive_data_df is None:
         return
 
-    logging.info("\nExamples where Hebrew dictionary is empty:")
-    empty_hebrew = comprehensive_data_df[comprehensive_data_df['Hebrew_dict'].apply(lambda x: len(x) == 0)]
-    logging.info(empty_hebrew[['Question name', 'Responses name']].head(40))
+    logging.info("\nSummary of problematic matches:")
+    empty_hebrew = comprehensive_data_df[comprehensive_data_df['Hebrew_dict'].apply(lambda x: safe_len(x) == 0)]
+    logging.info(f"Total rows with empty or NaN Hebrew dictionary: {len(empty_hebrew)}")
+    
+    empty_english = comprehensive_data_df[comprehensive_data_df['English_dict'].apply(lambda x: safe_len(x) == 0)]
+    logging.info(f"Total rows with empty or NaN English dictionary: {len(empty_english)}")
 
-    logging.info("\nExamples where English dictionary is empty:")
-    empty_english = comprehensive_data_df[comprehensive_data_df['English_dict'].apply(lambda x: len(x) == 0)]
-    logging.info(empty_english[['Question name', 'Responses name']].head(40))
+    if not empty_hebrew.empty:
+        logging.info("\nSample of questions with empty Hebrew dictionary:")
+        for _, row in empty_hebrew[['Question name', 'Responses name', 'Question_matched']].head(5).iterrows():
+            logging.info(f"Question: {row['Question name']} | Response: {row['Responses name']} | Matched to: {row['Question_matched']}")
 
-    logging.info(f"\nTotal rows with empty Hebrew dictionary: {len(empty_hebrew)}")
-    logging.info(f"Total rows with empty English dictionary: {len(empty_english)}")
+    if not empty_english.empty:
+        logging.info("\nSample of questions with empty English dictionary:")
+        for _, row in empty_english[['Question name', 'Responses name', 'Question_matched']].head(5).iterrows():
+            logging.info(f"Question: {row['Question name']} | Response: {row['Responses name']} | Matched to: {row['Question_matched']}")
 
     output_file = f"{output_dir}/comprehensive_ema_data_eng_updated.csv"
     comprehensive_data_df.to_csv(output_file, index=False)
