@@ -5,6 +5,7 @@ import logging
 from fuzzywuzzy import fuzz, process
 import ast
 import numpy as np
+import json
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -54,12 +55,23 @@ def process_response_mappings(response_eng_path):
     response_eng_df['Hebrew_dict'] = response_eng_df['Responses'].apply(clean_and_process_responses)
     response_eng_df['English_dict'] = response_eng_df['Responses_English'].apply(clean_and_process_responses)
 
+    # Add English_Question column
+    response_eng_df['English_Question'] = ''  # You'll need to fill this with the actual English translations
+
+    # Add Count column (will be filled later)
+    response_eng_df['Response_Counts'] = '{}'
+
     logging.info("\nResponses with no keys:")
     for index, row in response_eng_df.iterrows():
         if len(row['Hebrew_dict']) == 0 and not pd.isna(row['Responses']):
             logging.info(f"Hebrew - Question: {row['Question']}, Response: {row['Responses']}")
         if len(row['English_dict']) == 0 and not pd.isna(row['Responses_English']):
             logging.info(f"English - Question: {row['Question']}, Response: {row['Responses_English']}")
+
+    # Reorder columns
+    columns_order = ['Form', 'English_Question', 'Question', 'Responses', 'Responses_English', 
+                     'Hebrew_dict', 'English_dict', 'Response_Counts']
+    response_eng_df = response_eng_df[columns_order]
 
     return response_eng_df
 
@@ -131,30 +143,42 @@ def process_comprehensive_data(comprehensive_data_path, response_dict_df):
     matched_data = comprehensive_data_df.apply(match_and_fill, axis=1)
     comprehensive_data_df = pd.concat([comprehensive_data_df, matched_data], axis=1)
 
-    logging.info("\nQuestions with empty Hebrew dictionary after matching:")
-    empty_hebrew = comprehensive_data_df[comprehensive_data_df['Hebrew_dict'].apply(lambda x: safe_len(x) == 0)]
-    for _, row in empty_hebrew[['Question name', 'Responses name', 'Question_matched', 'Hebrew_dict', 'English_dict']].drop_duplicates().iterrows():
-        logging.info(f"Original Question: {row['Question name']}")
-        logging.info(f"Original Response: {row['Responses name']}")
-        logging.info(f"Matched to: {row['Question_matched']}")
-        logging.info(f"Hebrew dict: {row['Hebrew_dict']}")
-        logging.info(f"English dict: {row['English_dict']}")
-        logging.info("---")
-
     return comprehensive_data_df
+
+def calculate_response_counts(comprehensive_data_df, response_dict_df):
+    for _, row in response_dict_df.iterrows():
+        question = row['Question']
+        hebrew_dict = row['Hebrew_dict']
+        
+        question_data = comprehensive_data_df[comprehensive_data_df['Question_matched'] == question]
+        
+        response_counts = question_data['Responses name'].value_counts().to_dict()
+        
+        # Map the response counts to the numerical keys
+        mapped_counts = {hebrew_dict.get(k, k): v for k, v in response_counts.items()}
+        
+        response_dict_df.loc[response_dict_df['Question'] == question, 'Response_Counts'] = json.dumps(mapped_counts)
+    
+    return response_dict_df
 
 def main(response_eng_path, comprehensive_data_path, output_dir):
     response_dict_df = process_response_mappings(response_eng_path)
     if response_dict_df is None:
         return
 
-    processed_response_mappings_path = f"{output_dir}/processed_response_mappings.csv"
-    response_dict_df.to_csv(processed_response_mappings_path, index=False)
-    logging.info(f"Processed response mappings saved to: {processed_response_mappings_path}")
-
     comprehensive_data_df = process_comprehensive_data(comprehensive_data_path, response_dict_df)
     if comprehensive_data_df is None:
         return
+    
+    # Drop unnecessary columns
+    response_dict_df = response_dict_df.drop(columns=['Responses', 'Responses_English'])
+
+    # Calculate response counts
+    response_dict_df = calculate_response_counts(comprehensive_data_df, response_dict_df)
+
+    processed_response_mappings_path = f"{output_dir}/processed_response_mappings.csv"
+    response_dict_df.to_csv(processed_response_mappings_path, index=False)
+    logging.info(f"Processed response mappings saved to: {processed_response_mappings_path}")
 
     logging.info("\nSummary of problematic matches:")
     empty_hebrew = comprehensive_data_df[comprehensive_data_df['Hebrew_dict'].apply(lambda x: safe_len(x) == 0)]
