@@ -6,6 +6,7 @@ from fuzzywuzzy import fuzz, process
 import ast
 import numpy as np
 import json
+from utils import translate_hebrew
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -42,9 +43,10 @@ def fuzzy_match_question(question, choices, threshold=80):
         return matches[0][0]
     return None
 
-def process_response_mappings(response_eng_path):
+def process_response_mappings(response_eng_path, comprehensive_data_path):
     response_eng_df = load_data(response_eng_path)
-    if response_eng_df is None:
+    comprehensive_df = load_data(comprehensive_data_path)
+    if response_eng_df is None or comprehensive_df is None:
         return None
 
     response_eng_df = response_eng_df.rename(columns={'Responses.1': 'Responses_English'})
@@ -56,7 +58,8 @@ def process_response_mappings(response_eng_path):
     response_eng_df['English_dict'] = response_eng_df['Responses_English'].apply(clean_and_process_responses)
 
     # Add English_Question column
-    response_eng_df['English_Question'] = ''  # You'll need to fill this with the actual English translations
+    question_to_english = comprehensive_df.set_index('Question name')['English_Question'].to_dict()
+    response_eng_df['English_Question'] = response_eng_df['Question'].map(question_to_english)
 
     # Add Count column (will be filled later)
     response_eng_df['Response_Counts'] = '{}'
@@ -68,9 +71,14 @@ def process_response_mappings(response_eng_path):
         if len(row['English_dict']) == 0 and not pd.isna(row['Responses_English']):
             logging.info(f"English - Question: {row['Question']}, Response: {row['Responses_English']}")
 
+    logging.info("Response mapping DataFrame columns:")
+    logging.info(response_eng_df.columns.tolist())
+    
+    logging.info("\nFirst few rows of response_eng_df:")
+    logging.info(response_eng_df.head().to_string())
+
     # Reorder columns
-    columns_order = ['Form', 'English_Question', 'Question', 'Responses', 'Responses_English', 
-                     'Hebrew_dict', 'English_dict', 'Response_Counts']
+    columns_order = ['Form', 'Question', 'English_Question', 'Responses', 'Responses_English', 'Hebrew_dict', 'English_dict', 'Response_Counts']
     response_eng_df = response_eng_df[columns_order]
 
     return response_eng_df
@@ -94,6 +102,10 @@ def safe_dict_convert(x):
     return {}
 
 def fuzzy_match_question_and_responses(row, response_dict_df, question_threshold=80, response_threshold=70):
+    logging.info(f"\nMatching for question: {row['Question name']}")
+    logging.info(f"Available columns in row: {row.index.tolist()}")
+    logging.info(f"Available columns in response_dict_df: {response_dict_df.columns.tolist()}")
+
     best_match = None
     best_score = 0
     
@@ -102,8 +114,8 @@ def fuzzy_match_question_and_responses(row, response_dict_df, question_threshold
         
         if question_score >= question_threshold:
             response_score = max(
-                fuzz.token_set_ratio(str(row['Responses name']), str(ref_row['Responses'])),
-                fuzz.token_set_ratio(str(row['Responses name']), ' '.join(ref_row['Hebrew_dict'].keys()))
+                fuzz.token_set_ratio(str(row['Responses name']), ' '.join(ref_row['Hebrew_dict'].keys())),
+                fuzz.token_set_ratio(str(row['Responses name']), ' '.join(ref_row['English_dict'].keys()))
             )
             
             combined_score = (question_score + response_score) / 2
@@ -114,9 +126,10 @@ def fuzzy_match_question_and_responses(row, response_dict_df, question_threshold
     
     if best_match is None or best_score < 90:  # Log only if no match or low confidence match
         logging.warning(f"Potential mismatch for '{row['Question name']}' with response '{row['Responses name']}'")
-        if best_match:
+        if best_match is not None:
             logging.warning(f"Best match: '{best_match['Question']}' with score {best_score}")
-            logging.warning(f"Matched response: '{best_match['Responses']}'")
+            logging.warning(f"Matched Hebrew responses: {best_match['Hebrew_dict']}")
+            logging.warning(f"Matched English responses: {best_match['English_dict']}")
         logging.warning("---")
     
     return best_match
@@ -130,6 +143,18 @@ def process_comprehensive_data(comprehensive_data_path, response_dict_df):
 
     comprehensive_data_df['Form_matched'] = comprehensive_data_df['Form name'].apply(lambda x: fuzzy_match(x, response_dict_df['Form']))
     
+    logging.info("Comprehensive data DataFrame columns:")
+    logging.info(comprehensive_data_df.columns.tolist())
+    
+    logging.info("\nFirst few rows of comprehensive_data_df:")
+    logging.info(comprehensive_data_df.head().to_string())
+
+    logging.info("\nResponse dict DataFrame columns:")
+    logging.info(response_dict_df.columns.tolist())
+    
+    logging.info("\nFirst few rows of response_dict_df:")
+    logging.info(response_dict_df.head().to_string())
+
     def match_and_fill(row):
         best_match = fuzzy_match_question_and_responses(row, response_dict_df)
         if best_match is not None:
@@ -154,15 +179,19 @@ def calculate_response_counts(comprehensive_data_df, response_dict_df):
         
         response_counts = question_data['Responses name'].value_counts().to_dict()
         
-        # Map the response counts to the numerical keys
-        mapped_counts = {hebrew_dict.get(k, k): v for k, v in response_counts.items()}
+        # Map the response counts to the numerical keys and translate if necessary
+        mapped_counts = {}
+        for k, v in response_counts.items():
+            hebrew_key = next((key for key, value in hebrew_dict.items() if value == k), k)
+            english_key = translate_hebrew(hebrew_key)
+            mapped_counts[english_key] = v
         
         response_dict_df.loc[response_dict_df['Question'] == question, 'Response_Counts'] = json.dumps(mapped_counts)
     
     return response_dict_df
 
 def main(response_eng_path, comprehensive_data_path, output_dir):
-    response_dict_df = process_response_mappings(response_eng_path)
+    response_dict_df = process_response_mappings(response_eng_path, comprehensive_data_path)
     if response_dict_df is None:
         return
 
@@ -170,9 +199,6 @@ def main(response_eng_path, comprehensive_data_path, output_dir):
     if comprehensive_data_df is None:
         return
     
-    # Drop unnecessary columns
-    response_dict_df = response_dict_df.drop(columns=['Responses', 'Responses_English'])
-
     # Calculate response counts
     response_dict_df = calculate_response_counts(comprehensive_data_df, response_dict_df)
 
