@@ -61,6 +61,10 @@ def process_response_mappings(response_eng_path, comprehensive_data_path):
     question_to_english = comprehensive_df.set_index('Question name')['English_Question'].to_dict()
     response_eng_df['English_Question'] = response_eng_df['Question'].map(question_to_english)
 
+    # Add Variable column
+    question_to_variable = comprehensive_df.set_index('Question name')['Variable'].to_dict()
+    response_eng_df['Variable'] = response_eng_df['Question'].map(question_to_variable)
+
     # Add Count column (will be filled later)
     response_eng_df['Response_Counts'] = '{}'
 
@@ -78,7 +82,7 @@ def process_response_mappings(response_eng_path, comprehensive_data_path):
     logging.info(response_eng_df.head().to_string())
 
     # Reorder columns
-    columns_order = ['Form', 'Question', 'English_Question', 'Responses', 'Responses_English', 'Hebrew_dict', 'English_dict', 'Response_Counts']
+    columns_order = ['Form', 'Question', 'English_Question', 'Variable', 'Responses', 'Responses_English', 'Hebrew_dict', 'English_dict', 'Response_Counts']
     response_eng_df = response_eng_df[columns_order]
 
     return response_eng_df
