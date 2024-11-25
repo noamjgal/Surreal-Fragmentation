@@ -16,6 +16,6 @@ if [ ! -f "EMA_process.py" ]; then
 fi
 
 # Run the Python script with full error output
-python EMA_process.py response_mapping_english_add.csv comprehensive_ema_data_eng.csv output 2>&1
+python EMA_process.py data/response_mapping_english_add.csv data/comprehensive_ema_data_eng.csv output 2>&1
 
 echo "Script execution completed"
