@@ -21,7 +21,7 @@ logging.basicConfig(
 
 def setup_directory_structure():
     """Create all necessary directories."""
-    base_dirs = ["data/raw", "data/processed/participants", "logs", "output"]
+    base_dirs = ["data/raw", "data/processed/participants", "logs"]
     for dir_path in base_dirs:
         os.makedirs(Path(project_root) / dir_path, exist_ok=True)
 
@@ -85,6 +85,7 @@ def calculate_participant_statistics(ema_data):
         'total_emas': 0,
         'participants_with_full_week': 0,
         'participant_summaries': {},
+        'daily_response_counts': {1: 0, 2: 0, 3: 0, 4: 0},  # Overall daily distribution
         'error_summary': {}
     }
     
@@ -92,19 +93,37 @@ def calculate_participant_statistics(ema_data):
         participant_data = ema_data[ema_data['Participant ID'] == participant_id]
         dates = pd.to_datetime(participant_data['Date form sent']).dt.date.unique()
         
-        # Count unique EMAs (based on unique timestamps)
-        unique_times = pd.to_datetime(participant_data['Date form sent']).unique()
-        ema_count = len(unique_times)
-        expected_emas = len(dates) * 3  # 3 EMAs per day
-        completion_rate = ema_count / expected_emas if expected_emas > 0 else 0
+        # Count unique form completions per day
+        daily_counts = participant_data.groupby([
+            pd.to_datetime(participant_data['Date form sent']).dt.date,
+            'Form name'
+        ]).size().reset_index()
         
-        stats['total_emas'] += ema_count
+        # Count number of unique forms per day
+        forms_per_day = daily_counts.groupby(daily_counts['Date form sent']).size()
+        
+        for count in forms_per_day:
+            if count >= 4:
+                stats['daily_response_counts'][4] += 1
+            else:
+                stats['daily_response_counts'][count] += 1
+        
+        # Calculate total unique EMAs
+        unique_emas = len(participant_data.groupby([
+            pd.to_datetime(participant_data['Date form sent']).dt.date,
+            'Form name'
+        ]))
+        
+        expected_emas = len(dates) * 3  # 3 unique forms per day
+        completion_rate = unique_emas / expected_emas if expected_emas > 0 else 0
+        
+        stats['total_emas'] += unique_emas
         if len(dates) == 7:
             stats['participants_with_full_week'] += 1
             
         stats['participant_summaries'][participant_id] = {
             'days': len(dates),
-            'emas': ema_count,
+            'emas': unique_emas,
             'expected_emas': expected_emas,
             'completion_rate': f"{completion_rate:.2%}",
             'complete_week': len(dates) == 7
@@ -134,8 +153,17 @@ def print_final_report(stats, error_dict):
     """Print final processing report."""
     logging.info("\n=== Processing Summary ===")
     logging.info(f"Total Participants: {stats['total_participants']}")
-    logging.info(f"Total EMAs Processed: {stats['total_emas']}")
+    logging.info(f"Total Unique EMAs Processed: {stats['total_emas']}")
     logging.info(f"Participants with Complete Week: {stats['participants_with_full_week']}")
+    
+    logging.info("\nDaily Response Distribution (based on unique form completions):")
+    total_days = sum(stats['daily_response_counts'].values())
+    for responses, count in stats['daily_response_counts'].items():
+        percentage = (count / total_days * 100) if total_days > 0 else 0
+        if responses == 4:
+            logging.info(f"Days with {responses}+ forms: {count} ({percentage:.1f}%)")
+        else:
+            logging.info(f"Days with {responses} form(s): {count} ({percentage:.1f}%)")
     
     if error_dict:
         logging.info("\nProcessing Errors:")
@@ -173,67 +201,46 @@ def main():
     success_count = 0
     
     for participant_id in ema_data['Participant ID'].unique():
-        participant_dir = Path(project_root) / "data" / "processed" / "participants" / f"participant_{participant_id}"
+        participant_dir = Path(project_root) / "data" / "processed" / "participants"
+        os.makedirs(participant_dir, exist_ok=True)
         
-        # Process each participant
-        for date in pd.to_datetime(ema_data[ema_data['Participant ID'] == participant_id]['Date form sent']).dt.date.unique():
-            participant_dir = Path(project_root) / "data" / "processed" / "participants" / f"participant_{participant_id}" / str(date)
-            os.makedirs(participant_dir, exist_ok=True)
+        all_responses = []
+        
+        # Process each participant's responses
+        participant_data = ema_data[ema_data['Participant ID'] == participant_id]
+        for _, row in participant_data.iterrows():
+            date = pd.to_datetime(row['Date form sent']).date()
+            time = pd.to_datetime(row['Date form sent']).time()
             
-            # Group by time of day
-            day_data = ema_data[(ema_data['Participant ID'] == participant_id) & (pd.to_datetime(ema_data['Date form sent']).dt.date == date)]
-            times = pd.to_datetime(day_data['Date form sent']).dt.time
-            
-            for time in times.unique():
-                try:
-                    # Create filename with timestamp
-                    timestamp = datetime.combine(date, time).strftime('%Y%m%d_%H%M')
-                    ema_num = times.unique().tolist().index(time) + 1
-                    
-                    results_df = process_participant_ema(
-                        participant_id, date, time,
-                        day_data[pd.to_datetime(day_data['Date form sent']).dt.time == time],
-                        mappings_df
-                    )
-                    
-                    # Save as CSV
-                    output_path = participant_dir / f"EMA_{ema_num}_{timestamp}.csv"
-                    results_df.to_csv(output_path, index=False)
-                    success_count += 1
-                    
-                    # Calculate and save scale averages
-                    scale_averages = calculate_scale_averages(participant_dir)
-                    if scale_averages is not None:
-                        scale_averages.to_csv(participant_dir / "scale_averages.csv", index=False)
-                
-                except Exception as e:
-                    logging.error(f"Error processing {participant_id} on {date} at {time}: {e}")
-                    error_count += 1
-            
-            # Create daily summary
             try:
-                all_emas = pd.concat([pd.read_csv(f) for f in participant_dir.glob("EMA_*.csv")])
-                summary = all_emas.groupby(['Scale', 'Variable']).agg({
-                    'Numeric_Value': ['mean', 'std', 'count'],
-                    'Points': 'first',
-                    'Correct_Order': 'first'
-                }).reset_index()
+                results_df = process_participant_ema(
+                    participant_id, date, time,
+                    participant_data[pd.to_datetime(participant_data['Date form sent']).dt.time == time],
+                    mappings_df
+                )
                 
-                summary.to_csv(participant_dir / "daily_summary.csv", index=False)
+                # Add datetime column
+                results_df['datetime'] = pd.to_datetime(f"{date} {time}")
+                all_responses.append(results_df)
+                
             except Exception as e:
-                logging.error(f"Error creating daily summary for {participant_id} on {date}: {e}")
+                logging.error(f"Error processing {participant_id} on {date} at {time}: {e}")
                 error_count += 1
+        
+        if all_responses:
+            # Combine all responses and sort by datetime
+            combined_responses = pd.concat(all_responses).sort_values('datetime')
+            output_path = participant_dir / f"participant_{participant_id}_responses.csv"
+            combined_responses.to_csv(output_path, index=False)
 
     print_final_report(stats, {})
     
     # Print sample output structure
-    sample_participant = next(iter(ema_data['Participant ID'].unique()))
-    sample_dir = Path(project_root) / "data" / "processed" / "participants" / f"participant_{sample_participant}"
-    
-    logging.info("\nSample Output Files:")
-    for file in sample_dir.glob("*.csv"):
-        print(f"\n- {file.name}")
-        df = pd.read_csv(file)
+    logging.info("\nSample Output Structure:")
+    sample_file = next(Path(project_root).glob("data/processed/participants/participant_*.csv"))
+    if sample_file.exists():
+        print(f"\n- {sample_file.name}")
+        df = pd.read_csv(sample_file)
         print(df.head(2))
 
 if __name__ == "__main__":
