@@ -3,11 +3,6 @@ import logging
 from pathlib import Path
 import json
 import sys
-import argparse
-
-# Add project root to Python path
-project_root = str(Path(__file__).parent.parent)
-sys.path.append(project_root)
 
 # Set up logging
 logging.basicConfig(
@@ -17,6 +12,10 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+
+# Add project root to Python path (from EMA_participant_processing.py)
+project_root = str(Path(__file__).parent.parent)
+sys.path.append(project_root)
 
 def recode_traffic_v9(value):
     """
@@ -29,97 +28,73 @@ def recode_traffic_v9(value):
 def recode_calm_v7(value):
     """
     Reorder responses for EMA V7 calm question
-    1->1, 3->2, 2->3, 4->4
+    1->1, 2->3, 3->2, 4->4
     """
-    mapping = {'1': '1', '3': '2', '2': '3', '4': '4'}
+    mapping = {'1': '1', '2': '3', '3': '2', '4': '4'}
     return mapping.get(str(value), value)
 
-def reverse_scale(value, max_value):
+def reverse_scale(value, max_value=4):
     """
     Reverse numerical coding for FALSE items
+    For 4-point scale: 1->4, 2->3, 3->2, 4->1
+    For 5-point scale: 1->5, 2->4, 3->3, 4->2, 5->1
     """
     try:
+        value = str(value)
+        if not value.isdigit():
+            return value
         value = int(value)
         return str(max_value - value + 1)
-    except (ValueError, TypeError):
+    except:
         return value
 
-def process_response(value, metadata):
+def process_response(response, question_metadata):
     """
-    Process response based on metadata
+    Process individual response based on question metadata
     """
-    if pd.isna(value):
-        return value
-        
-    correct_order = metadata.get('correct_order', '')
-    max_value = metadata.get('max_value', 4)
+    correct_order = question_metadata['correct_order']
+    max_value = question_metadata.get('max_value', 4)
     
     if correct_order == 'RECODE':
-        if metadata.get('Variable') == 'TRAFFIC' and metadata.get('Form') == 'EMA V9':
-            return recode_traffic_v9(value)
-        elif metadata.get('Variable') == 'CALM' and metadata.get('Form') == 'EMA V7':
-            return recode_calm_v7(value)
+        if 'traffic' in question_metadata['question_id'].lower():
+            return recode_traffic_v9(response)
+        elif 'calm' in question_metadata['question_id'].lower():
+            return recode_calm_v7(response)
     elif correct_order == 'FALSE':
-        return reverse_scale(value, max_value)
+        return reverse_scale(response, max_value)
     
-    return value
+    return response
 
 def main():
-    parser = argparse.ArgumentParser(description="Process EMA response mappings")
-    parser.add_argument("response_eng_path", help="Path to the response mapping English CSV file")
-    parser.add_argument("comprehensive_data_path", help="Path to the comprehensive EMA data CSV file")
-    parser.add_argument("output_dir", help="Path to the output directory")
-    args = parser.parse_args()
-
-    # Load raw data
-    raw_data_path = Path(args.comprehensive_data_path)
-    if not raw_data_path.exists():
-        logging.error(f"Raw data file not found: {raw_data_path}")
-        return
+    # Raw data path (based on EMA_participant_processing.py structure)
+    raw_data_path = Path(project_root) / "data/raw/participants"
+    
+    # Metadata path (we'll create this)
+    metadata_path = Path(project_root) / "data/metadata/question_metadata.json"
+    
+    # Process each participant's data
+    for participant_file in raw_data_path.glob("*.csv"):
+        logging.info(f"Processing {participant_file.name}")
+        df = pd.read_csv(participant_file)
         
-    df = pd.read_csv(raw_data_path)
-    
-    # Load response mappings
-    response_mappings_path = Path(args.response_eng_path)
-    if not response_mappings_path.exists():
-        logging.error(f"Response mappings file not found: {response_mappings_path}")
-        return
+        # Load question metadata
+        with open(metadata_path) as f:
+            metadata = json.load(f)
         
-    response_mappings = pd.read_csv(response_mappings_path)
-    
-    # Create metadata dictionary from response mappings
-    metadata = {}
-    for _, row in response_mappings.iterrows():
-        metadata[row['Question']] = {
-            'Form': row['Form'],
-            'Variable': row['Variable'],
-            'correct_order': row.get('correct_order', ''),
-            'max_value': row.get('max_value', 4)
-        }
-    
-    # Process each response
-    for question in metadata:
-        if question in df.columns:
-            df[question] = df[question].apply(
-                lambda x: process_response(x, metadata[question])
-            )
-    
-    # Save processed data
-    output_path = Path(args.output_dir) / "processed_comprehensive_ema_data.csv"
-    df.to_csv(output_path, index=False)
-    
-    # Print sample of recoded data for verification
-    logging.info("\nSample of recoded data:")
-    print(df.head())
-    
-    # Verify specific recodings
-    logging.info("\nVerifying Traffic V9 recoding:")
-    traffic_v9 = df[df['Form'] == 'EMA V9']['TRAFFIC']
-    print(traffic_v9.value_counts())
-    
-    logging.info("\nVerifying Calm V7 recoding:")
-    calm_v7 = df[df['Form'] == 'EMA V7']['CALM']
-    print(calm_v7.value_counts())
+        # Process each response
+        for question_id in metadata:
+            if question_id in df.columns:
+                df[question_id] = df[question_id].apply(
+                    lambda x: process_response(x, metadata[question_id])
+                )
+        
+        # Save processed data
+        output_path = Path(project_root) / "data/processed/participants" / f"recoded_{participant_file.name}"
+        df.to_csv(output_path, index=False)
+        
+        # Print sample of recoded data for verification
+        logging.info(f"\nSample of recoded data for {participant_file.name}:")
+        print(df.head())
 
 if __name__ == "__main__":
     main() 
