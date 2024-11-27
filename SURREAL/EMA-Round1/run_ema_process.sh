@@ -19,4 +19,3 @@ python EMA_process.py data/response_mapping_english_add.csv data/comprehensive_e
 
 echo "Script execution completed"
 SURREAL/EMA-Round1/data/output/comprehensive_ema_data_eng_updated.csv
-

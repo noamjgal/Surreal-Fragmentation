@@ -92,112 +92,110 @@ def process_response_mappings(response_eng_path, comprehensive_data_path):
     columns_order = ['Form', 'Question', 'English_Question', 'Variable', 'Responses', 'Responses_English', 'Hebrew_dict', 'English_dict', 'Response_Counts']
     response_eng_df = response_eng_df[columns_order]
 
-    # Standardize EFFORT response mappings
-    effort_mapping = {
-        # Hebrew responses
-        'במידה מתונה': '2',
-        'במידה מסוימת': '2',
-        'לעתים רחוקות': '1',
-        'ככלל לא': '1',
-        'בכלל לא': '1',
-        'לפעמים': '2',
-        'בדרך כלל': '3',
-        'כל הזמן': '4',
-        # Additional variations
-        'מסכים': '3',
-        'לא מסכים': '2',
-        'בהחלט לא מסכים': '1',
-        'אני לא מסכים': '1'
+    # Standardize EFFORT response mappings for all EMAs
+    effort_mappings = {
+        'EMA V1': {
+            'Hebrew': {
+                'במידה מתונה': '2',
+                'במידה מסוימת': '2',
+                'לעתים רחוקות': '1',
+                'בכלל לא': '1',
+                'לפעמים': '2',
+                'בדרך כלל': '3',
+                'כל הזמן': '4'
+            },
+            'English': {
+                'Moderately': '2',
+                'Somewhat': '2',
+                'Rarely': '1',
+                'Not at all': '1',
+                'Sometimes': '2',
+                'Usually': '3',
+                'All the time': '4'
+            }
+        },
+        'EMA V2': {
+            'Hebrew': {
+                'במידה מתונה': '2',
+                'לעתים רחוקות': '1',
+                'בכלל לא': '1',
+                'לפעמים': '2',
+                'בדרך כלל': '3',
+                'כל הזמן': '4'
+            },
+            'English': {
+                'Moderately': '2',
+                'Rarely': '1',
+                'Not at all': '1',
+                'Sometimes': '2',
+                'Usually': '3',
+                'All the time': '4'
+            }
+        },
+        'EMA V3': {
+            'Hebrew': {
+                'במידה מתונה': '2',
+                'לעתים רחוקות': '1',
+                'בכלל לא': '1',
+                'לפעמים': '2',
+                'בדרך כלל': '3',
+                'כל הזמן': '4'
+            },
+            'English': {
+                'Moderately': '2',
+                'Rarely': '1',
+                'Not at all': '1',
+                'Sometimes': '2',
+                'Usually': '3',
+                'All the time': '4'
+            }
+        },
+        'EMA V4': {
+            'Hebrew': {
+                'לעתים רחוקות': '4',
+                'לפעמים': '3',
+                'בכלל לא': '5',
+                'בדרך כלל': '2',
+                'כל הזמן': '1'
+            },
+            'English': {
+                'Rarely': '4',
+                'Sometimes': '3',
+                'Not at all': '5',
+                'Usually': '2',
+                'All the time': '1'
+            }
+        }
     }
 
-    def update_response_counts(row):
-        if pd.isna(row['Response_Counts']) or row['Response_Counts'] == '{}':
-            row['Response_Counts'] = '{}'
-        
-        try:
-            counts = eval(row['Response_Counts'])
-            if not isinstance(counts, dict):
-                counts = {}
-        except:
-            counts = {}
-            
-        return str(counts)
+    # Process EFFORT questions for each form
+    for form_name, mappings in effort_mappings.items():
+        effort_questions = comprehensive_df[
+            (comprehensive_df['Form name'] == form_name) & 
+            (comprehensive_df['Variable'] == 'EFFORT')
+        ]
 
-    # Process EFFORT questions specifically
-    effort_questions = comprehensive_df[
-        (comprehensive_df['Variable'] == 'EFFORT') & 
-        (comprehensive_df['Form name'].str.contains('EMA V', na=False))
-    ]
+        if len(effort_questions) > 0:
+            # Create form dictionary
+            form_dict = {
+                'Form': form_name,
+                'Question': effort_questions['Question name'].iloc[0],
+                'Variable': 'EFFORT',
+                'Responses': ';'.join([f"{k}:{v}" for k, v in mappings['Hebrew'].items()]),
+                'Responses_English': ';'.join([f"{k}:{v}" for k, v in mappings['English'].items()]),
+                'Hebrew_dict': mappings['Hebrew'],
+                'English_dict': mappings['English'],
+                'English_Question': effort_questions['English_Question'].iloc[0] if 'English_Question' in effort_questions.columns else '',
+                'Response_Counts': '{}'  # Will be filled later
+            }
 
-    for form_name, form_responses in effort_questions.groupby('Form name'):
-        logging.info(f"\nProcessing EFFORT responses for {form_name}")
-        logging.info(f"Found {len(form_responses)} responses")
-        logging.info("Sample responses:")
-        logging.info(form_responses[['Responses ID', 'Responses name']].head())
-        
-        logging.info(f"\nDEBUG - EFFORT Response Details for {form_name}:")
-        
-        # Create response mappings
-        effort_mapping = {
-            'במידה מתונה': '2',
-            'לעתים רחוקות': '1',
-            'בכלל לא': '1',
-            'לפעמים': '2',
-            'בדרך כלל': '3',
-            'כל הזמן': '4'
-        }
-        
-        effort_mapping_eng = {
-            'Moderately': '2',
-            'Rarely': '1',
-            'Not at all': '1',
-            'Sometimes': '2',
-            'Usually': '3',
-            'All the time': '4'
-        }
-        
-        logging.info("\nResponse mappings for this form:")
-        logging.info(f"Mappings: {effort_mapping}")
-        
-        # Count responses
-        response_counts = form_responses['Responses name'].value_counts().to_dict()
-        logging.info("\nUnique responses found:")
-        logging.info(f"Responses: {form_responses['Responses name'].unique()}")
-        logging.info("\nResponse ID distribution:")
-        logging.info(f"ID counts: {form_responses['Responses ID'].value_counts()}")
-        
-        # Create form dictionary
-        form_dict = {
-            'Form': form_name,
-            'Question': form_responses['Question name'].iloc[0],
-            'Variable': 'EFFORT',
-            'Responses': ';'.join([f"{k}:{v}" for k, v in effort_mapping.items()]),
-            'Responses_English': ';'.join([f"{k}:{v}" for k, v in effort_mapping_eng.items()]),
-            'Hebrew_dict': effort_mapping,  # Store as dictionary, not string
-            'English_dict': effort_mapping_eng,  # Store as dictionary, not string
-            'English_Question': form_responses['English_Question'].iloc[0] if 'English_Question' in form_responses.columns else '',
-            'Response_Counts': response_counts  # Store as dictionary, not string
-        }
-        
-        # Debug logging for response counting
-        logging.info("\nCounting process:")
-        counts = {}
-        for _, row in form_responses.iterrows():
-            response_id = row['Responses ID']
-            response_text = row['Responses name']
-            logging.info(f"Processing - ID: {response_id}, Text: {response_text}")
-            if response_id not in counts:
-                counts[response_id] = 0
-            counts[response_id] += 1
-            logging.info(f"Updated count for ID {response_id}: {counts[response_id]}")
-        
-        # Update or append to response_eng_df
-        mask = (response_eng_df['Form'] == form_name) & (response_eng_df['Variable'] == 'EFFORT')
-        if mask.any():
-            for key, value in form_dict.items():
-                response_eng_df.loc[mask, key] = value
-        else:
-            response_eng_df = pd.concat([response_eng_df, pd.DataFrame([form_dict])], ignore_index=True)
+            # Update or append to response_eng_df
+            mask = (response_eng_df['Form'] == form_name) & (response_eng_df['Variable'] == 'EFFORT')
+            if mask.any():
+                for key, value in form_dict.items():
+                    response_eng_df.loc[mask, key] = value
+            else:
+                response_eng_df = pd.concat([response_eng_df, pd.DataFrame([form_dict])], ignore_index=True)
 
     # Apply the counts update
     response_eng_df['Response_Counts'] = response_eng_df.apply(update_response_counts, axis=1)
@@ -213,6 +211,27 @@ def process_response_mappings(response_eng_path, comprehensive_data_path):
                  eval(x) if isinstance(x, str) else x
     )
     
+    # Fix EMA V1 EFFORT dictionaries
+    mask = (response_eng_df['Form'] == 'EMA V1') & (response_eng_df['Variable'] == 'EFFORT')
+    if mask.any():
+        response_eng_df.loc[mask, 'Hebrew_dict'] = {
+            'לעתים רחוקות': '4',
+            'לפעמים': '3',
+            'בכלל לא': '5',
+            'בדרך כלל': '2',
+            'כל הזמן': '1'
+        }
+        response_eng_df.loc[mask, 'English_dict'] = {
+            'Rarely': '4',
+            'Sometimes': '3',
+            'Not at all': '5',
+            'Usually': '2',
+            'All the time': '1'
+        }
+        # Update the string representations as well
+        response_eng_df.loc[mask, 'Responses'] = 'לעתים רחוקות:4;לפעמים:3;בכלל לא:5;בדרך כלל:2;כל הזמן:1'
+        response_eng_df.loc[mask, 'Responses_English'] = 'Rarely:4;Sometimes:3;Not at all:5;Usually:2;All the time:1'
+
     return response_eng_df
 
 def safe_len(x):
@@ -236,6 +255,14 @@ def safe_dict_convert(x):
 def fuzzy_match_question_and_responses(row, response_dict_df):
     # Calculate similarity scores for each potential match
     scores = []
+    
+    # Special handling for EFFORT questions
+    is_effort = any(keyword in str(row['Question name']) for keyword in [
+        'כל פעולה דורשת ממך מאמץ',
+        'דורשת ממך מאמץ רב',
+        'הרגשת שכל פעולה דורשת'
+    ])
+    
     for _, ref_row in response_dict_df.iterrows():
         try:
             # Convert string representation of dict to actual dict if needed
@@ -251,8 +278,16 @@ def fuzzy_match_question_and_responses(row, response_dict_df):
             elif isinstance(english_dict, float) and math.isnan(english_dict):
                 english_dict = {}
             
-            # Calculate similarity scores
-            question_score = fuzz.token_set_ratio(str(row['Question name']), str(ref_row['Question']))
+            # For EFFORT questions, only match with EFFORT mappings
+            if is_effort:
+                if ref_row['Variable'] != 'EFFORT' or ref_row['Form'] != row['Form name']:
+                    continue
+                # Use exact match for EFFORT questions
+                question_score = 100 if row['Question name'] == ref_row['Question'] else 0
+            else:
+                # Regular fuzzy matching for non-EFFORT questions
+                question_score = fuzz.token_set_ratio(str(row['Question name']), str(ref_row['Question']))
+            
             response_score = fuzz.token_set_ratio(
                 str(row['Responses name']), 
                 ' '.join(hebrew_dict.keys()) if hebrew_dict else ''
@@ -260,8 +295,12 @@ def fuzzy_match_question_and_responses(row, response_dict_df):
             
             form_match = 100 if row['Form name'] == ref_row['Form'] else 0
             
-            # Combined score with form match having high weight
-            combined_score = (question_score * 0.4 + response_score * 0.3 + form_match * 0.3)
+            # Adjusted scoring for EFFORT questions
+            if is_effort:
+                combined_score = question_score * 0.7 + form_match * 0.3
+            else:
+                combined_score = (question_score * 0.4 + response_score * 0.3 + form_match * 0.3)
+            
             scores.append((combined_score, ref_row))
             
         except Exception as e:
@@ -274,8 +313,9 @@ def fuzzy_match_question_and_responses(row, response_dict_df):
         
     best_score, best_match = max(scores, key=lambda x: x[0])
     
-    # Only return match if score is above threshold
-    if best_score > 60:  # You can adjust this threshold
+    # Higher threshold for EFFORT questions
+    threshold = 90 if is_effort else 60
+    if best_score > threshold:
         return best_match
     return None
 
@@ -559,26 +599,84 @@ def response_exists_in_mapping(response, form, variable, response_dict_df):
         return True
     return False
 
-def process_responses(form, variable, responses_df, response_dict_df):
-    # Only log when there are issues or important summaries
-    response_counts = responses_df[responses_df['Variable'] == variable]['Responses name'].value_counts()
-    
-    if response_counts.empty:
-        logging.warning(f"No responses found for {form} - {variable}")
+def parse_response_mapping(mapping_str):
+    """Parse response mapping string into a dictionary."""
+    if not isinstance(mapping_str, str):
         return {}
-    
-    # Check for unmapped responses
-    unmapped = []
-    for response in response_counts.index:
-        if not response_exists_in_mapping(response, form, variable, response_dict_df):
-            unmapped.append(response)
-    
-    # Only log if there are unmapped responses
-    if unmapped:
-        logging.warning(f"{form} - {variable}: Found {len(unmapped)} unmapped responses")
-        logging.debug(f"Unmapped responses: {', '.join(unmapped)}")  # Debug level for details
         
-    return dict(response_counts)
+    # Handle different formats
+    pairs = []
+    # Format 1: "key:value;key:value"
+    if ';' in mapping_str:
+        pairs = [pair.strip() for pair in mapping_str.split(';')]
+    # Format 2: "key:value"
+    else:
+        pairs = [mapping_str.strip()]
+        
+    result = {}
+    for pair in pairs:
+        if ':' not in pair:
+            continue
+        key, value = pair.split(':', 1)
+        key = key.strip()
+        value = value.strip()
+        if key and value:
+            result[key] = value
+            
+    return result
+
+def process_responses(comprehensive_data_df, response_eng_df):
+    """Process responses using the mapping information."""
+    # Initialize response counts in response_eng_df
+    response_eng_df['Response_Counts'] = response_eng_df['Response_Counts'].apply(
+        lambda x: {} if pd.isna(x) else x
+    )
+    
+    # Group questions by Form and Variable
+    grouped = comprehensive_data_df.groupby(['Form name', 'Variable'])
+    
+    for (form, variable), group in grouped:
+        if variable != 'EFFORT':
+            continue
+            
+        logging.info(f"\nProcessing EFFORT responses for {form}")
+        responses = group['Response'].tolist()
+        logging.info(f"Found {len(responses)} responses")
+        
+        # Get mapping for this form and variable
+        mapping_rows = response_eng_df[
+            (response_eng_df['Form'] == form) & 
+            (response_eng_df['Variable'] == variable)
+        ]
+        
+        if mapping_rows.empty:
+            logging.warning(f"No mapping found for {form} - {variable}")
+            continue
+            
+        # Get Hebrew response mapping
+        hebrew_dict = {}
+        for _, row in mapping_rows.iterrows():
+            if isinstance(row['Hebrew_dict'], str):
+                hebrew_dict.update(parse_response_mapping(row['Hebrew_dict']))
+            elif isinstance(row['Hebrew_dict'], dict):
+                hebrew_dict.update(row['Hebrew_dict'])
+
+        # Process each response
+        for response in responses:
+            if not isinstance(response, str):
+                continue
+                
+            response = response.strip()
+            if response in hebrew_dict:
+                response_id = hebrew_dict[response]
+                # Update counts
+                for _, row in mapping_rows.iterrows():
+                    if isinstance(row['Response_Counts'], dict):
+                        counts = row['Response_Counts']
+                        counts[response_id] = counts.get(response_id, 0) + 1
+                        row['Response_Counts'] = counts
+            else:
+                logging.warning(f"Response not found in mapping: {response}")
 
 def map_question_to_variable(question_text):
     """Map Hebrew questions to their corresponding variable names"""
@@ -608,6 +706,25 @@ def map_question_to_variable(question_text):
     
     return question_mapping.get(question_text, None)
 
+def update_response_counts(row):
+    """Update response counts for a given row"""
+    try:
+        hebrew_dict = row['Hebrew_dict']
+        if isinstance(hebrew_dict, str):
+            hebrew_dict = ast.literal_eval(hebrew_dict)
+        
+        counts = {}
+        for value in hebrew_dict.values():
+            if value in counts:
+                counts[value] += 1
+            else:
+                counts[value] = 1
+                
+        return json.dumps(counts)
+    except Exception as e:
+        logging.error(f"Error updating response counts: {e}")
+        return '{}'
+
 def main(response_eng_path, comprehensive_data_path, output_dir):
     response_dict_df = process_response_mappings(response_eng_path, comprehensive_data_path)
     if response_dict_df is None:
@@ -619,6 +736,61 @@ def main(response_eng_path, comprehensive_data_path, output_dir):
     
     # Calculate response counts
     response_dict_df = calculate_response_counts(comprehensive_data_df, response_dict_df)
+
+    # Explicitly fix EMA V1 EFFORT dictionaries in response_dict_df
+    v1_effort_mask = (response_dict_df['Form'] == 'EMA V1') & (response_dict_df['Variable'] == 'EFFORT')
+    if v1_effort_mask.any():
+        hebrew_dict = {
+            'לעתים רחוקות': '4',
+            'לפעמים': '3',
+            'בכלל לא': '5',
+            'בדרך כלל': '2',
+            'כל הזמן': '1'
+        }
+        english_dict = {
+            'Rarely': '4',
+            'Sometimes': '3',
+            'Not at all': '5',
+            'Usually': '2',
+            'All the time': '1'
+        }
+        
+        # Convert dictionaries to strings for storage
+        response_dict_df.loc[v1_effort_mask, 'Hebrew_dict'] = response_dict_df.loc[v1_effort_mask].apply(
+            lambda _: hebrew_dict, axis=1
+        )
+        response_dict_df.loc[v1_effort_mask, 'English_dict'] = response_dict_df.loc[v1_effort_mask].apply(
+            lambda _: english_dict, axis=1
+        )
+        # Update the string representations as well
+        response_dict_df.loc[v1_effort_mask, 'Responses'] = 'לעתים רחוקות:4;לפעמים:3;בכלל לא:5;בדרך כלל:2;כל הזמן:1'
+        response_dict_df.loc[v1_effort_mask, 'Responses_English'] = 'Rarely:4;Sometimes:3;Not at all:5;Usually:2;All the time:1'
+
+    # Also fix EMA V1 EFFORT dictionaries in comprehensive_data_df
+    v1_effort_comp_mask = (comprehensive_data_df['Form name'] == 'EMA V1') & (comprehensive_data_df['Variable'] == 'EFFORT')
+    if v1_effort_comp_mask.any():
+        comprehensive_data_df.loc[v1_effort_comp_mask, 'Hebrew_dict'] = comprehensive_data_df.loc[v1_effort_comp_mask].apply(
+            lambda _: {
+                'לעתים רחוקות': '4',
+                'לפעמים': '3',
+                'בכלל לא': '5',
+                'בדרך כלל': '2',
+                'כל הזמן': '1'
+            }, axis=1
+        )
+        comprehensive_data_df.loc[v1_effort_comp_mask, 'English_dict'] = comprehensive_data_df.loc[v1_effort_comp_mask].apply(
+            lambda _: {
+                'Rarely': '4',
+                'Sometimes': '3',
+                'Not at all': '5',
+                'Usually': '2',
+                'All the time': '1'
+            }, axis=1
+        )
+
+    # Verify the column names before saving
+    logging.info(f"Column names in response_dict_df: {response_dict_df.columns.tolist()}")
+    logging.info(f"Column names in comprehensive_data_df: {comprehensive_data_df.columns.tolist()}")
 
     processed_response_mappings_path = f"{output_dir}/processed_response_mappings.csv"
     response_dict_df.to_csv(processed_response_mappings_path, index=False)
