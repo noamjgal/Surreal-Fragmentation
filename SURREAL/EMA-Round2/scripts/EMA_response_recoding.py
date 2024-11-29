@@ -158,13 +158,9 @@ def process_reverse_coding(row, ema_data, recoded_ema):
     
     if not mask.any():
         logging.warning(f"No matching data found for Form: {form}, Variable: {variable}")
-        return 0
+        return 0, 0  # Return both changes and unchanged
     
-    # Print sample rows before recoding
-    logging.info("\nSample rows BEFORE recoding:")
-    sample_rows = recoded_ema[mask].head()
-    logging.info("\n" + sample_rows[['Form name', 'Variable', 'Responses ID']].to_string())
-    
+    # Print value distribution before recoding
     original_values = recoded_ema.loc[mask, 'Responses ID'].copy()
     value_counts_before = original_values.value_counts().sort_index()
     logging.info("\nValue distribution BEFORE recoding:")
@@ -175,18 +171,17 @@ def process_reverse_coding(row, ema_data, recoded_ema):
         lambda x: str(max_value + 1 - int(x)) if str(x).isdigit() else x
     )
     
-    # Print sample rows after recoding
-    logging.info("\nSame rows AFTER recoding:")
-    logging.info("\n" + recoded_ema[mask].head()[['Form name', 'Variable', 'Responses ID']].to_string())
-    
+    # Print value distribution after recoding
     recoded_values = recoded_ema.loc[mask, 'Responses ID']
     value_counts_after = recoded_values.value_counts().sort_index()
     logging.info("\nValue distribution AFTER recoding:")
     logging.info(value_counts_after)
     
     changes = (original_values != recoded_values).sum()
+    unchanged = (original_values == recoded_values).sum()
     logging.info(f"\nNumber of values changed: {changes}")
-    return changes
+    logging.info(f"Number of values unchanged: {unchanged}")
+    return changes, unchanged
 
 def main():
     # Set up detailed logging
@@ -206,118 +201,78 @@ def main():
     mappings_path = raw_dir / "Corrected-Response-Mappings.xlsx"
     ema_data_path = raw_dir / "comprehensive_ema_data_eng_updated.csv"
     
-    # Load the mapping data
-    mappings_df = pd.read_excel(
-        mappings_path,
-        sheet_name="processed_response_mappings"
-    )
-    
-    # Load the EMA data
+    # Load the mapping data, EMA data, and processed dictionaries
+    mappings_df = pd.read_excel(mappings_path, sheet_name="processed_response_mappings")
     ema_data = pd.read_csv(ema_data_path)
-    print('Forms and Variables in mapping data:')
-    print(mappings_df[['Form','Variable']].head())
-    print('Forms and Variables in EMA data:')
-    print(ema_data[['Form name','Variable']].head())
     
-    logging.info("\nLoaded mapping data:")
-    logging.info(mappings_df.head())
-    logging.info("\nLoaded EMA data:")
-    logging.info(ema_data['Question name'].head())
-    # Create metadata dictionary from mappings_df
-    metadata = {}
-    for _, row in mappings_df.iterrows():
-        metadata[row['Question']] = {
-            'question_id': row['Question'],
-            'correct_order': str(row.get('Correct_Order', 'TRUE')).upper(),  # Ensure string comparison
-            'max_value': row.get('Points', 4)
-        }
-    print('test metadata')
-    print(metadata)
+    # Load processed dictionaries
+    processed_dicts_path = os.path.join(output_dir, 'processed_dictionaries.csv')
+    processed_dicts = pd.read_csv(processed_dicts_path)
     
-    # Process the comprehensive EMA data
-    logging.info("\nProcessing EMA data...")
+    # Create a copy for recoding
     recoded_ema = ema_data.copy()
-    recoding_counts = {'traffic': 0, 'calm': 0, 'reverse': 0}
+    recoding_counts = {
+        'traffic': {'changed': 0, 'unchanged': 0},
+        'calm': {'changed': 0, 'unchanged': 0},
+        'reverse': {'changed': 0, 'unchanged': 0}
+    }
     
-    # Handle TRAFFIC recoding (EMA V9)
-    traffic_mask = (ema_data['Form name'] == 'EMA V9') & (ema_data['Variable'] == 'TRAFFIC')
-    if traffic_mask.any():
-        logging.info("\n" + "="*50)
-        logging.info("Processing TRAFFIC recoding (EMA V9)")
+    # Update dictionaries in recoded_ema with processed versions
+    for _, row in processed_dicts.iterrows():
+        form = row['Form']
+        variable = row['Variable']
+        mask = (recoded_ema['Form name'] == form) & (recoded_ema['Variable'] == variable)
         
-        # Print sample rows before recoding
-        logging.info("\nSample rows BEFORE recoding:")
-        logging.info("\n" + ema_data[traffic_mask].head()[['Form name', 'Variable', 'Responses ID']].to_string())
-        
-        original_values = ema_data.loc[traffic_mask, 'Responses ID'].copy()
-        value_counts_before = original_values.value_counts().sort_index()
-        logging.info("\nValue distribution BEFORE recoding:")
-        logging.info(value_counts_before)
-        
-        # Perform recoding
-        traffic_mapping = {'1': '4', '2': '3', '3': '3', '4': '2', '5': '1'}
-        recoded_ema.loc[traffic_mask, 'Responses ID'] = recoded_ema.loc[traffic_mask, 'Responses ID'].map(traffic_mapping)
-        
-        # Print sample rows after recoding
-        logging.info("\nSame rows AFTER recoding:")
-        logging.info("\n" + recoded_ema[traffic_mask].head()[['Form name', 'Variable', 'Responses ID']].to_string())
-        
-        value_counts_after = recoded_ema.loc[traffic_mask, 'Responses ID'].value_counts().sort_index()
-        logging.info("\nValue distribution AFTER recoding:")
-        logging.info(value_counts_after)
-        
-        recoding_counts['traffic'] = traffic_mask.sum()
+        if pd.notna(row.get('Hebrew_dict_processed')):
+            recoded_ema.loc[mask, 'Hebrew_dict'] = row['Hebrew_dict_processed']
+        if pd.notna(row.get('Eng_dict_processed')):
+            recoded_ema.loc[mask, 'English_dict'] = row['Eng_dict_processed']
     
-    # Handle CALM recoding (EMA V7)
-    calm_mask = (ema_data['Form name'] == 'EMA V7') & (ema_data['Variable'] == 'CALM')
-    if calm_mask.any():
-        logging.info("\n" + "="*50)
-        logging.info("Processing CALM recoding (EMA V7)")
+    # Process all possible recodings
+    for order_type in mappings_df['Correct_Order'].unique():
+        subset = mappings_df[mappings_df['Correct_Order'] == order_type]
+        logging.info(f"\nProcessing {order_type} type entries: {len(subset)} items")
         
-        # Print sample rows before recoding
-        logging.info("\nSample rows BEFORE recoding:")
-        logging.info("\n" + ema_data[calm_mask].head()[['Form name', 'Variable', 'Responses ID']].to_string())
-        
-        original_values = ema_data.loc[calm_mask, 'Responses ID'].copy()
-        value_counts_before = original_values.value_counts().sort_index()
-        logging.info("\nValue distribution BEFORE recoding:")
-        logging.info(value_counts_before)
-        
-        # Perform recoding
-        calm_mapping = {'1': '2', '2': '3', '3': '1', '4': '4'}
-        recoded_ema.loc[calm_mask, 'Responses ID'] = recoded_ema.loc[calm_mask, 'Responses ID'].map(calm_mapping)
-        
-        # Print sample rows after recoding
-        logging.info("\nSame rows AFTER recoding:")
-        logging.info("\n" + recoded_ema[calm_mask].head()[['Form name', 'Variable', 'Responses ID']].to_string())
-        
-        value_counts_after = recoded_ema.loc[calm_mask, 'Responses ID'].value_counts().sort_index()
-        logging.info("\nValue distribution AFTER recoding:")
-        logging.info(value_counts_after)
-        
-        recoding_counts['calm'] = calm_mask.sum()
-
-    # Handle reverse scale recoding
-    logging.info("\nProcessing reverse scale recodings...")
-    total_recoded_questions = 0
-    
-    for idx, row in mappings_df.iterrows():
-        if 'F' in str(row['Correct_Order']):
-            changes = process_reverse_coding(row, ema_data, recoded_ema)
-            recoding_counts['reverse'] += changes
-            total_recoded_questions += 1
-            mappings_df.at[idx, 'Correct_Order'] = 'REORDERED'
+        for _, row in subset.iterrows():
+            if 'F' in str(order_type):  # Handle reversals
+                changes, unchanged = process_reverse_coding(row, ema_data, recoded_ema)
+                recoding_counts['reverse']['changed'] += changes
+                recoding_counts['reverse']['unchanged'] += unchanged
+            elif order_type == 'RECODE':
+                if 'TRAFFIC' in str(row['Variable']):
+                    mask = (ema_data['Form name'] == row['Form']) & (ema_data['Variable'] == 'TRAFFIC')
+                    if mask.any():
+                        original_values = recoded_ema.loc[mask, 'Responses ID'].copy()
+                        traffic_mapping = {'1': '4', '2': '3', '3': '2', '4': '2', '5': '1'}
+                        recoded_ema.loc[mask, 'Responses ID'] = recoded_ema.loc[mask, 'Responses ID'].map(traffic_mapping)
+                        changes = (original_values != recoded_ema.loc[mask, 'Responses ID']).sum()
+                        unchanged = (original_values == recoded_ema.loc[mask, 'Responses ID']).sum()
+                        recoding_counts['traffic']['changed'] += changes
+                        recoding_counts['traffic']['unchanged'] += unchanged
+                elif 'CALM' in str(row['Variable']):
+                    mask = (ema_data['Form name'] == row['Form']) & (ema_data['Variable'] == 'CALM')
+                    if mask.any():
+                        original_values = recoded_ema.loc[mask, 'Responses ID'].copy()
+                        calm_mapping = {'1': '3', '2': '1', '3': '2', '4': '4'}
+                        recoded_ema.loc[mask, 'Responses ID'] = recoded_ema.loc[mask, 'Responses ID'].map(calm_mapping)
+                        changes = (original_values != recoded_ema.loc[mask, 'Responses ID']).sum()
+                        unchanged = (original_values == recoded_ema.loc[mask, 'Responses ID']).sum()
+                        recoding_counts['calm']['changed'] += changes
+                        recoding_counts['calm']['unchanged'] += unchanged
     
     # Save the recoded responses
-    recoded_ema.to_csv(os.path.join(output_dir, 'recoded_ema_data.csv'), index=False)
+    output_path = os.path.join(output_dir, 'recoded_ema_data.csv')
+    recoded_ema.to_csv(output_path, index=False)
     
-    # Save the mapping data without dictionary updates
-    mappings_df.to_csv(os.path.join(output_dir, 'response_mapping_no_dicts.csv'), index=False)
-    
+    # Print summary
     logging.info('\nRecoding Summary:')
-    logging.info(f"Traffic recodings: {recoding_counts['traffic']}")
-    logging.info(f"Calm recodings: {recoding_counts['calm']}")
-    logging.info(f"Reverse scale recodings: {recoding_counts['reverse']}")
+    for recode_type, counts in recoding_counts.items():
+        logging.info(f"{recode_type.capitalize()} recodings:")
+        logging.info(f"  Changed: {counts['changed']}")
+        logging.info(f"  Unchanged: {counts['unchanged']}")
+        logging.info(f"  Total processed: {counts['changed'] + counts['unchanged']}")
+    
+    logging.info(f"\nProcessed data saved to: {output_path}")
 
 if __name__ == "__main__":
     main()
