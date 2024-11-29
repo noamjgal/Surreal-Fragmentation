@@ -201,12 +201,12 @@ def main():
     mappings_path = raw_dir / "Corrected-Response-Mappings.xlsx"
     ema_data_path = raw_dir / "comprehensive_ema_data_eng_updated.csv"
     
-    # Load the mapping data, EMA data, and processed dictionaries
+    # Load the mapping data, EMA data
     mappings_df = pd.read_excel(mappings_path, sheet_name="processed_response_mappings")
     ema_data = pd.read_csv(ema_data_path)
     
     # Load processed dictionaries
-    processed_dicts_path = os.path.join(output_dir, 'processed_dictionaries.csv')
+    processed_dicts_path = os.path.join(output_dir, 'processed_dictionaries_merged.csv')
     processed_dicts = pd.read_csv(processed_dicts_path)
     
     # Create a copy for recoding
@@ -227,7 +227,6 @@ def main():
             recoded_ema.loc[mask, 'Hebrew_dict'] = row['Hebrew_dict_processed']
         if pd.notna(row.get('Eng_dict_processed')):
             recoded_ema.loc[mask, 'English_dict'] = row['Eng_dict_processed']
-    
     # Process all possible recodings
     for order_type in mappings_df['Correct_Order'].unique():
         subset = mappings_df[mappings_df['Correct_Order'] == order_type]
@@ -260,6 +259,10 @@ def main():
                         recoding_counts['calm']['changed'] += changes
                         recoding_counts['calm']['unchanged'] += unchanged
     
+    first = len(recoded_ema) 
+           
+    recoded_ema = recoded_ema[~((recoded_ema['Form name'].str.contains('V7') | recoded_ema['Form name'].str.contains('V2')) & (recoded_ema['Variable'].str.contains('PROCRASTINATION', na=False)))]
+    after = len(recoded_ema)
     # Save the recoded responses
     output_path = os.path.join(output_dir, 'recoded_ema_data.csv')
     recoded_ema.to_csv(output_path, index=False)
@@ -273,6 +276,8 @@ def main():
         logging.info(f"  Total processed: {counts['changed'] + counts['unchanged']}")
     
     logging.info(f"\nProcessed data saved to: {output_path}")
+    print(f"Dropped {first - after} rows")
+    print(recoded_ema['Variable'].unique())
 
 if __name__ == "__main__":
     main()

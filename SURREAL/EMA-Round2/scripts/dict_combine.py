@@ -7,79 +7,97 @@ from pathlib import Path
 project_root = str(Path(__file__).parent.parent)
 sys.path.append(project_root)
 
-def normalize_dict(dict_str):
-    """Convert dictionary string to normalized form (lowercase keys)"""
+def normalize_key(key):
+    """Normalize key to Title Case for first word, lowercase for rest, and remove trailing spaces"""
+    words = key.strip().split()
+    if not words:
+        return key
+    return (words[0].capitalize() + ' ' + ' '.join(w.lower() for w in words[1:])).strip()
+
+def normalize_hebrew_key(key):
+    """Normalize Hebrew key by only removing trailing spaces"""
+    return key.strip()
+
+def normalize_dict_keys(dict_str, is_hebrew=False):
+    """Convert dictionary keys to normalized format"""
     try:
         d = ast.literal_eval(dict_str)
-        return {k.lower(): v for k, v in d.items()}
+        if is_hebrew:
+            return str({normalize_hebrew_key(k): v for k, v in d.items()})
+        return str({normalize_key(k): v for k, v in d.items()})
     except:
-        return {}
+        return dict_str
 
-def is_subset_dict(dict1_str, dict2_str):
-    """Check if dict1 is a subset of dict2 (case-insensitive)"""
+def dict_similarity(dict1_str, dict2_str):
+    """Return True if dictionaries should be merged based on similarity or subset relationship"""
     try:
-        dict1 = normalize_dict(dict1_str)
-        dict2 = normalize_dict(dict2_str)
-        return all(k in dict2 and dict2[k] == v for k, v in dict1.items())
+        dict1 = ast.literal_eval(normalize_dict_keys(dict1_str))
+        dict2 = ast.literal_eval(normalize_dict_keys(dict2_str))
+        
+        # Check if one is a subset of the other
+        items1 = set((k, v) for k, v in dict1.items())
+        items2 = set((k, v) for k, v in dict2.items())
+        
+        # Return True if either:
+        # 1. They share 3 or more items
+        # 2. One dictionary is a complete subset of the other
+        shared_items = items1.intersection(items2)
+        return len(shared_items) >= 3 or items1.issubset(items2) or items2.issubset(items1)
     except:
         return False
 
-def dict_similarity(dict1_str, dict2_str):
-    """Return number of shared key-value pairs between two dictionaries (case-insensitive)"""
-    try:
-        dict1 = normalize_dict(dict1_str)
-        dict2 = normalize_dict(dict2_str)
-        shared_items = {k: v for k, v in dict1.items() if k in dict2 and dict2[k] == v}
-        return len(shared_items)
-    except:
-        return 0
-
-def should_merge(dict1_str, dict2_str):
-    """Check if dictionaries should be merged based on subset or similarity"""
-    return (is_subset_dict(dict1_str, dict2_str) or 
-            is_subset_dict(dict2_str, dict1_str))
-
-def merge_dicts(dict1_str, dict2_str):
+def merge_similar_dicts(dict1_str, dict2_str):
     """Merge two dictionaries, keeping all unique entries"""
-    dict1 = ast.literal_eval(dict1_str)
-    dict2 = ast.literal_eval(dict2_str)
-    
-    # Create a mapping of lowercase keys to original keys
-    dict1_lower = {k.lower(): k for k in dict1.keys()}
-    dict2_lower = {k.lower(): k for k in dict2.keys()}
-    
-    # Merge preserving the first encountered case for each key
-    merged = {}
-    all_lower_keys = set(dict1_lower.keys()) | set(dict2_lower.keys())
-    
-    for lower_key in all_lower_keys:
-        # Determine which original key to use
-        original_key = dict1_lower.get(lower_key) or dict2_lower.get(lower_key)
-        # Get the value from either dict1 or dict2
-        value = dict1.get(dict1_lower.get(lower_key)) or dict2.get(dict2_lower.get(lower_key))
-        merged[original_key] = value
-    
+    dict1 = ast.literal_eval(normalize_dict_keys(dict1_str))
+    dict2 = ast.literal_eval(normalize_dict_keys(dict2_str))
+    merged = dict1.copy()
+    merged.update(dict2)
     return str(merged)
 
+def sort_dict_by_values(dict_str):
+    """Sort dictionary by numerical values"""
+    try:
+        d = ast.literal_eval(dict_str)
+        # Sort by numerical value
+        sorted_items = sorted(d.items(), key=lambda x: int(x[1]))
+        return str(dict(sorted_items))
+    except:
+        return dict_str
+
 def process_variable_dicts(dict_list):
-    """Process dictionaries for a variable, merging based on subset or similarity"""
+    """
+    Process a list of dictionaries for a variable:
+    - Normalize all dictionary keys
+    - Sort by numerical values
+    - Merge dictionaries that are similar or subsets
+    - Keep unique dictionaries
+    """
     if not dict_list:
         return []
     
-    result = [dict_list[0]]
+    # First normalize all dictionaries in the list and sort their items
+    normalized_list = [sort_dict_by_values(normalize_dict_keys(d)) for d in dict_list]
     
-    for i in range(1, len(dict_list)):
-        should_merge_with = None
+    # Sort by length (descending) to prioritize merging into larger dictionaries
+    normalized_list.sort(key=lambda x: len(ast.literal_eval(x)), reverse=True)
+    
+    result = [normalized_list[0]]
+    
+    for i in range(1, len(normalized_list)):
+        should_merge = False
+        merge_index = None
         
         for j, existing_dict in enumerate(result):
-            if should_merge(dict_list[i], existing_dict):
-                should_merge_with = j
+            if dict_similarity(normalized_list[i], existing_dict):
+                should_merge = True
+                merge_index = j
                 break
         
-        if should_merge_with is not None:
-            result[should_merge_with] = merge_dicts(dict_list[i], result[should_merge_with])
+        if should_merge:
+            merged = merge_similar_dicts(normalized_list[i], result[merge_index])
+            result[merge_index] = sort_dict_by_values(merged)
         else:
-            result.append(dict_list[i])
+            result.append(normalized_list[i])
     
     return result
 
@@ -87,25 +105,33 @@ def process_variable_dicts(dict_list):
 mappings_df = pd.read_csv(Path(project_root) / "data" / "raw" / "processed_dictionaries.csv")
 
 # Process each variable
-new_rows = []
+processed_rows = []
 for variable in mappings_df['Variable'].unique():
     variable_df = mappings_df[mappings_df['Variable'] == variable]
-    dict_list = variable_df['Eng_dict_processed'].tolist()
+    eng_dict_list = variable_df['Eng_dict_processed'].tolist()
+    heb_dict_list = variable_df['Hebrew_dict_processed'].tolist()
     
-    # Get merged dictionaries
-    merged_dicts = process_variable_dicts(dict_list)
+    # Get merged dictionaries for both languages
+    merged_eng_dicts = process_variable_dicts(eng_dict_list)
+    merged_heb_dicts = process_variable_dicts([d if isinstance(d, str) else str(d) for d in heb_dict_list])
     
-    # Create new rows for the merged dictionaries
-    for merged_dict in merged_dicts:
-        template_row = variable_df.iloc[0].copy()
-        template_row['Eng_dict_processed'] = merged_dict
-        new_rows.append(template_row)
+    # Keep all original rows
+    for idx, row in variable_df.iterrows():
+        new_row = row.copy()
+        
+        # Update the dictionaries with the most comprehensive version if available
+        if merged_eng_dicts:
+            new_row['Eng_dict_processed'] = merged_eng_dicts[0]  # Use the most comprehensive dict
+        if merged_heb_dicts:
+            new_row['Hebrew_dict_processed'] = merged_heb_dicts[0]  # Use the most comprehensive dict
+            
+        processed_rows.append(new_row)
 
 # Create new dataframe from processed rows
-result_df = pd.DataFrame(new_rows)
+result_df = pd.DataFrame(processed_rows)
 
 # Save the updated dataframe
-output_path = Path(project_root) / "data" / "raw" / "processed_dictionaries_merged.csv"
+output_path = Path(project_root) / "data" / "reordered" / "processed_dictionaries_merged.csv"
 result_df.to_csv(output_path, index=False)
 
 # Print results
