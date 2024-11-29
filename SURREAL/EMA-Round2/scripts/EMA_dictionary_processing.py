@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 import sys
 import re
+import os
 
 # Set up logging configuration at the start of the file
 logging.basicConfig(
@@ -59,11 +60,18 @@ def process_dictionary(dict_string, question_metadata):
                 })
         
         elif correct_order == 'FALSE':
-            max_val = max(int(v) for v in dict_data.values())
-            reverse_mapping = {str(i): str(max_val - i + 1) for i in range(1, max_val + 1)}
+            # Get the points scale (4 or 5)
+            points = int(question_metadata.get('Points', 4))
+            
+            # Create reverse mapping based on the full scale (4 or 5 points)
+            reverse_mapping = {str(i): str(points - i + 1) for i in range(1, points + 1)}
+            
+            # Apply the mapping to the dictionary values
             dict_data = {k: reverse_mapping[v] for k, v in dict_data.items()}
+            
             process_dictionary.reverse_examples.append({
                 'question_id': question_id,
+                'points': points,
                 'original': original_dict,
                 'processed': dict(sorted(dict_data.items(), key=lambda x: int(x[1])))
             })
@@ -87,6 +95,69 @@ def process_dictionary(dict_string, question_metadata):
 process_dictionary.recode_examples = []
 process_dictionary.reverse_examples = []
 process_dictionary.sort_examples = []
+									
+def save_processed_data(mapping_data, output_dir="SURREAL/EMA-Round2/data/reordered"):
+    """Save processed dictionaries to output directory."""
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Prepare data for saving
+    results = []
+    for _, row in mapping_data.iterrows():
+        result = row.to_dict()
+        
+        # Process Hebrew dictionary if exists
+        if pd.notna(row['Hebrew_dict']):
+            processed_hebrew = process_dictionary(row['Hebrew_dict'], row)
+            if processed_hebrew:
+                # Sort dictionary by values before saving
+                processed_hebrew = dict(sorted(processed_hebrew.items(), key=lambda x: int(x[1])))
+                result['Hebrew_dict_processed'] = json.dumps(processed_hebrew, ensure_ascii=False)
+            else:
+                result['Hebrew_dict_processed'] = None
+            
+        # Process English dictionary if exists
+        if pd.notna(row['Eng_dict']):
+            processed_eng = process_dictionary(row['Eng_dict'], row)
+            if processed_eng:
+                # Sort dictionary by values before saving
+                processed_eng = dict(sorted(processed_eng.items(), key=lambda x: int(x[1])))
+                result['Eng_dict_processed'] = json.dumps(processed_eng)
+            else:
+                result['Eng_dict_processed'] = None
+            
+        results.append(result)
+    
+    # Convert to DataFrame and save
+    output_df = pd.DataFrame(results)
+    
+    # Save to Excel
+    csv_path = os.path.join(output_dir, 'processed_dictionaries.csv')
+    output_df.to_csv(csv_path, index=False)
+    logger.info(f"\nSaved processed dictionaries to: {csv_path}")
+    
+    # Save examples to text file
+    examples_path = os.path.join(output_dir, 'processing_examples.txt')
+    with open(examples_path, 'w', encoding='utf-8') as f:
+        f.write("=== RECODE Examples ===\n")
+        for i, example in enumerate(process_dictionary.recode_examples[:5], 1):
+            f.write(f"\nExample {i} ({example['type']}) - {example['question_id']}:\n")
+            f.write(f"Original: {example['original']}\n")
+            f.write(f"Processed: {example['processed']}\n")
+        
+        f.write("\n=== REVERSE Examples ===\n")
+        for i, example in enumerate(process_dictionary.reverse_examples[:5], 1):
+            f.write(f"\nExample {i} - {example['question_id']}:\n")
+            f.write(f"Original: {example['original']}\n")
+            f.write(f"Processed: {example['processed']}\n")
+        
+        f.write("\n=== SORT Examples ===\n")
+        for i, example in enumerate(process_dictionary.sort_examples[:5], 1):
+            f.write(f"\nExample {i} - {example['question_id']}:\n")
+            f.write(f"Original: {example['original']}\n")
+            f.write(f"Processed: {example['processed']}\n")
+    
+    logger.info(f"Saved processing examples to: {examples_path}")
 
 def main():
     mapping_data = pd.read_excel(MAPPING_FILE_PATH)
@@ -107,24 +178,8 @@ def main():
                 if pd.notna(row[dict_col]):
                     process_dictionary(row[dict_col], row)
     
-    # Log examples after processing
-    logger.info("\n=== RECODE Examples ===")
-    for i, example in enumerate(process_dictionary.recode_examples[:5], 1):
-        logger.info(f"\nExample {i} ({example['type']}) - {example['question_id']}:")
-        logger.info(f"Original: {example['original']}")
-        logger.info(f"Processed: {example['processed']}")
-    
-    logger.info("\n=== REVERSE Examples ===")
-    for i, example in enumerate(process_dictionary.reverse_examples[:5], 1):
-        logger.info(f"\nExample {i} - {example['question_id']}:")
-        logger.info(f"Original: {example['original']}")
-        logger.info(f"Processed: {example['processed']}")
-    
-    logger.info("\n=== SORT Examples ===")
-    for i, example in enumerate(process_dictionary.sort_examples[:5], 1):
-        logger.info(f"\nExample {i} - {example['question_id']}:")
-        logger.info(f"Original: {example['original']}")
-        logger.info(f"Processed: {example['processed']}")
+    # Log examples and save results
+    save_processed_data(mapping_data)
 
 if __name__ == "__main__":
     main() 
