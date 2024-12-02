@@ -99,6 +99,94 @@ def analyze_data_coverage():
     print("\nNumber of overlapping days per participant:")
     print(overlap_by_participant.describe())
     
+    # Get participants with overlapping data
+    participants_with_overlap = merged_days[merged_days['_merge'] == 'both']['user'].unique()
+    
+    # Get demographic details for these participants
+    overlap_demographics = participant_info[participant_info['user'].isin(participants_with_overlap)]
+    
+    print("\nDemographics for Participants with Overlapping Data:")
+    print("\nBy School Type:")
+    school_counts = overlap_demographics['school_n'].value_counts()
+    for school, count in school_counts.items():
+        print(f"{school}: {count} participants")
+    
+    print("\nBy Gender:")
+    gender_counts = overlap_demographics['sex'].value_counts()
+    for gender, count in gender_counts.items():
+        print(f"{gender}: {count} participants")
+    
+    print("\nBy Class:")
+    if 'Class' in overlap_demographics.columns:
+        class_counts = overlap_demographics['Class'].value_counts()
+        for class_num, count in class_counts.items():
+            print(f"Class {class_num}: {count} participants")
+    else:
+        print("Class information not available in participant_info file")
+    
+    # Enhanced demographic analysis
+    def create_demographic_summary(data, group_cols, metric_cols):
+        summary = data.groupby(group_cols)[metric_cols].agg({
+            'gps_records': ['count', 'mean'],
+            'survey_responses': ['count', 'mean']
+        }).round(2)
+        summary.columns = ['_'.join(col).strip() for col in summary.columns.values]
+        return summary
+    
+    # Create demographic summaries
+    school_summary = create_demographic_summary(
+        merged_with_demo,
+        'school_n',
+        ['gps_records', 'survey_responses']
+    )
+    
+    gender_summary = create_demographic_summary(
+        merged_with_demo,
+        'sex',
+        ['gps_records', 'survey_responses']
+    )
+    
+    combined_demo_summary = create_demographic_summary(
+        merged_with_demo,
+        ['school_n', 'sex'],
+        ['gps_records', 'survey_responses']
+    )
+    
+    # Calculate coverage metrics by demographics
+    coverage_metrics = merged_with_demo.groupby(['school_n', 'sex']).agg({
+        '_merge': lambda x: (x == 'both').mean(),
+        'gps_records': 'mean',
+        'survey_responses': 'mean'
+    }).round(3)
+    coverage_metrics.columns = ['overlap_ratio', 'avg_gps_records', 'avg_survey_responses']
+    
+    # Save detailed demographic summaries
+    school_summary.to_csv(os.path.join(OUTPUT_DIR, 'school_coverage_summary.csv'))
+    gender_summary.to_csv(os.path.join(OUTPUT_DIR, 'gender_coverage_summary.csv'))
+    combined_demo_summary.to_csv(os.path.join(OUTPUT_DIR, 'combined_demographic_summary.csv'))
+    coverage_metrics.to_csv(os.path.join(OUTPUT_DIR, 'coverage_metrics_by_demographics.csv'))
+    
+    # Create visualizations with demographic breakdowns
+    plt.figure(figsize=(12, 6))
+    sns.boxplot(data=merged_with_demo, x='school_n', y='gps_records', hue='sex')
+    plt.title('GPS Records Distribution by School Type and Gender')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, 'gps_records_by_demographics.png'))
+    plt.close()
+    
+    # Create overlap visualization by demographics
+    plt.figure(figsize=(12, 6))
+    overlap_by_demo = merged_with_demo[merged_with_demo['_merge'] == 'both'].groupby(['school_n', 'sex']).size().unstack()
+    overlap_by_demo.plot(kind='bar', stacked=True)
+    plt.title('Overlapping Days by School Type and Gender')
+    plt.xlabel('School Type')
+    plt.ylabel('Number of Days')
+    plt.legend(title='Gender')
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, 'overlap_by_demographics.png'))
+    plt.close()
+    
     # Save detailed results
     results = {
         'merged_days': merged_days,
