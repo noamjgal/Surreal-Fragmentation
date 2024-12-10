@@ -33,7 +33,6 @@ def process_participant_data(participant_id, participant_data, mappings_df):
         left_on=['Form name', 'Question name'],
         right_on=['Form', 'Question']
     )
-    
     # Sort by datetime
     merged_data = merged_data.sort_values('datetime')
 
@@ -76,6 +75,53 @@ def calculate_daily_summary(ema_data):
     
     return summary_df
 
+def calculate_scale_summary(ema_data, mappings_df):
+    """Calculate the number of questions for each scale responded to each day."""
+    # Merge with mappings first
+    merged_data = ema_data.merge(
+        mappings_df,
+        how='left',
+        left_on=['Form name', 'Question name'],
+        right_on=['Form', 'Question']
+    )
+    
+    # Get unique scales (excluding nan)
+    scales = [scale for scale in merged_data['Scale'].unique() if pd.notna(scale)]
+    
+    for scale in scales:
+        scale_data = merged_data[merged_data['Scale'] == scale]
+        
+        summary_data = []
+        
+        for participant_id in scale_data['Participant ID'].unique():
+            participant_data = scale_data[scale_data['Participant ID'] == participant_id]
+            
+            # Count questions for each day
+            daily_counts = {'Participant ID': participant_id}
+            for day in range(1, 8):  # Days 1-7
+                day_data = participant_data[participant_data['Trigger set name'].str.contains(f'EMA day {day}', case=False)]
+                # Count unique questions for that day
+                unique_questions = day_data['Question name'].nunique()
+                daily_counts[f'Day_{day}'] = unique_questions
+            
+            summary_data.append(daily_counts)
+        
+        # Create summary DataFrame for the scale
+        if summary_data:  # Only create DataFrame if there's data
+            summary_df = pd.DataFrame(summary_data)
+            summary_df = summary_df.set_index('Participant ID')
+            
+            # Add totals
+            summary_df['Total'] = summary_df.sum(axis=1)
+            
+            # Save to CSV
+            output_path = Path(project_root) / "output" / f"{scale}_summary.csv"
+            summary_df.to_csv(output_path)
+            
+            logging.info(f"Scale summary for {scale} saved to {output_path}")
+            print(f"\nSummary for {scale}:")
+            print(summary_df)
+
 def main():
     setup_directories()
     
@@ -83,6 +129,7 @@ def main():
     try:
         mappings_df = pd.read_csv(Path(project_root) / "data" / "raw" / "processed_dictionaries.csv")
         ema_data = pd.read_csv(Path(project_root) / "data" / "raw" / "recoded_ema_data.csv")
+        
     except Exception as e:
         logging.error(f"Error loading data: {e}")
         return
@@ -95,6 +142,9 @@ def main():
     # Calculate and save daily summary
     summary_df = calculate_daily_summary(ema_data)
     summary_df.to_csv(Path(project_root) / "output" / "daily_summary.csv")
+    
+    # Calculate and save scale summaries
+    calculate_scale_summary(ema_data, mappings_df)
     
     logging.info(f"Processed {len(ema_data['Participant ID'].unique())} participants")
     logging.info("Daily summary saved to output/daily_summary.csv")
