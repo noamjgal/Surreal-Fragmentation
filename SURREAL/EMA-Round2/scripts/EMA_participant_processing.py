@@ -5,11 +5,13 @@ import sys
 from datetime import datetime, timedelta
 import os
 
+
 # Setup
 project_root = str(Path(__file__).parent.parent)
+OUTPUT_DIR = Path(project_root) / "output"
 sys.path.append(project_root)
 
-logging.basicConfig(
+logger = logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
@@ -177,6 +179,10 @@ def main():
         logging.error(f"Error loading data: {e}")
         return
     
+    # Drop test participants
+    ema_data = ema_data[~ema_data['Participant ID'].str.contains('est', case=False)]
+    logging.info(f"Dropped test participants. Remaining participants: {len(ema_data['Participant ID'].unique())}")
+    
     # Process each participant
     for participant_id in ema_data['Participant ID'].unique():
         participant_data = ema_data[ema_data['Participant ID'] == participant_id]
@@ -195,6 +201,81 @@ def main():
     # Display summary
     print("\nDaily Survey Completion Summary:")
     print(summary_df)
+
+    # After creating all summaries, analyze STAI and CES-D responses
+    stai_df = pd.read_csv(OUTPUT_DIR / "STAI-Y-A-6_summary.csv").set_index('Participant ID')
+    ces_df = pd.read_csv(OUTPUT_DIR / "CES-D-8_summary.csv").set_index('Participant ID')
+
+    # Drop test participants from these dataframes as well
+    stai_df = stai_df[~stai_df.index.str.contains('est', case=False)]
+    ces_df = ces_df[~ces_df.index.str.contains('est', case=False)]
+
+    # Count days with sum ≥3 responses across both scales
+    valid_days = []
+    total_days = 0
+    days_with_enough_responses = 0
+    total_days_with_any_data = 0
+
+    for day in range(1, 8):  # Days 1-7
+        day_col = f'Day_{day}'
+        stai_responses = stai_df[day_col]
+        ces_responses = ces_df[day_col]
+        
+        # Count days where sum of both scales is ≥3 responses
+        total_responses = stai_responses + ces_responses
+        valid_day = total_responses >= 3
+        days_with_responses = sum(valid_day)
+        
+        # Count days with any data
+        days_with_any = (total_responses > 0).sum()
+        total_days_with_any_data += days_with_any
+        
+        valid_days.append({
+            'Day': day,
+            'Days_with_3+_responses': days_with_responses,
+            'Days_with_any_data': days_with_any,
+            'Total_participants': len(stai_responses),
+            'Percentage_of_all_days': (days_with_responses / len(stai_responses)) * 100,
+            'Percentage_of_active_days': (days_with_responses / days_with_any * 100) if days_with_any > 0 else 0
+        })
+        
+        total_days += len(stai_responses)
+        days_with_enough_responses += days_with_responses
+
+    # Create and save the report
+    valid_days_df = pd.DataFrame(valid_days)
+    valid_days_df.to_csv(OUTPUT_DIR / "valid_days_analysis.csv", index=False)
+    
+    overall_percentage = (days_with_enough_responses / total_days) * 100
+    active_days_percentage = (days_with_enough_responses / total_days_with_any_data) * 100
+    
+    logging.info("\nDays with sum of 3+ responses across STAI and CES-D scales:")
+    logging.info(valid_days_df.to_string(index=False))
+    logging.info(f"\nOverall percentage of all possible days with 3+ total responses: {overall_percentage:.2f}%")
+    logging.info(f"Percentage of days with any data that have 3+ total responses: {active_days_percentage:.2f}%")
+
+    # Create boolean summary for days with 3+ total responses
+    boolean_summary = pd.DataFrame(index=stai_df.index)
+    
+    for day in range(1, 8):  # Days 1-7
+        day_col = f'Day_{day}'
+        # Mark True if sum of responses is ≥3 for that day
+        boolean_summary[day_col] = (stai_df[day_col] + ces_df[day_col]) >= 3
+    
+    # Add total count of valid days for each participant
+    boolean_summary['Total_Valid_Days'] = boolean_summary.sum(axis=1)
+    
+    # Save the boolean summary
+    boolean_summary.to_csv(OUTPUT_DIR / "valid_days_boolean_summary.csv")
+    
+    logging.info("\nBoolean Summary of Days with 3+ total responses (True = sum of both scales is 3+ responses):")
+    logging.info(boolean_summary.to_string())
+    
+    # Calculate percentage of valid days per participant
+    boolean_summary['Percentage_Valid_Days'] = (boolean_summary['Total_Valid_Days'] / 7) * 100
+    
+    logging.info("\nParticipant completion rates (days with 3+ total responses across both scales):")
+    logging.info(boolean_summary['Percentage_Valid_Days'].describe().to_string())
 
 if __name__ == "__main__":
     main() 
