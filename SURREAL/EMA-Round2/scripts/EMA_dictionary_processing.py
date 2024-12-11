@@ -16,7 +16,9 @@ logger = logging.getLogger(__name__)
 # Add project root to Python path
 project_root = str(Path(__file__).parent.parent)
 sys.path.append(project_root)
-MAPPING_FILE_PATH = project_root + '/data/raw/Corrected-Response-Mappings.xlsx'
+MAPPING_FILE_PATH = Path(project_root) / "data" / "raw" / "Corrected-Response-Mappings.xlsx"
+OUTPUT_DIR = Path(project_root) / "data"
+PROCESSED_DICT_PATH = OUTPUT_DIR / "raw" / "processed_dictionaries.csv"
 
 def process_dictionary(dict_string, question_metadata):
     """Process dictionary string with detailed logging for sorting and reversing."""
@@ -37,6 +39,26 @@ def process_dictionary(dict_string, question_metadata):
         
         # Store original for logging
         original_dict = dict_data.copy()
+        
+        # Add special handling for long procrastination
+        if 'LONG_PROCRASTINATION' in str(question_metadata.get('Variable', '')):
+            # Map to same scale as regular procrastination
+            standard_proc_dict = {
+                "בכלל לא": "1",
+                "לעתים רחוקות": "2",
+                "לפעמים": "3",
+                "בדרך כלל": "4",
+                "כל הזמן": "5"
+            }
+            # Map the long procrastination responses to the standard scale
+            long_proc_mapping = {
+                "מעט": "2",  # Map "A little" to "Rarely"
+                "במידה מסוימת": "3",  # Map "To a certain extent" to "Sometimes"
+                "במידה מתונה": "3",  # Map "To a moderate extent" to "Sometimes"
+                "במידה בינונית": "4",  # Map "Moderately" to "Usually"
+                "מאוד": "5"  # Map "Very" to "All the time"
+            }
+            dict_data = long_proc_mapping
         
         # Process based on correct_order flag
         if correct_order == 'RECODE':
@@ -96,10 +118,10 @@ process_dictionary.recode_examples = []
 process_dictionary.reverse_examples = []
 process_dictionary.sort_examples = []
 									
-def save_processed_data(mapping_data, output_dir="SURREAL/EMA-Round2/data/reordered"):
+def save_processed_data(mapping_data):
     """Save processed dictionaries to output directory."""
     # Create output directory if it doesn't exist
-    os.makedirs(output_dir, exist_ok=True)
+    PROCESSED_DICT_PATH.parent.mkdir(parents=True, exist_ok=True)
     
     # Prepare data for saving
     results = []
@@ -110,7 +132,6 @@ def save_processed_data(mapping_data, output_dir="SURREAL/EMA-Round2/data/reorde
         if pd.notna(row['Hebrew_dict']):
             processed_hebrew = process_dictionary(row['Hebrew_dict'], row)
             if processed_hebrew:
-                # Sort dictionary by values before saving
                 processed_hebrew = dict(sorted(processed_hebrew.items(), key=lambda x: int(x[1])))
                 result['Hebrew_dict_processed'] = json.dumps(processed_hebrew, ensure_ascii=False)
             else:
@@ -120,7 +141,6 @@ def save_processed_data(mapping_data, output_dir="SURREAL/EMA-Round2/data/reorde
         if pd.notna(row['Eng_dict']):
             processed_eng = process_dictionary(row['Eng_dict'], row)
             if processed_eng:
-                # Sort dictionary by values before saving
                 processed_eng = dict(sorted(processed_eng.items(), key=lambda x: int(x[1])))
                 result['Eng_dict_processed'] = json.dumps(processed_eng)
             else:
@@ -130,14 +150,11 @@ def save_processed_data(mapping_data, output_dir="SURREAL/EMA-Round2/data/reorde
     
     # Convert to DataFrame and save
     output_df = pd.DataFrame(results)
-    
-    # Save to Excel
-    csv_path = os.path.join(output_dir, 'processed_dictionaries.csv')
-    output_df.to_csv(csv_path, index=False)
-    logger.info(f"\nSaved processed dictionaries to: {csv_path}")
+    output_df.to_csv(PROCESSED_DICT_PATH, index=False)
+    logger.info(f"\nSaved processed dictionaries to: {PROCESSED_DICT_PATH}")
     
     # Save examples to text file
-    examples_path = os.path.join(output_dir, 'processing_examples.txt')
+    examples_path = OUTPUT_DIR / "raw" / "processing_examples.txt"
     with open(examples_path, 'w', encoding='utf-8') as f:
         f.write("=== RECODE Examples ===\n")
         for i, example in enumerate(process_dictionary.recode_examples[:5], 1):

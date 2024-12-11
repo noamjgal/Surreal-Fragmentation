@@ -101,8 +101,13 @@ def process_variable_dicts(dict_list):
     
     return result
 
-# Read the CSV
-mappings_df = pd.read_csv(Path(project_root) / "data" / "raw" / "processed_dictionaries.csv")
+# Input
+DICT_INPUT_PATH = Path(project_root) / "data" / "raw" / "processed_dictionaries.csv"
+# Output
+DICT_OUTPUT_PATH = Path(project_root) / "data" / "reordered" / "processed_dictionaries_merged.csv"
+
+# Load data
+mappings_df = pd.read_csv(DICT_INPUT_PATH)
 
 # Process each variable
 processed_rows = []
@@ -131,8 +136,7 @@ for variable in mappings_df['Variable'].unique():
 result_df = pd.DataFrame(processed_rows)
 
 # Save the updated dataframe
-output_path = Path(project_root) / "data" / "reordered" / "processed_dictionaries_merged.csv"
-result_df.to_csv(output_path, index=False)
+result_df.to_csv(DICT_OUTPUT_PATH, index=False)
 
 # Print results
 print("\nProcessed dictionaries for each variable:")

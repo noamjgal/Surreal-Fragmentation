@@ -33,10 +33,53 @@ def process_participant_data(participant_id, participant_data, mappings_df):
         left_on=['Form name', 'Question name'],
         right_on=['Form', 'Question']
     )
+    
     # Sort by datetime
     merged_data = merged_data.sort_values('datetime')
 
-    merged_data = merged_data.drop(columns=['Trigger start date (configured)','Question_matched', 'English_dict', 'Hebrew_dict', 'English_Question_x', 'Variable_x', 'Trigger conditions ID', 'Trigger conditions name', 'Trigger conditions period', 'Number of reminders sent', 'Dates of reminders sent', 'Field type ID', 'Points', 'Start date of the trigger', 'End date of the trigger', 'Trigger ID', 'Trigger duration', 'Display duration of the form', 'Reordered'])
+    # Standardize procrastination variables
+    mask = merged_data['Variable_y'].str.contains('PROCRASTINATION', na=False)
+    merged_data.loc[mask, 'Variable_y'] = 'PROCRASTINATION'
+
+    # List of columns to drop
+    columns_to_drop = [
+        'Trigger start date (configured)',
+        'Question_matched',
+        'English_dict_x',
+        'Hebrew_dict_x',
+        'Hebrew_dict_y',
+        'English_Question_x',
+        'Variable_x',
+        'Trigger conditions ID',
+        'Trigger conditions name',
+        'Trigger conditions period',
+        'Number of reminders sent',
+        'Dates of reminders sent',
+        'Field type ID',
+        'Points',
+        'Start date of the trigger',
+        'End date of the trigger',
+        'Trigger ID',
+        'Trigger duration',
+        'Display duration of the form',
+        'Reordered',
+        'Eng_dict',
+        'Correct_Order',
+        'Response_Counts'
+    ]
+
+    # Only drop columns that exist in the dataframe
+    columns_to_drop = [col for col in columns_to_drop if col in merged_data.columns]
+    merged_data = merged_data.drop(columns=columns_to_drop)
+    
+    # Rename columns to remove _y suffix
+    merged_data = merged_data.rename(columns={
+        'English_Question_y': 'English_Question',
+        'Variable_y': 'Variable',
+        'Hebrew_dict_processed': 'Hebrew_dict',
+        'Eng_dict_processed': 'English_dict'
+    })
+    
     merged_data = merged_data[merged_data['Form name'] != 'Consensus Sleep Diary-M']
     merged_data = merged_data.rename(columns={'Responses ID': 'Response Key', 'Responses name': 'Response Value'})
     
@@ -128,7 +171,7 @@ def main():
     # Load data
     try:
         mappings_df = pd.read_csv(Path(project_root) / "data" / "raw" / "processed_dictionaries.csv")
-        ema_data = pd.read_csv(Path(project_root) / "data" / "raw" / "recoded_ema_data.csv")
+        ema_data = pd.read_csv(Path(project_root) / "data" / "reordered" / "recoded_ema_data.csv")
         
     except Exception as e:
         logging.error(f"Error loading data: {e}")
@@ -155,3 +198,4 @@ def main():
 
 if __name__ == "__main__":
     main() 
+    

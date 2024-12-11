@@ -18,6 +18,12 @@ logging.basicConfig(
 project_root = str(Path(__file__).parent.parent)
 sys.path.append(project_root)
 
+# Input
+EMA_DATA_PATH = Path(project_root) / "data" / "raw" / "comprehensive_ema_data_eng_updated.csv"
+DICT_PATH = Path(project_root) / "data" / "reordered" / "processed_dictionaries_merged.csv"
+# Output
+RECODED_PATH = Path(project_root) / "data" / "reordered" / "recoded_ema_data.csv"
+
 def print_recode_example(original, recoded, question_id, recode_type):
     """Helper function to print recoding examples"""
     logging.info(f"\n{recode_type} Recoding Example for {question_id}:")
@@ -204,7 +210,8 @@ def main():
     # Load the mapping data, EMA data
     mappings_df = pd.read_excel(mappings_path, sheet_name="processed_response_mappings")
     ema_data = pd.read_csv(ema_data_path)
-    
+    print('jump here')
+    print(ema_data['Variable'].unique())
     # Load processed dictionaries
     processed_dicts_path = os.path.join(output_dir, 'processed_dictionaries_merged.csv')
     processed_dicts = pd.read_csv(processed_dicts_path)
@@ -260,9 +267,27 @@ def main():
                         recoding_counts['calm']['unchanged'] += unchanged
     
     first = len(recoded_ema) 
-           
-    recoded_ema = recoded_ema[~((recoded_ema['Form name'].str.contains('V7') | recoded_ema['Form name'].str.contains('V2')) & (recoded_ema['Variable'].str.contains('PROCRASTINATION', na=False)))]
+    
+    # Update all procrastination variables to simply "PROCRASTINATION"
+    mask = recoded_ema['Variable'].str.contains('PROCRASTINATION', na=False)
+    recoded_ema.loc[mask, 'Variable'] = 'PROCRASTINATION'
+    
+    # Map long procrastination responses to standard scale
+    long_proc_mapping = {
+        'מעט': '2',  # A little -> Rarely
+        'במידה מסוימת': '3',  # To a certain extent -> Sometimes
+        'במידה מתונה': '3',  # To a moderate extent -> Sometimes
+        'במידה בינונית': '4',  # Moderately -> Usually
+        'מאוד': '5'  # Very -> All the time
+    }
+    
+    # Apply mapping for V2 and V7 forms
+    mask = ((recoded_ema['Form name'].str.contains('V2') | recoded_ema['Form name'].str.contains('V7')) & 
+            (recoded_ema['Variable'] == 'PROCRASTINATION'))
+    recoded_ema.loc[mask, 'Responses ID'] = recoded_ema.loc[mask, 'Responses name'].map(long_proc_mapping)
+    
     after = len(recoded_ema)
+    
     # Save the recoded responses
     output_path = os.path.join(output_dir, 'recoded_ema_data.csv')
     recoded_ema.to_csv(output_path, index=False)
