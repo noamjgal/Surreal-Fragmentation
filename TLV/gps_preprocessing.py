@@ -27,20 +27,29 @@ def create_gps_summary():
     raw_gps['user'] = raw_gps['user'].astype(str)
     raw_gps['Timestamp'] = pd.to_datetime(raw_gps['Timestamp'])
     participant_info['user'] = participant_info['user'].astype(str)
-    
+    print(participant_info.head())
     # Merge demographic information
     raw_gps = pd.merge(
         raw_gps,
         participant_info[['user', 'school_n', 'sex']],
         on='user',
-        how='left'
+        how='left',
+        suffixes=('', '_y')
     )
     
     print("Creating daily summaries...")
     daily_summaries = []
     
+    # Add debugging to see what columns are available
+    print("Available columns in raw_gps:", raw_gps.columns.tolist())
+    
     # Group by user and date
     for (user, date), day_data in tqdm(raw_gps.groupby(['user', 'date'])):
+        # Debug the first iteration
+        if len(daily_summaries) == 0:
+            print("Sample day_data columns:", day_data.columns.tolist())
+            print("First row of day_data:", day_data.iloc[0])
+        
         # Get demographic info for this user
         user_demo = day_data[['school_n', 'sex']].iloc[0]
         
