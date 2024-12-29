@@ -277,6 +277,20 @@ def main():
     logging.info("\nParticipant completion rates (days with 3+ total responses across both scales):")
     logging.info(boolean_summary['Percentage_Valid_Days'].describe().to_string())
 
+    # Add new code to print unique variables
+    # Load the processed participant data to get variables
+    all_participant_files = list((Path(project_root) / "data" / "processed" / "participants").glob("participant_*.csv"))
+    if all_participant_files:
+        sample_data = pd.read_csv(all_participant_files[0])
+        stai_vars = sample_data[sample_data['Scale'].str.contains('STAI', na=False)]['Variable'].unique()
+        ces_vars = sample_data[sample_data['Scale'].str.contains('CES-D', na=False)]['Variable'].unique()
+        
+        print("\nUnique STAI Variables:")
+        print('\n'.join(sorted([str(var) for var in stai_vars if pd.notna(var)])))
+        
+        print("\nUnique CES-D Variables:")
+        print('\n'.join(sorted([str(var) for var in ces_vars if pd.notna(var)])))
+
 if __name__ == "__main__":
     main() 
     

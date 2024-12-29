@@ -13,6 +13,7 @@ class Config:
 import pandas as pd
 import numpy as np
 import os
+import datetime
 
 class DataLoader:
     def __init__(self, config):
@@ -88,17 +89,26 @@ class DataPreprocessor:
         categorical_cols = data.select_dtypes(include=['object', 'category']).columns
         datetime_cols = data.select_dtypes(include=['datetime64']).columns
         
+        # Handle numeric columns
         for col in numeric_cols:
             data[col] = data[col].fillna(data[col].median())
         
+        # Handle categorical columns (excluding datetime)
         for col in categorical_cols:
-            if col not in datetime_cols:  # Skip datetime columns for mode filling
-                data[col] = data[col].fillna(data[col].mode()[0])
-            
-        # Handle datetime columns separately
+            if col not in datetime_cols:
+                try:
+                    # Get most common value, excluding datetime objects
+                    valid_values = data[col][~data[col].apply(lambda x: isinstance(x, (pd.Timestamp, datetime.datetime)))]
+                    most_common = valid_values.mode()[0] if not valid_values.empty else None
+                    data[col] = data[col].fillna(most_common)
+                except (TypeError, ValueError):
+                    # If mode fails, use forward/backward fill
+                    data[col] = data[col].ffill().bfill()
+        
+        # Handle datetime columns
         for col in datetime_cols:
-            data[col] = data[col].fillna(data[col].mean())
-            
+            data[col] = data[col].ffill().bfill()
+        
         return data
     
     @staticmethod

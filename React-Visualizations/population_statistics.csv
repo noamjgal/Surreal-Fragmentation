@@ -1,5 +1,0 @@
-Fragmentation,Median Cut-off,High Population Count,Low Population Count,High Mean,Low Mean,High Median,Low Median,High Std Dev,Low Std Dev,High Min,Low Min,High Max,Low Max,High Total Mobile Duration,Low Total Mobile Duration
-Stationary_index,0.85,55,58,0.91,0.65,0.92,0.71,0.04,0.19,0.86,0.0,0.97,0.85,4641.05,3602.12
-Mobile_index,0.94,47,49,0.99,0.39,0.99,0.0,0.02,0.42,0.95,0.0,1.0,0.94,3877.42,4365.75
-Stationary_AID,45.14,55,55,84.26,28.28,79.53,26.26,36.72,10.18,45.19,5.5,233.91,45.09,3854.39,4314.85
-Mobile_AID,16.2,24,26,32.72,12.86,20.25,13.19,44.43,2.16,16.42,7.35,232.48,16.2,3625.02,2863.66
