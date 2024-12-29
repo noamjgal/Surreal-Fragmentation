@@ -6,6 +6,16 @@ from tqdm import tqdm
 from collections import defaultdict
 
 def detect_episodes(df, column, min_duration, merge_gap, max_gap=timedelta(minutes=10)):
+    # Add waking hours filter (7am-7pm)
+    df = df[
+        (df['Timestamp'].dt.hour >= 7) & 
+        (df['Timestamp'].dt.hour < 19)
+    ].copy()
+    
+    if df.empty:
+        print("Warning: No data within waking hours (7am-7pm)")
+        return [], 0, 0
+
     episodes = []
     start_time = None
     prev_time = None
