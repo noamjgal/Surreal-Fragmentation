@@ -18,7 +18,7 @@ The TLV pipeline processes GPS and digital activity data to analyze fragmentatio
    - Outputs enhanced GPS summaries
 
 3. **Episode Detection** (`episode-detection.py`)
-   - Identifies digital activity and mobility episodes
+   - Identifies digital activity and mobility episodes during waking hours (7AM-7PM)
    - Applies duration thresholds and gap merging
    - Creates separate episode files for digital and moving activities
    - Outputs episode summaries per participant per day
@@ -37,7 +37,7 @@ The TLV pipeline processes GPS and digital activity data to analyze fragmentatio
    - Provides demographic breakdowns of coverage
    - Outputs coverage quality metrics
 
-6. **Statistical Analysis** (`significance-combined.py`)
+6. **Statistical Analysis** (`hypothesis-testing/significance-combined.py`)
    - Performs statistical tests on relationships between:
      - Fragmentation indices
      - Emotional outcomes
