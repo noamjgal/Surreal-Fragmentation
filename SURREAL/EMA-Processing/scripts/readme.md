@@ -3,13 +3,14 @@
 This repository contains Python scripts for processing Ecological Momentary Assessment (EMA) data, focusing on standardizing survey responses and generating participant-level analyses.
 
 ## Required Inputs
+```
 project_root/
 ├── data/
 │   └── raw/
 │       ├── comprehensive_ema_data.csv             # Raw EMA survey data
 │       └── processed_dictionaries_merged.csv      # Processed translation dictionaries
 │       └── Corrected-Response-Mappings.xlsx       # Response mapping for recoding
-
+```
 
 ## Processing Pipeline
 
