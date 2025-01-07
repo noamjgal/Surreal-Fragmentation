@@ -14,7 +14,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Add project root to Python path
-project_root = str(Path(__file__).parent.parent)
+project_root = str(Path(__file__).parent.parent.parent)
 sys.path.append(project_root)
 MAPPING_FILE_PATH = Path(project_root) / "data" / "raw" / "Corrected-Response-Mappings.xlsx"
 OUTPUT_DIR = Path(project_root) / "data"

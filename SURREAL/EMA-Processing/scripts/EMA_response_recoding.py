@@ -19,8 +19,9 @@ project_root = str(Path(__file__).parent.parent)
 sys.path.append(project_root)
 
 # Input
-EMA_DATA_PATH = Path(project_root) / "data" / "raw" / "comprehensive_ema_data_eng_updated.csv"
-DICT_PATH = Path(project_root) / "data" / "reordered" / "processed_dictionaries_merged.csv"
+EMA_DATA_PATH = Path(project_root) / "data" / "raw" / "comprehensive_ema_data_var.csv"
+DICT_PATH = Path(project_root) / "data" / "raw" / "processed_dictionaries_merged.csv"
+MAPPINGS_PATH = Path(project_root) / "data" / "raw" / "Corrected-Response-Mappings.xlsx"
 # Output
 RECODED_PATH = Path(project_root) / "data" / "reordered" / "recoded_ema_data.csv"
 
@@ -193,28 +194,37 @@ def main():
     # Set up detailed logging
     logging.basicConfig(level=logging.DEBUG)
     
-    # Create output directory
-    output_dir = os.path.join('SURREAL', 'EMA-Round2', 'data', 'reordered')
+    # Create output directory if it doesn't exist
+    output_dir = os.path.join('SURREAL', 'EMA-Processing', 'data', 'reordered')
     os.makedirs(output_dir, exist_ok=True)
     logging.info(f"Created output directory: {output_dir}")
     
-    # Define all file paths
-    data_dir = Path(project_root) / "data"
-    raw_dir = data_dir / "raw"
-    processed_dir = data_dir / "processed"
     
-    # Input files
-    mappings_path = raw_dir / "Corrected-Response-Mappings.xlsx"
-    ema_data_path = raw_dir / "comprehensive_ema_data_eng_updated.csv"
-    
-    # Load the mapping data, EMA data
-    mappings_df = pd.read_excel(mappings_path, sheet_name="processed_response_mappings")
-    ema_data = pd.read_csv(ema_data_path)
-    print('jump here')
-    print(ema_data['Variable'].unique())
-    # Load processed dictionaries
-    processed_dicts_path = os.path.join(output_dir, 'processed_dictionaries_merged.csv')
-    processed_dicts = pd.read_csv(processed_dicts_path)
+    # Load the data with explicit data validation
+    try:
+        mappings_df = pd.read_excel(MAPPINGS_PATH, sheet_name="processed_response_mappings")
+        ema_data = pd.read_csv(EMA_DATA_PATH)
+        processed_dicts = pd.read_csv(DICT_PATH)
+        
+        # Add debugging information
+        logging.info("\nData Loading Summary:")
+        logging.info(f"EMA Data Shape: {ema_data.shape}")
+        logging.info(f"EMA Data Columns: {ema_data.columns.tolist()}")
+        logging.info(f"Form name unique values: {ema_data['Form name'].unique().tolist()}")
+        logging.info(f"Variable unique values: {ema_data['Variable'].unique().tolist()}")
+        
+        # Check for data type issues
+        logging.info("\nColumn Data Types:")
+        logging.info(f"Form name dtype: {ema_data['Form name'].dtype}")
+        logging.info(f"Variable dtype: {ema_data['Variable'].dtype}")
+        
+        # Convert columns to string type if needed
+        ema_data['Form name'] = ema_data['Form name'].astype(str)
+        ema_data['Variable'] = ema_data['Variable'].astype(str)
+        
+    except Exception as e:
+        logging.error(f"Error loading data: {e}")
+        raise
     
     # Create a copy for recoding
     recoded_ema = ema_data.copy()
@@ -289,8 +299,8 @@ def main():
     after = len(recoded_ema)
     
     # Save the recoded responses
-    output_path = os.path.join(output_dir, 'recoded_ema_data.csv')
-    recoded_ema.to_csv(output_path, index=False)
+
+    recoded_ema.to_csv(RECODED_PATH, index=False)
     
     # Print summary
     logging.info('\nRecoding Summary:')
@@ -300,7 +310,7 @@ def main():
         logging.info(f"  Unchanged: {counts['unchanged']}")
         logging.info(f"  Total processed: {counts['changed'] + counts['unchanged']}")
     
-    logging.info(f"\nProcessed data saved to: {output_path}")
+    logging.info(f"\nProcessed data saved to: {RECODED_PATH}")
     print(f"Dropped {first - after} rows")
     print(recoded_ema['Variable'].unique())
 

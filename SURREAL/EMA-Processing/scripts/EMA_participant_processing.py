@@ -172,7 +172,7 @@ def main():
     
     # Load data
     try:
-        mappings_df = pd.read_csv(Path(project_root) / "data" / "raw" / "processed_dictionaries.csv")
+        mappings_df = pd.read_csv(Path(project_root) / "data" / "raw" / "processed_dictionaries_merged.csv")
         ema_data = pd.read_csv(Path(project_root) / "data" / "reordered" / "recoded_ema_data.csv")
         
     except Exception as e:
