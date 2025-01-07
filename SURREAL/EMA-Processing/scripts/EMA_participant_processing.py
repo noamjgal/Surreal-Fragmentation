@@ -101,11 +101,16 @@ def calculate_daily_summary(ema_data):
     for participant_id in ema_data['Participant ID'].unique():
         participant_data = ema_data[ema_data['Participant ID'] == participant_id]
         
-        # Count surveys for each day
-        daily_counts = {'Participant ID': participant_id}
-        for day in range(1, 8):  # Days 1-7
-            day_data = participant_data[participant_data['Trigger set name'].str.contains(f'EMA day {day}', case=False)]
-            # Count unique timestamps for that day
+        # Initialize daily counts with zeros
+        daily_counts = {
+            'Participant ID': participant_id,
+            'Day_1': 0, 'Day_2': 0, 'Day_3': 0, 'Day_4': 0,
+            'Day_5': 0, 'Day_6': 0, 'Day_7': 0
+        }
+        
+        # Update counts for days that have data
+        for day in range(1, 8):
+            day_data = participant_data[participant_data['Trigger set name'].str.contains(f'EMA day {day}', case=False, na=False)]
             unique_surveys = day_data['Date form sent'].nunique()
             daily_counts[f'Day_{day}'] = unique_surveys
         
@@ -115,7 +120,7 @@ def calculate_daily_summary(ema_data):
     summary_df = pd.DataFrame(summary_data)
     summary_df = summary_df.set_index('Participant ID')
     
-    # Add totals and averages
+    # Add totals
     summary_df['Total'] = summary_df.sum(axis=1)
     
     return summary_df
@@ -138,21 +143,27 @@ def calculate_scale_summary(ema_data, mappings_df):
         
         summary_data = []
         
-        for participant_id in scale_data['Participant ID'].unique():
+        # Get all unique participant IDs from the original ema_data
+        for participant_id in ema_data['Participant ID'].unique():
             participant_data = scale_data[scale_data['Participant ID'] == participant_id]
             
-            # Count questions for each day
-            daily_counts = {'Participant ID': participant_id}
-            for day in range(1, 8):  # Days 1-7
-                day_data = participant_data[participant_data['Trigger set name'].str.contains(f'EMA day {day}', case=False)]
-                # Count unique questions for that day
+            # Initialize daily counts with zeros
+            daily_counts = {
+                'Participant ID': participant_id,
+                'Day_1': 0, 'Day_2': 0, 'Day_3': 0, 'Day_4': 0,
+                'Day_5': 0, 'Day_6': 0, 'Day_7': 0
+            }
+            
+            # Update counts for days that have data
+            for day in range(1, 8):
+                day_data = participant_data[participant_data['Trigger set name'].str.contains(f'EMA day {day}', case=False, na=False)]
                 unique_questions = day_data['Question name'].nunique()
                 daily_counts[f'Day_{day}'] = unique_questions
             
             summary_data.append(daily_counts)
         
         # Create summary DataFrame for the scale
-        if summary_data:  # Only create DataFrame if there's data
+        if summary_data:
             summary_df = pd.DataFrame(summary_data)
             summary_df = summary_df.set_index('Participant ID')
             
@@ -179,9 +190,15 @@ def main():
         logging.error(f"Error loading data: {e}")
         return
     
+    # Print test participants before dropping them
+    test_participants = ema_data[ema_data['Participant ID'].str.contains('est', case=False)]['Participant ID'].unique()
+    logging.info(f"Dropping the following test participants:")
+    for participant in test_participants:
+        logging.info(f"- {participant}")
+    
     # Drop test participants
     ema_data = ema_data[~ema_data['Participant ID'].str.contains('est', case=False)]
-    logging.info(f"Dropped test participants. Remaining participants: {len(ema_data['Participant ID'].unique())}")
+    logging.info(f"Dropped {len(test_participants)} test participants. Remaining participants: {len(ema_data['Participant ID'].unique())}")
     
     # Process each participant
     for participant_id in ema_data['Participant ID'].unique():
