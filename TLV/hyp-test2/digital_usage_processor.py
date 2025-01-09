@@ -2,74 +2,83 @@
 import pandas as pd
 import numpy as np
 
+# digital_usage_processor.py
+import pandas as pd
+import numpy as np
+import logging
+import os
+
 class DigitalUsageProcessor:
-    @staticmethod
-    def calculate_usage_metrics(data):
+    def __init__(self, output_dir=None):
+        self.output_dir = output_dir
+        self.logger = logging.getLogger(__name__)
+    def calculate_usage_metrics(self, data):
         """Calculate digital usage metrics and create user groups"""
-        # Ensure we have all the necessary columns
-        required_cols = ['participant_id', 'date', 'digital_fragmentation_index', 'total_duration_mobility']
+        # Check required columns
+        required_cols = ['participant_id', 'date', 'digital_fragmentation_index']
         missing_cols = [col for col in required_cols if col not in data.columns]
         if missing_cols:
             raise ValueError(f"Missing required columns: {missing_cols}")
 
-        # Calculate daily digital metrics
+        # Calculate daily metrics for all participants
         daily_metrics = data.groupby(['participant_id', 'date']).agg({
             'digital_fragmentation_index': 'first',
-            'total_duration_mobility': 'first'  # Used as a proxy for day coverage
         }).reset_index()
 
         # Calculate user-level metrics
         user_metrics = daily_metrics.groupby('participant_id').agg({
-            'digital_fragmentation_index': ['count', 'mean', 'std'],  # Include count of days and variability
-            'total_duration_mobility': 'mean'
+            'digital_fragmentation_index': ['count', 'mean', 'std'],
         })
         
         # Flatten column names
-        user_metrics.columns = ['days_with_data', 'avg_fragmentation', 'std_fragmentation', 'avg_day_coverage']
+        user_metrics.columns = ['days_with_data', 'avg_fragmentation', 'std_fragmentation']
         user_metrics = user_metrics.reset_index()
 
-        # Create groups using average fragmentation
-        # Filter out users with too few days of data
-        min_days = 3  # Adjust this threshold as needed
-        valid_users = user_metrics[user_metrics['days_with_data'] >= min_days]
-        
-        if len(valid_users) > 0:
-            terciles = np.percentile(valid_users['avg_fragmentation'].dropna(), [33.33, 66.67])
-            
-            def assign_group(row):
-                if row['days_with_data'] < min_days:
-                    return 'insufficient_data'
-                elif pd.isna(row['avg_fragmentation']):
-                    return 'missing_data'
-                elif row['avg_fragmentation'] <= terciles[0]:
-                    return 'low'
+        # Create numeric groups (1: low, 2: medium, 3: high)
+        def assign_group(row):
+            if pd.isna(row['avg_fragmentation']):
+                return np.nan
+            elif row['days_with_data'] >= 3:
+                valid_users = user_metrics[user_metrics['days_with_data'] >= 3]
+                terciles = np.percentile(valid_users['avg_fragmentation'].dropna(), [33.33, 66.67])
+                
+                if row['avg_fragmentation'] <= terciles[0]:
+                    return 1  # low
                 elif row['avg_fragmentation'] <= terciles[1]:
-                    return 'medium'
+                    return 2  # medium
                 else:
-                    return 'high'
+                    return 3  # high
+            else:
+                all_users_terciles = np.percentile(user_metrics['avg_fragmentation'].dropna(), [33.33, 66.67])
+                if row['avg_fragmentation'] <= all_users_terciles[0]:
+                    return 1  # low
+                elif row['avg_fragmentation'] <= all_users_terciles[1]:
+                    return 2  # medium
+                else:
+                    return 3  # high
+        
+        user_metrics['digital_usage_group'] = user_metrics.apply(assign_group, axis=1)
+        
+        # Save detailed group information if output directory is provided
+        if self.output_dir:
+            group_stats = user_metrics.groupby('digital_usage_group').agg({
+                'participant_id': 'count',
+                'days_with_data': ['mean', 'min', 'max'],
+                'avg_fragmentation': ['mean', 'std']
+            }).round(2)
             
-            user_metrics['digital_usage_group'] = user_metrics.apply(assign_group, axis=1)
+            group_file = os.path.join(self.output_dir, 'digital_usage_groups.csv')
+            group_stats.to_csv(group_file)
+            user_metrics.to_csv(os.path.join(self.output_dir, 'user_metrics.csv'))
             
-            # Print distribution of groups
-            print("\nDigital Usage Group Distribution:")
-            print(user_metrics['digital_usage_group'].value_counts())
-            
-            # Print group statistics
-            print("\nGroup Statistics:")
-            stats = user_metrics.groupby('digital_usage_group').agg({
-                'avg_fragmentation': ['mean', 'std', 'count'],
-                'days_with_data': ['mean', 'min', 'max']
-            })
-            print(stats)
-            
-            return user_metrics
-        else:
-            raise ValueError("No users have sufficient data for grouping")
+            self.logger.info("\nDigital Usage Group Distribution:")
+            self.logger.info(user_metrics['digital_usage_group'].value_counts().sort_index())
+            self.logger.info("\nGroup Statistics saved to: " + group_file)
+        
+        return user_metrics
 
-    @staticmethod
-    def add_usage_metrics(data, user_metrics):
+    def add_usage_metrics(self, data, user_metrics):
         """Add usage metrics and groups to main dataset"""
-        # Merge metrics back to main dataset
         enhanced_data = data.merge(
             user_metrics[['participant_id', 'digital_usage_group', 'days_with_data', 
                          'avg_fragmentation', 'std_fragmentation']],

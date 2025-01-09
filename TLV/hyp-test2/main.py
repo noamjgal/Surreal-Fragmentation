@@ -1,179 +1,133 @@
 # main.py
+import pandas as pd
+import logging
+import os
 from config import Config
 from data_loader import DataLoader
 from preprocessor import DataPreprocessor
-from statistical_tests import StatisticalAnalyzer
-from results_manager import ResultsManager
-from analysis_runner import AnalysisRunner
 from digital_usage_processor import DigitalUsageProcessor
-import pandas as pd
-import logging
+from tests import StatisticalAnalyzer, AnalysisRunner
 
-def setup_logging():
-    """Configure logging for the analysis pipeline"""
+def setup_logging(config):
+    """Configure logging with output directory"""
+    log_file = os.path.join(config.output_dir, 'analysis.log')
+    os.makedirs(config.output_dir, exist_ok=True)
+    
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler('analysis.log'),
+            logging.FileHandler(log_file),
             logging.StreamHandler()
         ]
     )
 
-def validate_data(data):
-    """
-    Validate input data meets minimum requirements
+def validate_data(data, config):
+    """Extended data validation including column checks"""
+    logging.info("\nValidating data structure...")
+    logging.info(f"Available columns: {sorted(data.columns.tolist())}")
     
-    Parameters:
-    -----------
-    data : pd.DataFrame
-        Input data to validate
+    # Split population factors into required now vs required later
+    immediate_required = [col for col in config.population_factors 
+                         if col != 'digital_usage_group']  # This gets added later
     
-    Returns:
-    --------
-    bool
-        True if data is valid, False otherwise
-    """
+    # Check for immediately required columns
+    immediate_required_columns = (
+        config.frag_indices + 
+        config.emotional_outcomes + 
+        immediate_required +
+        config.control_variables
+    )
+    
+    missing_columns = [col for col in immediate_required_columns 
+                      if col not in data.columns]
+    if missing_columns:
+        logging.error(f"Missing required columns: {missing_columns}")
+        return False
+    
+    # Basic validation
     min_participants = 3
     min_observations = 30
     
-    if len(data['participant_id'].unique()) < min_participants:
-        logging.warning(f"Insufficient participants: {len(data['participant_id'].unique())}")
+    n_participants = len(data['participant_id'].unique())
+    if n_participants < min_participants:
+        logging.warning(f"Insufficient participants: {n_participants}")
         return False
+        
     if len(data) < min_observations:
         logging.warning(f"Insufficient observations: {len(data)}")
         return False
+    
+    logging.info(f"Data shape: {data.shape}")
+    logging.info(f"Number of participants: {n_participants}")
+    logging.info(f"Average observations per participant: {len(data)/n_participants:.1f}")
+    
     return True
 
 def main():
-    """
-    Main analysis pipeline
-    
-    Pipeline Steps:
-    1. Initialize components and logging
-    2. Load raw data
-    3. Preprocess data
-    4. Add digital usage metrics
-    5. Run analyses:
-       - Mobility analysis
-       - Emotional analysis
-       - Population analysis
-       - Usage group analysis
-    6. Save results
-    
-    Error Handling:
-    - Validates data at each step
-    - Logs errors and warnings
-    - Gracefully handles missing data
-    """
-    # 1. Setup
-    setup_logging()
+    # Setup
+    config = Config()
+    setup_logging(config)
     logging.info("Starting analysis pipeline")
     
     try:
         # Initialize components
-        config = Config()
         loader = DataLoader(config)
         preprocessor = DataPreprocessor()
-        analyzer = StatisticalAnalyzer(config)
-        results_manager = ResultsManager(config)
-        digital_processor = DigitalUsageProcessor()
-        runner = AnalysisRunner(config, analyzer, results_manager)
+        digital_processor = DigitalUsageProcessor(config.output_dir)
         
-        # 2. Load Data
-        logging.info("Loading raw data")
+        # Load and validate data
+        logging.info("Loading data")
         raw_data = loader.load_data()
-        if not validate_data(raw_data):
-            raise ValueError("Data validation failed")
-            
-        # 3. Preprocess
-        logging.info("Preprocessing data")
+        logging.info("\nRaw data columns:")
+        logging.info(sorted(raw_data.columns.tolist()))
+        # Change the order in main() function
+        logging.info("\nPreprocessing data")
         processed_data = preprocessor.preprocess(raw_data)
-        
-        # 4. Digital Usage Processing
-        logging.info("Processing digital usage metrics")
-        try:
-            user_avg_usage = digital_processor.calculate_usage_metrics(processed_data)
-            processed_data = digital_processor.add_usage_metrics(processed_data, user_avg_usage)
-        except Exception as e:
-            logging.error(f"Error in digital usage processing: {str(e)}")
-            raise
-        
-        # 5. Run Analyses
-        analysis_functions = {
-            'mobility': runner.run_mobility_analysis,
-            'emotional': runner.run_emotional_analysis,
-            'population': runner.run_population_analysis,
-            'usage_group': runner.run_usage_group_analysis
-        }
-        
-        all_results = {}
-        for analysis_type, analysis_func in analysis_functions.items():
-            logging.info(f"Running {analysis_type} analysis")
-            try:
-                results_df = analysis_func(processed_data)
-                all_results[analysis_type] = results_df
-                
-                # Save results by analysis type
-                if 'type' in results_df.columns:
-                    for test_type in results_df['type'].unique():
-                        test_results = results_df[results_df['type'] == test_type]
-                        results_manager.save_results(
-                            test_results,
-                            f'{analysis_type}_{test_type}_analysis.csv'
-                        )
-                else:
-                    # Handle cases where 'type' column doesn't exist
-                    results_manager.save_results(
-                        results_df,
-                        f'{analysis_type}_analysis.csv'
-                    )
-                
-                # Save significant findings
-                if 'p_value' in results_df.columns:
-                    significant_results = results_df[results_df['p_value'] < 0.05]
-                    results_manager.save_results(
-                        significant_results,
-                        f'{analysis_type}_significant_findings.csv'
-                    )
-            
-            except Exception as e:
-                logging.error(f"Error in {analysis_type} analysis: {str(e)}")
-                continue
-        
-        # 6. Generate Summary
-        logging.info("Generating analysis summary")
-        generate_summary(all_results, config)
-        
-    except Exception as e:
-        logging.error(f"Pipeline failed: {str(e)}")
-        raise
 
-def generate_summary(results_dict, config):
-    """
-    Generate summary of analysis results
-    
-    Parameters:
-    -----------
-    results_dict : dict
-        Dictionary containing results DataFrames
-    config : Config
-        Configuration object
-    """
-    summary = []
-    for analysis_type, results_df in results_dict.items():
-        if 'p_value' in results_df.columns:
-            sig_count = len(results_df[results_df['p_value'] < 0.05])
-            summary.append({
-                'analysis_type': analysis_type,
-                'total_tests': len(results_df),
-                'significant_results': sig_count,
-                'significance_rate': sig_count / len(results_df) if len(results_df) > 0 else 0
-            })
-    
-    summary_df = pd.DataFrame(summary)
-    results_manager = ResultsManager(config)
-    results_manager.save_results(summary_df, 'analysis_summary.csv')
+        # First process digital usage metrics
+        user_metrics = digital_processor.calculate_usage_metrics(processed_data)
+        processed_data = digital_processor.add_usage_metrics(processed_data, user_metrics)
+
+        # Then validate the complete dataset
+        if not validate_data(processed_data, config):
+            raise ValueError("Data validation failed")
+
+        # Initialize analysis components
+        analyzer = StatisticalAnalyzer(config)
+        runner = AnalysisRunner(analyzer)
+        
+        # Run analyses
+        logging.info("\nRunning statistical analyses")
+        results_df = runner.run_analyses(
+            data=processed_data,
+            predictors=config.frag_indices + config.population_factors,
+            outcomes=config.emotional_outcomes,
+            control_vars=config.control_variables
+        )
+        
+        # Save all results
+        output_file = os.path.join(config.output_dir, 'analysis_results.csv')
+        results_df.to_csv(output_file, index=False)
+        logging.info(f"Results saved to {output_file}")
+        
+        # Save significant results separately
+        sig_results = results_df[results_df['p_value'] < 0.05].copy()
+        if len(sig_results) > 0:
+            sig_file = os.path.join(config.output_dir, 'significant_results.csv')
+            sig_results.to_csv(sig_file, index=False)
+            
+            summary_cols = ['test_type', 'predictor', 'outcome', 
+                          'coefficient', 'p_value', 'effect_size']
+            logging.info("\nSignificant Findings:")
+            logging.info(sig_results[summary_cols].to_string())
+            
+            logging.info(f"\nTotal tests run: {len(results_df)}")
+            logging.info(f"Significant results: {len(sig_results)}")
+            
+    except Exception as e:
+        logging.error(f"Pipeline failed: {str(e)}", exc_info=True)
+        raise
 
 if __name__ == "__main__":
     main()
