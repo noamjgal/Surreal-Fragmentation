@@ -5,3 +5,4 @@ __pycache__
 *logs*
 *output*
 SURREAL/EMA-Processing/data
+*.log
