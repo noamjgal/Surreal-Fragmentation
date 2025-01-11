@@ -1,9 +1,9 @@
-# TLV Pipeline Documentation
+# Data Processing Pipeline Documentation
 
 ## Overview
-The TLV pipeline processes GPS and digital activity data to analyze fragmentation patterns and their relationships with mobility and emotional outcomes. The pipeline consists of several interconnected Python scripts that handle different aspects of data processing and analysis.
+The Data Processing pipeline processes GPS and digital activity data to analyze fragmentation patterns and their relationships with mobility and emotional outcomes. The pipeline consists of functional scripts that handle different aspects of data processing to prepare the data for hypothesis testing.
 
-## Pipeline Flow
+## Data ProcessingPipeline
 
 1. **Data Preprocessing** (`TLV-preprocess.py`)
    - Loads raw GPS and app usage data
@@ -31,19 +31,9 @@ The TLV pipeline processes GPS and digital activity data to analyze fragmentatio
    - Computes Average Inter-episode Duration (AID)
    - Generates comprehensive fragmentation summaries
 
-5. **Coverage Analysis** (`coverage_analysis.py`)
-   - Analyzes data completeness
-   - Identifies gaps in data collection
-   - Provides demographic breakdowns of coverage
-   - Outputs coverage quality metrics
-
-6. **Statistical Analysis** (`hypothesis-testing/significance-combined.py`)
-   - Performs statistical tests on relationships between:
-     - Fragmentation indices
-     - Emotional outcomes
-     - Demographic factors
-   - Conducts multilevel analyses
-   - Generates detailed statistical reports
+5. **Preprocessing Metrics for Hypothesis Testing** (`metrics.py`)
+   - Groups independent variable metrics into classes for hypothesis testing
+   - Calculates dependent variable metrics for hypothesis testing
 
 ## Input Requirements
 

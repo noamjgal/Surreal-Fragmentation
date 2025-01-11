@@ -97,11 +97,13 @@ def process_user_day(file_path, verbose=False):
         return None
 
     digital_episodes, digital_merged, digital_changed = detect_episodes(df, 'is_digital', 
-                                                                        min_duration=timedelta(minutes=1), 
-                                                                        merge_gap=timedelta(seconds=40))
+                                                                        min_duration=timedelta(seconds=40), 
+                                                                        merge_gap=timedelta(seconds=30), 
+                                                                        max_gap=timedelta(minutes=5))
     moving_episodes, moving_merged, moving_changed = detect_episodes(df, 'is_moving', 
                                                                      min_duration=timedelta(minutes=2), 
-                                                                     merge_gap=timedelta(seconds=80))
+                                                                     merge_gap=timedelta(seconds=90),
+                                                                     max_gap=timedelta(minutes=5))
     
     return {
         'digital_episodes': digital_episodes,
