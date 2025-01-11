@@ -13,8 +13,7 @@ class FragmentationAnalysis:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self._setup_logging()
-        self.within_results = []
-        self.between_results = []
+        self.results = []
         
     def _setup_logging(self):
         log_path = self.output_dir / 'analysis.log'
@@ -32,12 +31,13 @@ class FragmentationAnalysis:
         self.logger.info("Loading data from %s", self.input_path)
         df = pd.read_csv(self.input_path)
         
-        self.logger.info("\nMissing values before cleaning:")
-        for col in df.columns:
-            missing = df[col].isna().sum()
-            if missing > 0:
-                self.logger.info(f"{col}: {missing} missing values")
+        # Log missing values
+        missing_summary = df.isnull().sum()[df.isnull().sum() > 0]
+        if not missing_summary.empty:
+            self.logger.info("\nMissing values summary:")
+            self.logger.info(missing_summary)
         
+        # Define key variables
         key_vars = [
             'digital_frag_during_mobility', 'moving_fragmentation_index',
             'digital_fragmentation_index', 'total_time_on_device',
@@ -45,7 +45,7 @@ class FragmentationAnalysis:
         ]
         df_clean = df.dropna(subset=key_vars)
         
-        self.logger.info(f"\nObservations after cleaning: {len(df_clean)}")
+        self.logger.info(f"\nFinal sample size: {len(df_clean)} observations")
         self.data = df_clean
         return df_clean
 
@@ -55,12 +55,7 @@ class FragmentationAnalysis:
         between_var = participant_means - participant_means.mean()
         return within_var, between_var
 
-    def calculate_p_value(self, coef, std_err, df):
-        t_stat = coef / std_err
-        p_val = 2 * (1 - stats.t.cdf(abs(t_stat), df=df))
-        return t_stat, p_val
-
-    def run_mixed_effects_analysis(self):
+    def run_stepwise_analysis(self):
         dependent_vars = [
             'TENSE', 'RELAXATION_R', 'WORRY', 'PEACE_R', 
             'IRRITATION', 'SATISFACTION_R', 'STAI6_score', 'HAPPY'
@@ -81,124 +76,171 @@ class FragmentationAnalysis:
         
         for dep_var in dependent_vars:
             for indep_var in independent_vars:
-                self.logger.info(f"Running analysis for {dep_var} ~ {indep_var}")
+                self.logger.info(f"\nAnalyzing {dep_var} ~ {indep_var}")
                 
-                analysis_vars = [dep_var, indep_var] + control_vars + ['participant_id']
-                analysis_data = self.data[analysis_vars].dropna()
+                # Start with base model (no controls)
+                base_vars = [dep_var, indep_var, 'participant_id']
+                model_data = self.data[base_vars].dropna()
                 
-                if len(analysis_data) == 0:
-                    self.logger.error(f"No complete cases for {dep_var} ~ {indep_var}")
+                if len(model_data) == 0:
+                    self.logger.error(f"Insufficient data for {dep_var} ~ {indep_var}")
                     continue
                 
-                # Compute within and between components
-                for var in [indep_var] + control_vars:
-                    within, between = self.prepare_within_between_data(analysis_data, var)
-                    analysis_data[f'{var}_within'] = within
-                    analysis_data[f'{var}_between'] = between
+                # Run models with incrementally added controls
+                control_combinations = []
+                for i in range(len(control_vars) + 1):
+                    for combo in [control_vars[:i]]:
+                        control_combinations.append(combo)
                 
-                # Separate formulas for within and between effects
-                within_vars = [f'{var}_within' for var in [indep_var] + control_vars]
-                between_vars = [f'{var}_between' for var in [indep_var] + control_vars]
-                
-                formula = (f"{dep_var} ~ {' + '.join(within_vars + between_vars)} + "
-                         f"(1|participant_id)")
-                
-                try:
-                    model = smf.mixedlm(formula, data=analysis_data, groups='participant_id')
-                    results = model.fit()
-                    df_resid = len(analysis_data) - len(results.params)
+                for step, current_controls in enumerate(control_combinations):
+                    model_name = f"Step {step}"
+                    if step == 0:
+                        model_name = "Base Model"
+                    else:
+                        model_name = f"Model {step} + {', '.join(current_controls)}"
                     
-                    # Process results for main effects and covariates
-                    def process_effects(var_list, is_within):
-                        effects_dict = {}
-                        suffix = '_within' if is_within else '_between'
+                    # Prepare variables for current model
+                    current_vars = [dep_var, indep_var] + current_controls + ['participant_id']
+                    current_data = self.data[current_vars].dropna()
+                    
+                    # Compute within and between components
+                    for var in [indep_var] + current_controls:
+                        within, between = self.prepare_within_between_data(current_data, var)
+                        current_data[f'{var}_within'] = within
+                        current_data[f'{var}_between'] = between
+                    
+                    # Create model formula
+                    within_terms = [f'{var}_within' for var in [indep_var] + current_controls]
+                    between_terms = [f'{var}_between' for var in [indep_var] + current_controls]
+                    formula = f"{dep_var} ~ {' + '.join(within_terms + between_terms)} + (1|participant_id)"
+                    
+                    try:
+                        model = smf.mixedlm(formula, data=current_data, groups='participant_id')
+                        results = model.fit()
                         
-                        for var in var_list:
-                            var_name = f'{var}{suffix}'
-                            if var_name in results.params:
-                                coef = results.params[var_name]
-                                std_err = results.bse[var_name]
-                                t_stat, p_val = self.calculate_p_value(coef, std_err, df_resid)
-                                ci_lower, ci_upper = results.conf_int().loc[var_name]
-                                
-                                effects_dict.update({
-                                    f'coef_{var_name}': coef,
-                                    f'std_err_{var_name}': std_err,
-                                    f't_stat_{var_name}': t_stat,
-                                    f'p_value_{var_name}': p_val,
-                                    f'ci_lower_{var_name}': ci_lower,
-                                    f'ci_upper_{var_name}': ci_upper
-                                })
+                        # Extract key statistics for main predictor only
+                        result_dict = {
+                            'dependent_var': dep_var,
+                            'independent_var': indep_var,
+                            'model': model_name,
+                            'n_observations': len(current_data),
+                            'n_participants': current_data['participant_id'].nunique(),
+                            'aic': results.aic,
+                            'bic': results.bic,
+                            # Within-person effects
+                            'within_coef': results.params[f'{indep_var}_within'],
+                            'within_std_err': results.bse[f'{indep_var}_within'],
+                            'within_p_value': 2 * (1 - stats.t.cdf(abs(results.params[f'{indep_var}_within'] / 
+                                                                     results.bse[f'{indep_var}_within']), 
+                                                                 df=len(current_data) - len(results.params))),
+                            # Between-person effects
+                            'between_coef': results.params[f'{indep_var}_between'],
+                            'between_std_err': results.bse[f'{indep_var}_between'],
+                            'between_p_value': 2 * (1 - stats.t.cdf(abs(results.params[f'{indep_var}_between'] / 
+                                                                      results.bse[f'{indep_var}_between']), 
+                                                                  df=len(current_data) - len(results.params))),
+                            'controls': ', '.join(current_controls) if current_controls else 'None'
+                        }
                         
-                        return effects_dict
-                    
-                    # Process within-participant effects
-                    within_effects = process_effects([indep_var] + control_vars, True)
-                    # Process between-participant effects
-                    between_effects = process_effects([indep_var] + control_vars, False)
-                    
-                    # Common model information
-                    model_info = {
-                        'dependent_var': dep_var,
-                        'independent_var': indep_var,
-                        'n_observations': len(analysis_data),
-                        'n_participants': analysis_data['participant_id'].nunique(),
-                        'aic': results.aic,
-                        'bic': results.bic,
-                        'coef_Intercept': results.params['Intercept']
-                    }
-                    
-                    # Store within-participant results
-                    self.within_results.append({
-                        **model_info,
-                        **within_effects,
-                        'coefficient': within_effects[f'coef_{indep_var}_within'],
-                        'std_error': within_effects[f'std_err_{indep_var}_within'],
-                        't_statistic': within_effects[f't_stat_{indep_var}_within'],
-                        'p_value': within_effects[f'p_value_{indep_var}_within'],
-                        'ci_lower': within_effects[f'ci_lower_{indep_var}_within'],
-                        'ci_upper': within_effects[f'ci_upper_{indep_var}_within']
-                    })
-                    
-                    # Store between-participant results
-                    self.between_results.append({
-                        **model_info,
-                        **between_effects,
-                        'coefficient': between_effects[f'coef_{indep_var}_between'],
-                        'std_error': between_effects[f'std_err_{indep_var}_between'],
-                        't_statistic': between_effects[f't_stat_{indep_var}_between'],
-                        'p_value': between_effects[f'p_value_{indep_var}_between'],
-                        'ci_lower': between_effects[f'ci_lower_{indep_var}_between'],
-                        'ci_upper': between_effects[f'ci_upper_{indep_var}_between']
-                    })
-                    
-                    self.logger.info(f"Completed analysis for {dep_var} ~ {indep_var}")
-                    
-                except Exception as e:
-                    self.logger.error(f"Error in analysis of {dep_var} ~ {indep_var}: {str(e)}")
+                        self.results.append(result_dict)
+                        
+                    except Exception as e:
+                        self.logger.error(f"Error in {model_name}: {str(e)}")
         
-        # Save results to CSV
-        if self.within_results:
-            within_df = pd.DataFrame(self.within_results)
-            within_df = within_df.sort_values('p_value')
-            within_csv_path = self.output_dir / f'within_participant_results_{timestamp}.csv'
-            within_df.to_csv(within_csv_path, index=False)
-            self.logger.info(f"Saved within-participant results to {within_csv_path}")
+        # Save results in a more readable format
+        if self.results:
+            results_df = pd.DataFrame(self.results)
             
-        if self.between_results:
-            between_df = pd.DataFrame(self.between_results)
-            between_df = between_df.sort_values('p_value')
-            between_csv_path = self.output_dir / f'between_participant_results_{timestamp}.csv'
-            between_df.to_csv(between_csv_path, index=False)
-            self.logger.info(f"Saved between-participant results to {between_csv_path}")
+            # Format p-values and coefficients
+            for col in ['within_coef', 'between_coef']:
+                results_df[col] = results_df[col].round(3)
+            for col in ['within_p_value', 'between_p_value']:
+                results_df[col] = results_df[col].round(4)
+            
+            # Create a single consolidated sheet with sections
+            consolidated_results = []
+            
+            for dep_var in dependent_vars:
+                for indep_var in independent_vars:
+                    # Add section header
+                    header_row = pd.DataFrame({
+                        'model': [f"\n=== {dep_var} ~ {indep_var} ===\n"],
+                        'n_observations': [''],
+                        'n_participants': [''],
+                        'within_coef': [''],
+                        'within_std_err': [''],
+                        'within_p_value': [''],
+                        'between_coef': [''],
+                        'between_std_err': [''],
+                        'between_p_value': [''],
+                        'controls': [''],
+                        'aic': [''],
+                        'bic': ['']
+                    })
+                    
+                    # Get subset of results for this DV-IV combination
+                    subset = results_df[
+                        (results_df['dependent_var'] == dep_var) & 
+                        (results_df['independent_var'] == indep_var)
+                    ]
+                    
+                    if not subset.empty:
+                        # Reorder columns for readability
+                        cols_order = [
+                            'model', 'n_observations', 'n_participants',
+                            'within_coef', 'within_std_err', 'within_p_value',
+                            'between_coef', 'between_std_err', 'between_p_value',
+                            'controls', 'aic', 'bic'
+                        ]
+                        subset = subset[cols_order]
+                        
+                        # Add header and subset to consolidated results
+                        consolidated_results.append(header_row)
+                        consolidated_results.append(subset)
+                        
+                        # Add blank row after each section
+                        blank_row = pd.DataFrame([[''] * len(cols_order)], columns=cols_order)
+                        consolidated_results.append(blank_row)
+            
+            # Combine all results
+            final_df = pd.concat(consolidated_results, ignore_index=True)
+            
+            # Save to Excel with formatting
+            with pd.ExcelWriter(self.output_dir / f'stepwise_results_{timestamp}.xlsx', engine='xlsxwriter') as writer:
+                final_df.to_excel(writer, sheet_name='Results', index=False)
+                
+                # Get workbook and worksheet objects for formatting
+                workbook = writer.book
+                worksheet = writer.sheets['Results']
+                
+                # Define formats
+                header_format = workbook.add_format({
+                    'bold': True,
+                    'font_size': 12,
+                    'bg_color': '#E0E0E0'
+                })
+                
+                # Set column widths
+                worksheet.set_column('A:A', 30)  # Model column
+                worksheet.set_column('B:C', 15)  # N obs and N participants
+                worksheet.set_column('D:I', 12)  # Coefficients and p-values
+                worksheet.set_column('J:J', 25)  # Controls
+                worksheet.set_column('K:L', 10)  # AIC and BIC
+                
+                # Format headers
+                for col_num, value in enumerate(cols_order):
+                    worksheet.write(0, col_num, value, header_format)
+            
+            self.logger.info(f"Saved stepwise results to {self.output_dir}/stepwise_results_{timestamp}.xlsx")
 
 def main():
     input_path = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/metrics/prepared_metrics.csv'
     output_dir = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/analysis_results'
     
+    
     analyzer = FragmentationAnalysis(input_path, output_dir)
     analyzer.load_and_preprocess_data()
-    analyzer.run_mixed_effects_analysis()
+    analyzer.run_stepwise_analysis()
     
     print("Analysis completed successfully")
 

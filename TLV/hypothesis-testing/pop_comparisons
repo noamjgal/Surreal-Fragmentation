@@ -31,6 +31,13 @@ class FragmentationGroupAnalysis:
         """Load and perform basic preprocessing of the data"""
         self.logger.info(f"Loading data from {self.input_path}")
         self.data = pd.read_csv(self.input_path)
+        
+        # Log missing values
+        missing_summary = self.data.isnull().sum()[self.data.isnull().sum() > 0]
+        if not missing_summary.empty:
+            self.logger.info("\nMissing values summary:")
+            self.logger.info(missing_summary)
+            
         return self.data
 
     def compare_groups(self):
@@ -50,14 +57,15 @@ class FragmentationGroupAnalysis:
             for group_var in group_vars:
                 try:
                     # Skip if too many missing values
-                    if self.data[frag_var].isna().sum() / len(self.data) > 0.5:
-                        self.logger.warning(f"Skipping {frag_var} due to too many missing values")
+                    missing_ratio = self.data[frag_var].isna().sum() / len(self.data)
+                    if missing_ratio > 0.5:
+                        self.logger.warning(f"Skipping {frag_var} due to {missing_ratio:.1%} missing values")
                         continue
                     
                     # Get groups
                     groups = self.data[group_var].unique()
                     
-                    if len(groups) == 2:  # Binary comparison (Gender, School, is_weekend)
+                    if len(groups) == 2:  # Binary comparison
                         # Perform t-test
                         group1_data = self.data[self.data[group_var] == groups[0]][frag_var].dropna()
                         group2_data = self.data[self.data[group_var] == groups[1]][frag_var].dropna()
@@ -74,8 +82,8 @@ class FragmentationGroupAnalysis:
                             'metric': frag_var,
                             'group_variable': group_var,
                             'test_type': 't-test',
-                            'group1': groups[0],
-                            'group2': groups[1],
+                            'group1': str(groups[0]),
+                            'group2': str(groups[1]),
                             'group1_mean': np.mean(group1_data),
                             'group2_mean': np.mean(group2_data),
                             'group1_std': np.std(group1_data),
@@ -84,10 +92,11 @@ class FragmentationGroupAnalysis:
                             'p_value': p_value,
                             'effect_size': cohens_d,
                             'group1_n': n1,
-                            'group2_n': n2
+                            'group2_n': n2,
+                            'total_n': n1 + n2
                         }
                         
-                    elif len(groups) > 2:  # For Class (3+ groups)
+                    elif len(groups) > 2:  # ANOVA
                         # Perform one-way ANOVA
                         group_data = [self.data[self.data[group_var] == g][frag_var].dropna() 
                                     for g in groups]
@@ -107,12 +116,13 @@ class FragmentationGroupAnalysis:
                             'test_type': 'ANOVA',
                             'statistic': f_stat,
                             'p_value': p_value,
-                            'effect_size': eta_squared
+                            'effect_size': eta_squared,
+                            'total_n': len(groups_concat)
                         }
                         
                         # Add means and counts for each group
                         for i, g in enumerate(groups):
-                            result[f'group{i+1}'] = g
+                            result[f'group{i+1}'] = str(g)
                             result[f'group{i+1}_mean'] = np.mean(group_data[i])
                             result[f'group{i+1}_std'] = np.std(group_data[i])
                             result[f'group{i+1}_n'] = len(group_data[i])
@@ -123,24 +133,116 @@ class FragmentationGroupAnalysis:
                     self.logger.error(f"Error analyzing {frag_var} by {group_var}: {str(e)}")
 
     def save_results(self):
-        """Save the comparison results to CSV"""
-        if self.comparison_results:
-            df_results = pd.DataFrame(self.comparison_results)
+        """Save the comparison results to Excel with formatting"""
+        if not self.comparison_results:
+            self.logger.warning("No results to save")
+            return
+            
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        output_path = self.output_dir / f'group_comparisons_{timestamp}.xlsx'
+        
+        # Create consolidated results with sections
+        consolidated_results = []
+        metrics = sorted(set(result['metric'] for result in self.comparison_results))
+        
+        for metric in metrics:
+            metric_results = [r for r in self.comparison_results if r['metric'] == metric]
+            
+            # Add metric header with unique column index
+            header_row = pd.DataFrame({
+                'group_variable': [f"\n=== {metric} ===\n"]
+            })
+            # Pad header row with empty columns to match the width of the data
+            for col in metric_df.columns:
+                if col != 'group_variable':
+                    header_row[col] = ''
+            
+            # Create DataFrame for this metric's results
+            metric_df = pd.DataFrame(metric_results)
             
             # Sort by p-value
-            df_results = df_results.sort_values('p_value')
+            metric_df = metric_df.sort_values('p_value')
             
-            # Add multiple comparison correction
-            df_results['p_value_bonferroni'] = np.minimum(
-                df_results['p_value'] * len(df_results), 1.0
+            # Add Bonferroni correction
+            metric_df['p_value_corrected'] = np.minimum(
+                metric_df['p_value'] * len(metric_df), 1.0
             )
             
-            # Save to CSV
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            output_path = self.output_dir / f'group_comparisons_{timestamp}.csv'
-            df_results.to_csv(output_path, index=False)
+            # Select and reorder columns
+            cols_to_keep = [
+                'group_variable', 'test_type', 'total_n',
+                'p_value', 'p_value_corrected', 'effect_size', 'statistic'
+            ]
             
-            self.logger.info(f"Saved group comparison results to {output_path}")
+            # Add group-specific columns based on test type
+            t_test_results = metric_df[metric_df['test_type'] == 't-test']
+            if not t_test_results.empty:
+                cols_to_keep.extend([
+                    'group1', 'group1_mean', 'group1_std', 'group1_n',
+                    'group2', 'group2_mean', 'group2_std', 'group2_n'
+                ])
+            
+            anova_results = metric_df[metric_df['test_type'] == 'ANOVA']
+            if not anova_results.empty:
+                max_groups = max(
+                    sum(1 for col in result.keys() if col.startswith('group') and col.endswith('_mean'))
+                    for result in metric_results if result['test_type'] == 'ANOVA'
+                )
+                for i in range(1, max_groups + 1):
+                    cols_to_keep.extend([
+                        f'group{i}', f'group{i}_mean', f'group{i}_std', f'group{i}_n'
+                    ])
+            
+            # Keep only columns that exist in the data
+            cols_to_keep = [col for col in cols_to_keep if col in metric_df.columns]
+            metric_df = metric_df[cols_to_keep]
+            
+            # Round numeric columns if any exist and the DataFrame is not empty
+            if not metric_df.empty:
+                numeric_cols = metric_df.select_dtypes(include=[np.number]).columns
+                if len(numeric_cols) > 0:
+                    for col in numeric_cols:
+                        if col in metric_df.columns:  # Extra check to ensure column exists
+                            metric_df[col] = metric_df[col].round(4)
+            
+            # Add to consolidated results
+            if not metric_df.empty:
+                # Create blank row with matching columns
+                blank_row = pd.DataFrame(columns=metric_df.columns)
+                blank_row.loc[0] = ''  # Add one empty row
+                
+                consolidated_results.append(header_row)
+                consolidated_results.append(metric_df)
+                consolidated_results.append(blank_row)
+        
+        # Combine all results
+        final_df = pd.concat(consolidated_results, ignore_index=True)
+        
+        # Save to Excel with formatting
+        with pd.ExcelWriter(output_path, engine='xlsxwriter') as writer:
+            final_df.to_excel(writer, sheet_name='Group Comparisons', index=False)
+            
+            # Get workbook and worksheet objects for formatting
+            workbook = writer.book
+            worksheet = writer.sheets['Group Comparisons']
+            
+            # Define formats
+            header_format = workbook.add_format({
+                'bold': True,
+                'font_size': 12,
+                'bg_color': '#E0E0E0'
+            })
+            
+            # Set column widths
+            worksheet.set_column('A:A', 25)  # Group variable
+            worksheet.set_column('B:B', 15)  # Test type
+            worksheet.set_column('C:ZZ', 12)  # All other columns
+            
+            # Format headers
+            for col_num, value in enumerate(final_df.columns):
+                worksheet.write(0, col_num, value, header_format)
+        
+        self.logger.info(f"Saved group comparison results to {output_path}")
 
 def main():
     input_path = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/metrics/prepared_metrics.csv'
