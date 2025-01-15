@@ -155,6 +155,7 @@ class GPSPreprocessor:
         # Process GPS data for each user-day
         processed_count = 0
         skipped_count = 0
+        insufficient_coverage_count = 0
         total_points = 0
         early_morning_count = 0
         
@@ -172,63 +173,74 @@ class GPSPreprocessor:
             ].copy()
             
             if not day_data.empty:
-                # Sort by timestamp
-                day_data = day_data.sort_values('Timestamp')
+                # Calculate coverage duration before processing further
+                coverage_hours = (day_data['Timestamp'].max() - day_data['Timestamp'].min()).total_seconds() / 3600
                 
-                # Add EMA linking information
-                day_data['ema_id'] = ema_row['ema_id']
-                day_data['ema_response_time'] = ema_row['response_time']
-                day_data['is_early_morning_response'] = ema_row['is_early_morning']
-                day_data['calendar_date'] = ema_row['calendar_date']
-                day_data['associated_data_date'] = ema_row['associated_data_date']
-                day_data['had_multiple_responses'] = any(
-                    case['user'] == ema_row['user'] and 
-                    case['data_date'] == ema_row['associated_data_date']
-                    for case in multiple_response_cases
-                )
-                
-                # Add time period classification
-                day_data['time_period'] = day_data['Timestamp'].apply(
-                    lambda x: 'early_morning' if x.hour < self.early_morning_cutoff else
-                            'morning' if x.hour < 12 else
-                            'afternoon' if x.hour < 17 else
-                            'evening' if x.hour < 22 else 'night'
-                )
-                
-                # Calculate quality metrics
-                quality_metrics = {
-                    'first_reading': day_data['Timestamp'].min(),
-                    'last_reading': day_data['Timestamp'].max(),
-                    'total_readings': len(day_data),
-                    'time_periods_covered': day_data['time_period'].nunique(),
-                    'max_gap_minutes': (
-                        day_data['Timestamp'].diff().max().total_seconds() / 60 
-                        if len(day_data) > 1 else np.nan
-                    ),
-                    'coverage_hours': (
-                        day_data['Timestamp'].max() - day_data['Timestamp'].min()
-                    ).total_seconds() / 3600,
-                    'early_morning_points': sum(day_data['time_period'] == 'early_morning')
-                }
-                
-                # Add quality metrics to each row
-                for metric, value in quality_metrics.items():
-                    day_data[metric] = value
-                
-                # Save file with clear naming
-                output_filename = (
-                    f"{ema_row['associated_data_date']}_{ema_row['user']}_"
-                    f"{'early_morning_' if ema_row['is_early_morning'] else ''}"
-                    f"{ema_row['ema_id'][:8]}.csv"
-                )
-                output_file = preprocess_dir / output_filename
-                day_data.to_csv(output_file, index=False)
-                
-                if ema_row['is_early_morning']:
-                    early_morning_count += 1
-                
-                processed_count += 1
-                total_points += len(day_data)
+                if coverage_hours >= 5:  # Only process days with 5+ hours of data
+                    # Sort by timestamp
+                    day_data = day_data.sort_values('Timestamp')
+                    
+                    # Add EMA linking information
+                    day_data['ema_id'] = ema_row['ema_id']
+                    day_data['ema_response_time'] = ema_row['response_time']
+                    day_data['is_early_morning_response'] = ema_row['is_early_morning']
+                    day_data['calendar_date'] = ema_row['calendar_date']
+                    day_data['associated_data_date'] = ema_row['associated_data_date']
+                    day_data['had_multiple_responses'] = any(
+                        case['user'] == ema_row['user'] and 
+                        case['data_date'] == ema_row['associated_data_date']
+                        for case in multiple_response_cases
+                    )
+                    
+                    # Add time period classification
+                    day_data['time_period'] = day_data['Timestamp'].apply(
+                        lambda x: 'early_morning' if x.hour < self.early_morning_cutoff else
+                                'morning' if x.hour < 12 else
+                                'afternoon' if x.hour < 17 else
+                                'evening' if x.hour < 22 else 'night'
+                    )
+                    
+                    # Calculate quality metrics
+                    quality_metrics = {
+                        'first_reading': day_data['Timestamp'].min(),
+                        'last_reading': day_data['Timestamp'].max(),
+                        'total_readings': len(day_data),
+                        'time_periods_covered': day_data['time_period'].nunique(),
+                        'max_gap_minutes': (
+                            day_data['Timestamp'].diff().max().total_seconds() / 60 
+                            if len(day_data) > 1 else np.nan
+                        ),
+                        'coverage_hours': (
+                            day_data['Timestamp'].max() - day_data['Timestamp'].min()
+                        ).total_seconds() / 3600,
+                        'early_morning_points': sum(day_data['time_period'] == 'early_morning')
+                    }
+                    
+                    # Add quality metrics to each row
+                    for metric, value in quality_metrics.items():
+                        day_data[metric] = value
+                    
+                    # Save file with clear naming
+                    output_filename = (
+                        f"{ema_row['associated_data_date']}_{ema_row['user']}_"
+                        f"{'early_morning_' if ema_row['is_early_morning'] else ''}"
+                        f"{ema_row['ema_id'][:8]}.csv"
+                    )
+                    output_file = preprocess_dir / output_filename
+                    day_data.to_csv(output_file, index=False)
+                    
+                    if ema_row['is_early_morning']:
+                        early_morning_count += 1
+                    
+                    processed_count += 1
+                    total_points += len(day_data)
+                else:
+                    insufficient_coverage_count += 1
+                    self.logger.warning(
+                        f"Insufficient GPS coverage for user {ema_row['user']}\n"
+                        f"Calendar date: {ema_row['calendar_date']}\n"
+                        f"Coverage hours: {coverage_hours:.2f}"
+                    )
             else:
                 skipped_count += 1
                 self.logger.warning(
@@ -242,6 +254,7 @@ class GPSPreprocessor:
         self.logger.info(f"Created {processed_count} preprocessed files")
         self.logger.info(f"Processed {early_morning_count} early morning responses")
         self.logger.info(f"Skipped {skipped_count} user-days with no GPS data")
+        self.logger.info(f"Dropped {insufficient_coverage_count} days with < 5 hours coverage")
         self.logger.info(f"Total GPS points processed: {total_points}")
         
         # Create and save data quality summary
