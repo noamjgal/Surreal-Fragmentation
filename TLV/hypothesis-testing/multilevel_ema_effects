@@ -28,221 +28,328 @@ class FragmentationAnalysis:
         self.logger = logging.getLogger(__name__)
 
     def load_and_preprocess_data(self):
-        self.logger.info("Loading data from %s", self.input_path)
+        """Load and preprocess data with comprehensive metrics"""
+        self.logger.info(f"Loading data from {self.input_path}")
         df = pd.read_csv(self.input_path)
+        print(df.columns)  # Keep this for debugging
         
-        # Log missing values
-        missing_summary = df.isnull().sum()[df.isnull().sum() > 0]
-        if not missing_summary.empty:
-            self.logger.info("\nMissing values summary:")
-            self.logger.info(missing_summary)
+        # Log initial data shape
+        self.logger.info(f"Initial data shape: {df.shape}")
         
-        # Define key variables
-        key_vars = [
-            'digital_frag_during_mobility', 'moving_fragmentation_index',
-            'digital_fragmentation_index', 'total_time_on_device',
-            'total_duration_mobility'
+        # Define metric groups for analysis
+        self.fragmentation_metrics = {
+            'raw': [
+                'digital_fragmentation_index',
+                'moving_fragmentation_index',
+                'digital_frag_during_mobility'
+            ],
+            'zscore': [
+                'digital_fragmentation_index_zscore',
+                'moving_fragmentation_index_zscore',
+                'digital_frag_during_mobility_zscore'
+            ]
+        }
+        
+        self.episode_metrics = [
+            'digital_episode_count',
+            'moving_episode_count',
+            'digital_num_episodes',
+            'moving_num_episodes',
+            'overlap_num_episodes'
         ]
-        df_clean = df.dropna(subset=key_vars)
         
-        self.logger.info(f"\nFinal sample size: {len(df_clean)} observations")
-        self.data = df_clean
-        return df_clean
+        self.duration_metrics = [
+            'digital_total_duration',
+            'moving_total_duration',
+            'digital_total_duration_minutes',
+            'moving_total_duration_minutes',
+            'overlap_total_duration_minutes'
+        ]
+        
+        self.cv_metrics = [
+            'digital_cv',
+            'moving_cv'
+        ]
+        
+        # Define outcome variables
+        self.emotion_components = [
+            'TENSE',
+            'RELAXATION_R',  # Note: Using reversed score directly
+            'WORRY',
+            'PEACE_R',      # Note: Using reversed score directly
+            'IRRITATION',
+            'SATISFACTION_R', # Note: Using reversed score directly
+            'STAI6_score',
+            'HAPPY'
+        ]
+        
+        # Verify all required columns exist
+        missing_cols = [col for col in self.emotion_components if col not in df.columns]
+        if missing_cols:
+            self.logger.error(f"Missing columns: {missing_cols}")
+            raise ValueError(f"Missing required columns: {missing_cols}")
+        
+        # Calculate z-scores for fragmentation metrics
+        for metric in self.fragmentation_metrics['raw']:
+            if metric in df.columns:
+                df[f'{metric}_zscore'] = stats.zscore(df[metric], nan_policy='omit')
+        
+        # Calculate tertiles for relevant metrics
+        for metric in self.fragmentation_metrics['raw']:
+            if metric in df.columns:
+                df[f'{metric}_tertile'] = pd.qcut(
+                    df[metric].dropna(),
+                    q=3,
+                    labels=['low', 'medium', 'high'],
+                    duplicates='drop'
+                )
+        
+        self.data = df
+        return df
+
+    def run_comprehensive_analysis(self):
+        """Run multiple analyses exploring different relationships"""
+        
+        # Model configurations
+        control_steps = [
+            [],  # Base model
+            ['digital_total_duration'],  # Step 1
+            ['digital_total_duration', 'moving_total_duration'],  # Step 2
+            ['digital_total_duration', 'moving_total_duration', 'is_weekend']  # Step 3
+        ]
+        
+        # 1. Primary Analysis: Fragmentation Effects on Emotions
+        for metric_raw, metric_z in zip(
+            self.fragmentation_metrics['raw'],
+            self.fragmentation_metrics['zscore']
+        ):
+            for emotion in self.emotion_components:
+                self.logger.info(f"\nAnalyzing {emotion} ~ {metric_raw}")
+                
+                for step, controls in enumerate(control_steps):
+                    try:
+                        # Use both raw and z-scored versions
+                        self._run_single_model(
+                            dv=emotion,
+                            pred_raw=metric_raw,
+                            pred_z=metric_z,
+                            controls=controls,
+                            model_name=f"Step {step}"
+                        )
+                    except Exception as e:
+                        self.logger.error(f"Error in model: {str(e)}")
+                        
+                    # Add tertile analysis if available
+                    if f'{metric_raw}_tertile' in self.data.columns:
+                        try:
+                            self._run_tertile_model(
+                                dv=emotion,
+                                pred=metric_raw,
+                                controls=controls,
+                                model_name=f"Step {step} Tertile"
+                            )
+                        except Exception as e:
+                            self.logger.error(f"Error in tertile model: {str(e)}")
+        
+        # 2. Secondary Analysis: Episode Counts and Duration Effects
+        for metric in self.episode_metrics + self.duration_metrics:
+            for emotion in self.emotion_components:
+                self.logger.info(f"\nAnalyzing {emotion} ~ {metric}")
+                try:
+                    self._run_single_model(
+                        dv=emotion,
+                        pred_raw=metric,
+                        controls=['is_weekend'],
+                        model_name="Episode/Duration Analysis"
+                    )
+                except Exception as e:
+                    self.logger.error(f"Error in episode/duration model: {str(e)}")
+        
+        # 3. Variability Analysis using CV metrics
+        for cv_metric in self.cv_metrics:
+            for emotion in self.emotion_components:
+                self.logger.info(f"\nAnalyzing {emotion} ~ {cv_metric}")
+                try:
+                    self._run_single_model(
+                        dv=emotion,
+                        pred_raw=cv_metric,
+                        controls=['is_weekend'],
+                        model_name="CV Analysis"
+                    )
+                except Exception as e:
+                    self.logger.error(f"Error in CV model: {str(e)}")
+
+    def _run_single_model(self, dv, pred_raw, pred_z=None, controls=None, model_name=""):
+        """Run a single multilevel model with given parameters"""
+        if controls is None:
+            controls = []
+            
+        # Prepare data
+        model_vars = [dv, pred_raw] + controls + ['user']
+        current_data = self.data[model_vars].dropna()
+        
+        # FIXED: Use raw predictor for within/between calculations
+        # Don't try to use z-score version as it might not exist
+        within_pred, between_pred = self.prepare_within_between_data(
+            current_data, pred_raw
+        )
+        
+        current_data['within_pred'] = within_pred
+        current_data['between_pred'] = between_pred
+        
+        # Prepare control variables
+        control_terms = []
+        for control in controls:
+            within_control, between_control = self.prepare_within_between_data(
+                current_data, control
+            )
+            current_data[f'within_{control}'] = within_control
+            current_data[f'between_{control}'] = between_control
+            control_terms.extend([f'within_{control}', f'between_{control}'])
+        
+        # Build formula
+        formula_parts = ['within_pred', 'between_pred'] + control_terms
+        formula = f"{dv} ~ {' + '.join(formula_parts)} + (1|user)"
+        
+        # Log model information for debugging
+        self.logger.info(f"Fitting model for {dv} ~ {pred_raw}")
+        self.logger.info(f"Formula: {formula}")
+        self.logger.info(f"Data shape: {current_data.shape}")
+        
+        # Fit model
+        try:
+            model = smf.mixedlm(formula, data=current_data, groups='user')
+            results = model.fit()
+            
+            # Store results
+            result_dict = {
+                'dependent_var': dv,
+                'predictor': pred_raw,
+                'model': model_name,
+                'n_observations': len(current_data),
+                'n_participants': current_data['user'].nunique(),
+                'within_coef': results.params['within_pred'],
+                'within_se': results.bse['within_pred'],
+                'within_p': results.pvalues['within_pred'],
+                'between_coef': results.params['between_pred'],
+                'between_se': results.bse['between_pred'],
+                'between_p': results.pvalues['between_pred'],
+                'aic': results.aic,
+                'bic': results.bic,
+                'controls': ', '.join(controls) if controls else 'None'
+            }
+            
+            self.results.append(result_dict)
+            
+        except Exception as e:
+            self.logger.error(f"Model fitting failed: {str(e)}")
+            self.logger.error(f"Variables in data: {current_data.columns.tolist()}")
+
+    def _run_tertile_model(self, dv, pred, controls=None, model_name=""):
+        """Run model with tertile interactions"""
+        if controls is None:
+            controls = []
+            
+        model_vars = [dv, pred, f'{pred}_tertile'] + controls + ['user']
+        current_data = self.data[model_vars].dropna()
+        
+        # Prepare variables including tertile interactions
+        within_pred, between_pred = self.prepare_within_between_data(
+            current_data, pred
+        )
+        current_data['within_pred'] = within_pred
+        current_data['between_pred'] = between_pred
+        
+        # Build formula with tertile interactions
+        formula = (f"{dv} ~ within_pred * C({pred}_tertile) + between_pred + "
+                  f"{' + '.join(controls)} + (1|user)")
+        
+        # Fit model and store results
+        model = smf.mixedlm(formula, data=current_data, groups='user')
+        results = model.fit()
+        
+        # Extract and store interaction results
+        result_dict = {
+            'dependent_var': dv,
+            'predictor': pred,
+            'model': f"{model_name} (Tertile)",
+            'n_observations': len(current_data),
+            'n_participants': current_data['user'].nunique()
+        }
+        
+        # Add interaction terms
+        for param in results.params.index:
+            if 'within_pred:' in param:
+                result_dict[f'interaction_{param}'] = results.params[param]
+                result_dict[f'interaction_{param}_p'] = results.pvalues[param]
+        
+        self.results.append(result_dict)
 
     def prepare_within_between_data(self, data, var):
-        participant_means = data.groupby('participant_id')[var].transform('mean')
+        """Prepare within and between person components"""
+        participant_means = data.groupby('user')[var].transform('mean')
         within_var = data[var] - participant_means
         between_var = participant_means - participant_means.mean()
         return within_var, between_var
 
-    def run_stepwise_analysis(self):
-        dependent_vars = [
-            'TENSE', 'RELAXATION_R', 'WORRY', 'PEACE_R', 
-            'IRRITATION', 'SATISFACTION_R', 'STAI6_score', 'HAPPY'
-        ]
+    def save_results(self):
+        """Save comprehensive analysis results"""
+        if not self.results:
+            self.logger.warning("No results to save")
+            return
+            
+        results_df = pd.DataFrame(self.results)
         
-        independent_vars = [
-            'digital_frag_during_mobility',
-            'moving_fragmentation_index',
-            'digital_fragmentation_index'
-        ]
+        # Round numeric columns
+        numeric_cols = results_df.select_dtypes(include=[np.number]).columns
+        results_df[numeric_cols] = results_df[numeric_cols].round(4)
         
-        control_vars = [
-            'total_time_on_device',
-            'total_duration_mobility'
-        ]
+        # Add significance indicators
+        for p_col in [col for col in results_df.columns if '_p' in col]:
+            results_df[f'{p_col}_sig'] = results_df[p_col].apply(
+                lambda x: '***' if x < 0.001 else 
+                         '**' if x < 0.01 else 
+                         '*' if x < 0.05 else ''
+            )
         
+        # Save results with timestamp
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        output_path = self.output_dir / f'comprehensive_results_{timestamp}.xlsx'
         
-        for dep_var in dependent_vars:
-            for indep_var in independent_vars:
-                self.logger.info(f"\nAnalyzing {dep_var} ~ {indep_var}")
-                
-                # Start with base model (no controls)
-                base_vars = [dep_var, indep_var, 'participant_id']
-                model_data = self.data[base_vars].dropna()
-                
-                if len(model_data) == 0:
-                    self.logger.error(f"Insufficient data for {dep_var} ~ {indep_var}")
-                    continue
-                
-                # Run models with incrementally added controls
-                control_combinations = []
-                for i in range(len(control_vars) + 1):
-                    for combo in [control_vars[:i]]:
-                        control_combinations.append(combo)
-                
-                for step, current_controls in enumerate(control_combinations):
-                    model_name = f"Step {step}"
-                    if step == 0:
-                        model_name = "Base Model"
-                    else:
-                        model_name = f"Model {step} + {', '.join(current_controls)}"
-                    
-                    # Prepare variables for current model
-                    current_vars = [dep_var, indep_var] + current_controls + ['participant_id']
-                    current_data = self.data[current_vars].dropna()
-                    
-                    # Compute within and between components
-                    for var in [indep_var] + current_controls:
-                        within, between = self.prepare_within_between_data(current_data, var)
-                        current_data[f'{var}_within'] = within
-                        current_data[f'{var}_between'] = between
-                    
-                    # Create model formula
-                    within_terms = [f'{var}_within' for var in [indep_var] + current_controls]
-                    between_terms = [f'{var}_between' for var in [indep_var] + current_controls]
-                    formula = f"{dep_var} ~ {' + '.join(within_terms + between_terms)} + (1|participant_id)"
-                    
-                    try:
-                        model = smf.mixedlm(formula, data=current_data, groups='participant_id')
-                        results = model.fit()
-                        
-                        # Extract key statistics for main predictor only
-                        result_dict = {
-                            'dependent_var': dep_var,
-                            'independent_var': indep_var,
-                            'model': model_name,
-                            'n_observations': len(current_data),
-                            'n_participants': current_data['participant_id'].nunique(),
-                            'aic': results.aic,
-                            'bic': results.bic,
-                            # Within-person effects
-                            'within_coef': results.params[f'{indep_var}_within'],
-                            'within_std_err': results.bse[f'{indep_var}_within'],
-                            'within_p_value': 2 * (1 - stats.t.cdf(abs(results.params[f'{indep_var}_within'] / 
-                                                                     results.bse[f'{indep_var}_within']), 
-                                                                 df=len(current_data) - len(results.params))),
-                            # Between-person effects
-                            'between_coef': results.params[f'{indep_var}_between'],
-                            'between_std_err': results.bse[f'{indep_var}_between'],
-                            'between_p_value': 2 * (1 - stats.t.cdf(abs(results.params[f'{indep_var}_between'] / 
-                                                                      results.bse[f'{indep_var}_between']), 
-                                                                  df=len(current_data) - len(results.params))),
-                            'controls': ', '.join(current_controls) if current_controls else 'None'
-                        }
-                        
-                        self.results.append(result_dict)
-                        
-                    except Exception as e:
-                        self.logger.error(f"Error in {model_name}: {str(e)}")
+        with pd.ExcelWriter(output_path) as writer:
+            # Main results
+            results_df.to_excel(writer, sheet_name='All Results', index=False)
+            
+            # Create summary sheets by analysis type
+            for analysis_type in ['Fragmentation', 'Episodes', 'Duration', 'CV']:
+                mask = results_df['model'].str.contains(analysis_type, case=False, na=False)
+                if mask.any():
+                    subset = results_df[mask]
+                    subset.to_excel(writer, sheet_name=f'{analysis_type} Summary', index=False)
+            
+            # Create emotion component summary
+            emotion_summary = results_df.pivot_table(
+                index=['predictor', 'model'],
+                columns='dependent_var',
+                values=['within_coef', 'within_p_sig'],
+                aggfunc='first'
+            )
+            emotion_summary.to_excel(writer, sheet_name='Emotion Components')
         
-        # Save results in a more readable format
-        if self.results:
-            results_df = pd.DataFrame(self.results)
-            
-            # Format p-values and coefficients
-            for col in ['within_coef', 'between_coef']:
-                results_df[col] = results_df[col].round(3)
-            for col in ['within_p_value', 'between_p_value']:
-                results_df[col] = results_df[col].round(4)
-            
-            # Create a single consolidated sheet with sections
-            consolidated_results = []
-            
-            for dep_var in dependent_vars:
-                for indep_var in independent_vars:
-                    # Add section header
-                    header_row = pd.DataFrame({
-                        'model': [f"\n=== {dep_var} ~ {indep_var} ===\n"],
-                        'n_observations': [''],
-                        'n_participants': [''],
-                        'within_coef': [''],
-                        'within_std_err': [''],
-                        'within_p_value': [''],
-                        'between_coef': [''],
-                        'between_std_err': [''],
-                        'between_p_value': [''],
-                        'controls': [''],
-                        'aic': [''],
-                        'bic': ['']
-                    })
-                    
-                    # Get subset of results for this DV-IV combination
-                    subset = results_df[
-                        (results_df['dependent_var'] == dep_var) & 
-                        (results_df['independent_var'] == indep_var)
-                    ]
-                    
-                    if not subset.empty:
-                        # Reorder columns for readability
-                        cols_order = [
-                            'model', 'n_observations', 'n_participants',
-                            'within_coef', 'within_std_err', 'within_p_value',
-                            'between_coef', 'between_std_err', 'between_p_value',
-                            'controls', 'aic', 'bic'
-                        ]
-                        subset = subset[cols_order]
-                        
-                        # Add header and subset to consolidated results
-                        consolidated_results.append(header_row)
-                        consolidated_results.append(subset)
-                        
-                        # Add blank row after each section
-                        blank_row = pd.DataFrame([[''] * len(cols_order)], columns=cols_order)
-                        consolidated_results.append(blank_row)
-            
-            # Combine all results
-            final_df = pd.concat(consolidated_results, ignore_index=True)
-            
-            # Save to Excel with formatting
-            with pd.ExcelWriter(self.output_dir / f'stepwise_results_{timestamp}.xlsx', engine='xlsxwriter') as writer:
-                final_df.to_excel(writer, sheet_name='Results', index=False)
-                
-                # Get workbook and worksheet objects for formatting
-                workbook = writer.book
-                worksheet = writer.sheets['Results']
-                
-                # Define formats
-                header_format = workbook.add_format({
-                    'bold': True,
-                    'font_size': 12,
-                    'bg_color': '#E0E0E0'
-                })
-                
-                # Set column widths
-                worksheet.set_column('A:A', 30)  # Model column
-                worksheet.set_column('B:C', 15)  # N obs and N participants
-                worksheet.set_column('D:I', 12)  # Coefficients and p-values
-                worksheet.set_column('J:J', 25)  # Controls
-                worksheet.set_column('K:L', 10)  # AIC and BIC
-                
-                # Format headers
-                for col_num, value in enumerate(cols_order):
-                    worksheet.write(0, col_num, value, header_format)
-            
-            self.logger.info(f"Saved stepwise results to {self.output_dir}/stepwise_results_{timestamp}.xlsx")
+        self.logger.info(f"Comprehensive results saved to {output_path}")
 
 def main():
-    input_path = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/metrics/prepared_metrics.csv'
+    
+    input_path = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/metrics/combined_metrics.csv'
     output_dir = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/analysis_results'
     
     
     analyzer = FragmentationAnalysis(input_path, output_dir)
-    analyzer.load_and_preprocess_data()
-    analyzer.run_stepwise_analysis()
+    df = analyzer.load_and_preprocess_data()
+    analyzer.run_comprehensive_analysis()
+    analyzer.save_results()
     
-    print("Analysis completed successfully")
+    print("Comprehensive analysis completed successfully")
 
 if __name__ == "__main__":
     main()

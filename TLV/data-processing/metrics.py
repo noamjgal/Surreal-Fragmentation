@@ -36,30 +36,40 @@ class MetricsProcessor:
 
     def process_ema_scores(self, ema_df: pd.DataFrame) -> pd.DataFrame:
         """
-        Process EMA responses and calculate STAI-6 index score
-        
-        Args:
-            ema_df: DataFrame with raw EMA responses
+        Process EMA responses and calculate STAI-6 index score, preserving individual responses
         """
         df = ema_df.copy()
-        
-        # Store demographic columns
-        demographic_cols = ['Gender', 'School', 'Class']
         
         # Reverse scoring for positive items (5-point scale)
         reverse_items = ['PEACE', 'RELAXATION', 'SATISFACTION']
         for item in reverse_items:
             df[f'{item}_R'] = 6 - df[item]
         
-        # Calculate STAI-6 score (20-80 range)
+        # Calculate STAI-6 score (1-5 range)
         anxiety_items = ['TENSE', 'RELAXATION_R', 'WORRY', 
                         'PEACE_R', 'IRRITATION', 'SATISFACTION_R']
         
-        df['STAI6_score'] = df[anxiety_items].mean(axis=1) * 20
+        # Add validation checks and logging
+        for item in anxiety_items:
+            if df[item].max() > 5 or df[item].min() < 1:
+                self.logger.warning(f"Invalid values found in {item}: range [{df[item].min()}, {df[item].max()}]")
+        
+        # Calculate mean score (keeping it in 1-5 range)
+        df['STAI6_score'] = df[anxiety_items].mean(axis=1)
+        
+        # Log some sample calculations
+        sample_rows = df.head(3)
+        for idx, row in sample_rows.iterrows():
+            self.logger.info(f"\nSample calculation for row {idx}:")
+            for item in anxiety_items:
+                self.logger.info(f"{item}: {row[item]}")
+            self.logger.info(f"Final score (1-5 range): {row['STAI6_score']:.2f}")
         
         # Keep necessary columns
         cols_to_keep = ['Participant_ID', 'StartDate', 'EndDate'] + \
-                      demographic_cols + ['STAI6_score', 'HAPPY']
+                    ['Gender', 'School', 'Class'] + \
+                    anxiety_items + \
+                    ['STAI6_score', 'HAPPY']
         
         return df[cols_to_keep]
 
@@ -158,7 +168,7 @@ class MetricsProcessor:
             merged_df['weekday'] = pd.to_datetime(merged_df['associated_data_date']).dt.dayofweek
             merged_df['is_weekend'] = merged_df['weekday'].isin([5, 6]).astype(int)
             
-            # Calculate z-scores for key metrics
+            # Calculate z-scores for key metrics with better error handling
             metric_cols = [
                 'digital_fragmentation_index',
                 'moving_fragmentation_index',
@@ -168,12 +178,38 @@ class MetricsProcessor:
                 'STAI6_score'
             ]
             
+            # Log metrics availability
+            self.logger.info("\nMetrics availability check:")
             for col in metric_cols:
                 if col in merged_df.columns:
-                    merged_df[f'{col}_zscore'] = (
-                        merged_df[col] - merged_df[col].mean()
-                    ) / merged_df[col].std()
-            
+                    non_null = merged_df[col].notna().sum()
+                    total = len(merged_df)
+                    self.logger.info(f"{col}: {non_null}/{total} non-null values ({(non_null/total)*100:.1f}%)")
+                else:
+                    self.logger.warning(f"Missing metric column: {col}")
+
+            # Calculate z-scores with proper handling of NaN values
+            for col in metric_cols:
+                if col in merged_df.columns:
+                    valid_data = merged_df[col].dropna()
+                    if len(valid_data) > 0:
+                        mean = valid_data.mean()
+                        std = valid_data.std()
+                        if std > 0:  # Avoid division by zero
+                            merged_df[f'{col}_zscore'] = (merged_df[col] - mean) / std
+                        else:
+                            self.logger.warning(f"Zero standard deviation for {col}, skipping z-score calculation")
+                    else:
+                        self.logger.warning(f"No valid data for {col}, skipping z-score calculation")
+
+            # Verify z-score columns
+            zscore_cols = [col for col in merged_df.columns if col.endswith('_zscore')]
+            self.logger.info("\nCreated z-score columns:")
+            for col in zscore_cols:
+                non_null = merged_df[col].notna().sum()
+                total = len(merged_df)
+                self.logger.info(f"{col}: {non_null}/{total} non-null values ({(non_null/total)*100:.1f}%)")
+
             # Save the combined dataset
             output_path = self.output_dir / 'combined_metrics.csv'
             merged_df.to_csv(output_path, index=False)
@@ -236,3 +272,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
