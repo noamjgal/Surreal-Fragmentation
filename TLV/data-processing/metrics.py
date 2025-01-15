@@ -3,19 +3,27 @@ import numpy as np
 from pathlib import Path
 import logging
 from typing import Dict, List, Tuple
+import json
 
 class MetricsProcessor:
     """
-    A comprehensive processor for calculating and preparing metrics for hypothesis testing.
-    Handles EMA scoring, digital usage metrics, mobility metrics, and control variables.
+    Consolidated metrics processor that combines EMA scores, fragmentation metrics,
+    and demographic data while respecting early morning handling from preprocessing.
     """
-    def __init__(self, output_dir: str):
-        self.output_dir = Path(output_dir)
+    def __init__(self, base_dir: str):
+        """
+        Initialize processor with base directory containing all input files.
+        
+        Args:
+            base_dir: Base directory containing all subdirectories with data files
+        """
+        self.base_dir = Path(base_dir)
+        self.output_dir = self.base_dir / 'metrics'
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self._setup_logging()
         
     def _setup_logging(self):
-        """Configure logging for the metrics processor"""
+        """Configure logging with both file and console output"""
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
@@ -26,15 +34,14 @@ class MetricsProcessor:
         )
         self.logger = logging.getLogger(__name__)
 
-    def process_ema_scores(self, data: pd.DataFrame) -> pd.DataFrame:
+    def process_ema_scores(self, ema_df: pd.DataFrame) -> pd.DataFrame:
         """
-        Process EMA responses and calculate STAI-6 index score.
-        Now preserves demographic columns for later analysis.
-        """
-        df = data.copy()
+        Process EMA responses and calculate STAI-6 index score
         
-        # Log initial columns
-        self.logger.info("Initial EMA columns: %s", df.columns.tolist())
+        Args:
+            ema_df: DataFrame with raw EMA responses
+        """
+        df = ema_df.copy()
         
         # Store demographic columns
         demographic_cols = ['Gender', 'School', 'Class']
@@ -43,268 +50,189 @@ class MetricsProcessor:
         reverse_items = ['PEACE', 'RELAXATION', 'SATISFACTION']
         for item in reverse_items:
             df[f'{item}_R'] = 6 - df[item]
-            # Drop original positive items
-            df = df.drop(columns=[item])
         
         # Calculate STAI-6 score (20-80 range)
-        stai_items = ['TENSE', 'RELAXATION_R', 'WORRY', 
-                    'PEACE_R', 'IRRITATION', 'SATISFACTION_R']
+        anxiety_items = ['TENSE', 'RELAXATION_R', 'WORRY', 
+                        'PEACE_R', 'IRRITATION', 'SATISFACTION_R']
         
-        # Calculate mean and transform to 20-80 range
-        df['STAI6_score'] = df[stai_items].mean(axis=1) * 20
+        df['STAI6_score'] = df[anxiety_items].mean(axis=1) * 20
         
-        # Keep necessary columns including demographics
-        columns_to_keep = ['Participant_ID', 'StartDate'] + demographic_cols + stai_items + ['STAI6_score', 'HAPPY']
-        df = df[columns_to_keep]
+        # Keep necessary columns
+        cols_to_keep = ['Participant_ID', 'StartDate', 'EndDate'] + \
+                      demographic_cols + ['STAI6_score', 'HAPPY']
         
-        # Log final columns
-        self.logger.info("Final EMA columns after processing: %s", df.columns.tolist())
-        
-        return df
+        return df[cols_to_keep]
 
-    def calculate_tertiles(self, data: pd.DataFrame) -> Dict[str, Tuple[float, float]]:
+    def combine_metrics(self) -> pd.DataFrame:
         """
-        Calculate tertiles for four key metrics:
-        1. Digital fragmentation index
-        2. Total time on device
-        3. Total mobility duration
-        4. Mobility fragmentation index
-        
-        Parameters:
-            data (pd.DataFrame): Input data containing the required metrics
-            
-        Returns:
-            Dict[str, Tuple[float, float]]: Dictionary of tertile cutoffs for each metric
+        Combine all metrics using data_quality_summary as the backbone
         """
-        tertiles = {}
-        tertile_metrics = [
-            'digital_fragmentation_index',
-            'total_time_on_device',
-            'total_duration_mobility',
-            'moving_fragmentation_index'
-        ]
-        
-        self.logger.info("Calculating tertiles for metrics: %s", tertile_metrics)
-        
-        for metric in tertile_metrics:
-            try:
-                lower, upper = np.percentile(data[metric].dropna(), [33.33, 66.67])
-                tertiles[metric] = (lower, upper)
-                self.logger.info(f"Tertiles for {metric}: Lower={lower:.2f}, Upper={upper:.2f}")
-            except Exception as e:
-                self.logger.error(f"Error calculating tertiles for {metric}: {str(e)}")
-        
-        return tertiles
-        tertiles = {}
-        for col in columns:
-            try:
-                lower, upper = np.percentile(data[col].dropna(), [33.33, 66.67])
-                tertiles[col] = (lower, upper)
-                self.logger.info(f"Tertiles for {col}: Lower={lower:.2f}, Upper={upper:.2f}")
-            except Exception as e:
-                self.logger.error(f"Error calculating tertiles for {col}: {str(e)}")
-        return tertiles
-
-    def assign_tertile_groups(self, data: pd.DataFrame, tertiles: Dict[str, Tuple[float, float]]) -> pd.DataFrame:
-        """
-        Assign tertile groups to data based on calculated cutoffs
-        """
-        df = data.copy()
-        for col, (lower, upper) in tertiles.items():
-            group_col = f"{col}_group"
-            df[group_col] = pd.cut(
-                df[col],
-                bins=[-np.inf, lower, upper, np.inf],
-                labels=['low', 'medium', 'high']
-            )
-        return df
-
-    def calculate_control_variables(self, data: pd.DataFrame) -> pd.DataFrame:
-        """
-        Calculate and normalize control variables
-        """
-        df = data.copy()
-        
-        # Calculate daily averages
-        control_vars = [
-            'total_time_on_device',
-            'digital_fragmentation_index',
-            'total_duration_mobility',
-            'moving_fragmentation_index'
-        ]
-        
-        # Calculate z-scores for control variables
-        for var in control_vars:
-            if var in df.columns:
-                z_score_col = f"{var}_zscore"
-                df[z_score_col] = (df[var] - df[var].mean()) / df[var].std()
-        
-        # Add time-based controls
-        df['weekday'] = pd.to_datetime(df['date']).dt.dayofweek
-        df['is_weekend'] = df['weekday'].isin([5, 6]).astype(int)
-        
-        return df
-
-    def prepare_for_hypothesis_testing(self, 
-                                     fragmentation_data: pd.DataFrame, 
-                                     ema_data: pd.DataFrame) -> pd.DataFrame:
-        """
-        Prepare final dataset for hypothesis testing by combining and processing all metrics.
-        
-        Creates four separate tertile groupings:
-        1. Digital Fragmentation Tertiles
-        2. Digital Usage Time Tertiles
-        3. Mobility Duration Tertiles
-        4. Mobility Fragmentation Tertiles
-        """
-        self.logger.info("Starting preparation for hypothesis testing")
-        
         try:
-            # Process EMA scores
-            processed_ema = self.process_ema_scores(ema_data)
+            # Load all required datasets
+            quality_df = pd.read_csv(self.base_dir / 'preprocessed_summaries/data_quality_summary.csv')
+            frag_df = pd.read_csv(self.base_dir / 'fragmentation/fragmentation_summary.csv')
+            ema_df = pd.read_csv(self.base_dir / 'Survey/csv/End_of_the_day_questionnaire.csv')
+            episode_df = pd.read_csv(self.base_dir / 'episodes/episode_summary.csv')
             
-            # Convert date formats
-            processed_ema['date'] = pd.to_datetime(processed_ema['StartDate']).dt.strftime('%Y-%m-%d')
-            fragmentation_data['date'] = pd.to_datetime(fragmentation_data['date']).dt.strftime('%Y-%m-%d')
+            self.logger.info("Loaded all input datasets")
             
-            # Ensure participant IDs are strings in both datasets
-            processed_ema['participant_id'] = processed_ema['Participant_ID'].astype(str)
-            fragmentation_data['participant_id'] = fragmentation_data['participant_id'].astype(str)
+            # Process EMA scores first
+            processed_ema = self.process_ema_scores(ema_df)
             
-            # Debug information
-            self.logger.info("\nDate ranges:")
-            self.logger.info(f"Fragmentation data: {fragmentation_data['date'].min()} to {fragmentation_data['date'].max()}")
-            self.logger.info(f"EMA data: {processed_ema['date'].min()} to {processed_ema['date'].max()}")
+            # Convert timestamps in EMA data and quality_df
+            processed_ema['StartDate'] = pd.to_datetime(processed_ema['StartDate'])
+            processed_ema['EndDate'] = pd.to_datetime(processed_ema['EndDate'])
             
-            self.logger.info("\nParticipant IDs:")
-            self.logger.info(f"Fragmentation data unique IDs: {sorted(fragmentation_data['participant_id'].unique())}")
-            self.logger.info(f"EMA data unique IDs: {sorted(processed_ema['participant_id'].unique())}")
+            # Ensure timestamp formats match before merging
+            if 'ema_timestamp' in quality_df.columns:
+                quality_df['ema_timestamp'] = pd.to_datetime(quality_df['ema_timestamp'])
             
-            # Merge with fragmentation data
-            merged_data = pd.merge(
-                fragmentation_data,
-                processed_ema,
-                on=['participant_id', 'date'],
+            # Merge quality summary with fragmentation data
+            merged_df = pd.merge(
+                quality_df,
+                frag_df,
+                left_on=['user', 'associated_data_date'],
+                right_on=['participant_id', 'date'],
                 how='inner'
             )
             
-            self.logger.info(f"\nMerged data shape: {merged_data.shape}")
-            if merged_data.empty:
-                self.logger.error("No matching records found after merge!")
-                # Sample records from both datasets for debugging
-                self.logger.info("\nSample fragmentation records:")
-                self.logger.info(fragmentation_data[['participant_id', 'date']].head())
-                self.logger.info("\nSample EMA records:")
-                self.logger.info(processed_ema[['participant_id', 'date']].head())
-                return None
+            # Handle episode summary metrics
+            episode_df['unique_id'] = (
+                episode_df['user'].astype(str) + '_' + 
+                episode_df['date'].astype(str) + '_' + 
+                episode_df['episode_type'].astype(str)
+            )
             
-            # Calculate tertiles
-            tertiles = self.calculate_tertiles(merged_data)
+            episode_df = episode_df.drop_duplicates(subset=['unique_id', 'num_episodes', 'total_duration_minutes', 'mean_duration_minutes'])
             
-            # Assign tertile groups
-            for metric, (lower, upper) in tertiles.items():
-                group_col = f"{metric}_group"
-                merged_data[group_col] = pd.cut(
-                    merged_data[metric],
-                    bins=[-np.inf, lower, upper, np.inf],
-                    labels=['low', 'medium', 'high']
-                )
+            # Create separate pivots for each metric
+            episode_metrics = ['num_episodes', 'total_duration_minutes', 'mean_duration_minutes']
+            pivoted_dfs = []
             
-            # Add time-based controls
-            merged_data['weekday'] = pd.to_datetime(merged_data['date']).dt.dayofweek
-            merged_data['is_weekend'] = merged_data['weekday'].isin([5, 6]).astype(int)
+            for metric in episode_metrics:
+                try:
+                    pivot_df = episode_df.pivot(
+                        index=['user', 'date'],
+                        columns='episode_type',
+                        values=metric
+                    )
+                    pivot_df.columns = [f'{col}_{metric}'.lower() for col in pivot_df.columns]
+                    pivoted_dfs.append(pivot_df)
+                except Exception as e:
+                    self.logger.warning(f"Error pivoting {metric}: {str(e)}")
+                    continue
             
-            # Save processed data
-            output_path = self.output_dir / 'prepared_metrics.csv'
-            merged_data.to_csv(output_path, index=False)
-            self.logger.info(f"Saved prepared metrics to {output_path}")
+            # Combine all pivoted metrics
+            episode_pivot = pd.concat(pivoted_dfs, axis=1).reset_index()
+            
+            # Merge episode data
+            merged_df = pd.merge(
+                merged_df,
+                episode_pivot,
+                left_on=['user', 'associated_data_date'],
+                right_on=['user', 'date'],
+                how='left',
+                suffixes=('', '_episode')
+            )
+            
+            # Merge EMA data using Participant_ID and timestamp matching
+            # Convert timestamps to the same format before merging
+            merged_df = pd.merge(
+                merged_df,
+                processed_ema,
+                left_on=['user', 'ema_timestamp'],
+                right_on=['Participant_ID', 'StartDate'],
+                how='left'
+            )
+            
+            # Clean up redundant columns
+            cols_to_drop = [
+                'date_episode', 'participant_id', 'Participant_ID',
+                'StartDate', 'EndDate'
+            ]
+            merged_df = merged_df.drop(columns=[
+                col for col in cols_to_drop if col in merged_df.columns
+            ])
+            
+            # Add weekday and time-based features
+            merged_df['weekday'] = pd.to_datetime(merged_df['associated_data_date']).dt.dayofweek
+            merged_df['is_weekend'] = merged_df['weekday'].isin([5, 6]).astype(int)
+            
+            # Calculate z-scores for key metrics
+            metric_cols = [
+                'digital_fragmentation_index',
+                'moving_fragmentation_index',
+                'digital_frag_during_mobility',
+                'digital_total_duration',
+                'moving_total_duration',
+                'STAI6_score'
+            ]
+            
+            for col in metric_cols:
+                if col in merged_df.columns:
+                    merged_df[f'{col}_zscore'] = (
+                        merged_df[col] - merged_df[col].mean()
+                    ) / merged_df[col].std()
+            
+            # Save the combined dataset
+            output_path = self.output_dir / 'combined_metrics.csv'
+            merged_df.to_csv(output_path, index=False)
             
             # Generate summary statistics
-            self._generate_summary_statistics(merged_data)
+            self._generate_summary_statistics(merged_df)
             
-            return merged_data
+            self.logger.info(f"Successfully combined metrics and saved to {output_path}")
+            return merged_df
             
         except Exception as e:
-            self.logger.error(f"Error in prepare_for_hypothesis_testing: {str(e)}")
+            self.logger.error(f"Error combining metrics: {str(e)}", exc_info=True)
             raise
 
-    def _generate_summary_statistics(self, data: pd.DataFrame):
-        """Generate and save summary statistics for the prepared metrics"""
-        try:
-            summary_stats = {}
-            
-            # Calculate basic statistics for numeric columns
-            numeric_cols = data.select_dtypes(include=[np.number]).columns
-            summary_stats['numeric'] = data[numeric_cols].describe()
-            
-            # Calculate group distributions
-            group_cols = [col for col in data.columns if col.endswith('_group')]
-            for col in group_cols:
-                summary_stats[f'{col}_distribution'] = data[col].value_counts()
-                
-            # Add demographic summaries - handle each column separately to avoid type conflicts
-            for demo_col in ['Gender', 'School', 'Class']:
-                if demo_col in data.columns:
-                    # Convert to string type to ensure consistent handling
-                    counts = data[demo_col].astype(str).value_counts()
-                    sheet_name = f'{demo_col}_distribution'
-                    summary_stats[sheet_name] = pd.DataFrame({
-                        demo_col: counts.index,
-                        'count': counts.values
-                    })
-            
-            # Add cross-tabulations of demographics with tertile groups
-            for group_col in group_cols:
-                for demo_col in ['Gender', 'School', 'Class']:
-                    if demo_col in data.columns:
-                        # Convert demographic column to string for consistent handling
-                        demo_data = data[demo_col].astype(str)
-                        tab_name = f'{demo_col}_{group_col}_crosstab'
-                        summary_stats[tab_name] = pd.crosstab(
-                            demo_data,
-                            data[group_col]
-                        )
-            
-            # Save summary statistics
-            with pd.ExcelWriter(self.output_dir / 'summary_statistics.xlsx') as writer:
-                for name, stats in summary_stats.items():
-                    stats.to_excel(writer, sheet_name=name[:31])  # Excel sheet names limited to 31 chars
-                    
-        except Exception as e:
-            self.logger.error(f"Error generating summary statistics: {str(e)}", exc_info=True)
-            # Continue execution even if summary statistics fail
-            pass
+    def _generate_summary_statistics(self, df: pd.DataFrame):
+        """Generate summary statistics for the combined metrics"""
+        stats = {}
+        
+        # Basic statistics for numeric columns
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        stats['numeric_summary'] = df[numeric_cols].describe()
+        
+        # Demographic distributions
+        for col in ['Gender', 'School', 'Class']:
+            if col in df.columns:
+                stats[f'{col}_distribution'] = df[col].value_counts()
+        
+        # Early morning response statistics
+        stats['early_morning_counts'] = df['is_early_morning'].value_counts()
+        
+        # Coverage statistics
+        stats['coverage_quality'] = df['data_quality'].value_counts()
+        stats['coverage_hours'] = df['coverage_hours'].describe()
+        
+        # Save statistics to Excel
+        with pd.ExcelWriter(self.output_dir / 'metrics_summary.xlsx') as writer:
+            for name, stat_df in stats.items():
+                stat_df.to_excel(writer, sheet_name=name[:31])
+        
+        # Log key statistics
+        self.logger.info("\nKey Statistics:")
+        self.logger.info(f"Total participants: {df['user'].nunique()}")
+        self.logger.info(f"Total days: {len(df)}")
+        self.logger.info(f"Days with good quality data: {(df['data_quality'] == 'good').sum()}")
+        self.logger.info(f"Early morning responses: {df['is_early_morning'].sum()}")
 
 def main():
-    # Define paths
-    output_dir = Path('/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/metrics')
-    fragmentation_path = Path('/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/fragmentation/fragmentation_summary.csv')
-    ema_path = Path('/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/Survey/End_of_the_day_questionnaire.xlsx')
+    # Define base directory
+    base_dir = Path('/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon')  # Update this path
     
     # Initialize processor
-    processor = MetricsProcessor(output_dir)
+    processor = MetricsProcessor(base_dir)
     
-    # Load data and log column names
-    fragmentation_data = pd.read_csv(fragmentation_path)
-    processor.logger.info("Fragmentation data columns: %s", fragmentation_data.columns.tolist())
-    
-    ema_data = pd.read_excel(ema_path)
-    processor.logger.info("EMA data columns: %s", ema_data.columns.tolist())
-    
-    # Initialize processor
-    processor = MetricsProcessor(output_dir)
-    
-    # Load data
-    fragmentation_data = pd.read_csv(fragmentation_path)
-    ema_data = pd.read_excel(ema_path)
-    
-    # Process and prepare metrics
-    prepared_data = processor.prepare_for_hypothesis_testing(
-        fragmentation_data,
-        ema_data
-    )
-    
-    print("Metrics processing completed successfully")
+    # Combine all metrics
+    try:
+        combined_data = processor.combine_metrics()
+        print("Successfully combined all metrics")
+    except Exception as e:
+        print(f"Error processing metrics: {str(e)}")
 
 if __name__ == "__main__":
     main()

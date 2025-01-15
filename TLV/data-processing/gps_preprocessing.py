@@ -265,7 +265,7 @@ class GPSPreprocessor:
         quality_summary = []
         
         for _, ema_row in self.ema_data.iterrows():
-            # Find corresponding GPS file
+            # Find corresponding GPS file using consistent naming pattern
             gps_file = next(self.output_dir.glob(
                 f"preprocessed_data/{ema_row['associated_data_date']}_{ema_row['user']}_"
                 f"{'early_morning_' if ema_row['is_early_morning'] else ''}"

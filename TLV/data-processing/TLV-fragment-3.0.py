@@ -1,305 +1,344 @@
 import pandas as pd
 import numpy as np
 import os
+from pathlib import Path
+from datetime import datetime, timedelta
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from datetime import datetime
-from collections import defaultdict
+import logging
+from typing import Dict, List, Tuple, Optional
 
-# Global counters for tracking fragmentation calculation statistics
-fragmentation_stats = {
-    'digital': {'success': 0, 'insufficient_episodes': 0, 'zero_duration': 0, 'failed_days': []},
-    'moving': {'success': 0, 'insufficient_episodes': 0, 'zero_duration': 0, 'failed_days': []},
-    'digital_during_mobility': {'success': 0, 'insufficient_episodes': 0, 'zero_duration': 0, 'failed_days': []}
-}
-
-def extract_info_from_filename(filename):
-    """Extract participant ID and date from filename."""
-    parts = filename.split('_')
-    date_str = parts[-1].split('.')[0]  # Remove the .csv extension
-    participant_id = parts[-2]
-    date = datetime.strptime(date_str, "%Y-%m-%d").date()
-    return participant_id, date
-
-def calculate_mobility_metrics(df):
-    """Calculate basic mobility metrics from episodes dataframe."""
-    total_duration = df['duration'].sum()
-    avg_duration = df['duration'].mean()
-    episode_count = len(df)
-    return total_duration, avg_duration, episode_count
-
-def calculate_aid(episodes_df):
-    """Calculate Average Inter-episode Duration (AID) and related statistics.
-    Returns AID (mean) and additional statistics about the inter-episode durations."""
-    if len(episodes_df) > 1:
-        inter_episode_durations = np.abs((episodes_df['start_time'].iloc[1:] - episodes_df['end_time'].iloc[:-1]).dt.total_seconds() / 60)
+class FragmentationAnalyzer:
+    def __init__(self, 
+                 min_episodes: int = 3,
+                 max_episode_duration: float = 24 * 60,  # 24 hours in minutes
+                 outlier_threshold: float = 3.0):  # Standard deviations for outlier detection
+        """
+        Initialize fragmentation analyzer with configurable settings
         
-        if len(inter_episode_durations) > 0:
-            aid = np.mean(inter_episode_durations)  # This is the AID
-            # Additional statistics about inter-episode durations
-            duration_stats = {
-                'inter_episode_std': np.std(inter_episode_durations),
-                'inter_episode_min': np.min(inter_episode_durations),
-                'inter_episode_max': np.max(inter_episode_durations)
+        Args:
+            min_episodes: Minimum number of episodes required for fragmentation calculation
+            max_episode_duration: Maximum allowed episode duration in minutes
+            outlier_threshold: Number of standard deviations for outlier detection
+        """
+        self.min_episodes = min_episodes
+        self.max_episode_duration = max_episode_duration
+        self.outlier_threshold = outlier_threshold
+        self._setup_logging()
+        
+        # Initialize statistics tracking
+        self.stats = {
+            'digital': {'success': 0, 'insufficient_episodes': 0, 'invalid_duration': 0},
+            'moving': {'success': 0, 'insufficient_episodes': 0, 'invalid_duration': 0}
+        }
+        
+    def _setup_logging(self):
+        """Configure logging"""
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s'
+        )
+        self.logger = logging.getLogger(__name__)
+
+    def calculate_fragmentation_index(self, 
+                                    episodes_df: pd.DataFrame, 
+                                    episode_type: str) -> Dict:
+        """
+        Calculate fragmentation index with improved validation and outlier detection
+        
+        Args:
+            episodes_df: DataFrame with episode data
+            episode_type: Type of episodes ('digital' or 'moving')
+            
+        Returns:
+            Dictionary with fragmentation metrics and status
+        """
+        # Rename duration_minutes to duration for internal processing
+        episodes_df = episodes_df.rename(columns={'duration_minutes': 'duration'})
+        
+        if len(episodes_df) < self.min_episodes:
+            self.stats[episode_type]['insufficient_episodes'] += 1
+            return {
+                'fragmentation_index': np.nan,
+                'episode_count': len(episodes_df),
+                'total_duration': episodes_df['duration'].sum() if not episodes_df.empty else 0,
+                'status': 'insufficient_episodes'
             }
+            
+        # Validate durations
+        valid_episodes = episodes_df[
+            (episodes_df['duration'] > 0) &
+            (episodes_df['duration'] <= self.max_episode_duration)
+        ].copy()
+        
+        if len(valid_episodes) < self.min_episodes:
+            self.stats[episode_type]['invalid_duration'] += 1
+            return {
+                'fragmentation_index': np.nan,
+                'episode_count': len(valid_episodes),
+                'total_duration': valid_episodes['duration'].sum(),
+                'status': 'invalid_duration'
+            }
+            
+        # Detect and handle outliers
+        mean_duration = valid_episodes['duration'].mean()
+        std_duration = valid_episodes['duration'].std()
+        outlier_mask = np.abs(valid_episodes['duration'] - mean_duration) <= (self.outlier_threshold * std_duration)
+        valid_episodes = valid_episodes[outlier_mask]
+        
+        if len(valid_episodes) < self.min_episodes:
+            self.stats[episode_type]['insufficient_episodes'] += 1
+            return {
+                'fragmentation_index': np.nan,
+                'episode_count': len(valid_episodes),
+                'total_duration': valid_episodes['duration'].sum(),
+                'status': 'insufficient_episodes_after_outlier_removal'
+            }
+            
+        # Calculate normalized durations
+        total_duration = valid_episodes['duration'].sum()
+        normalized_durations = valid_episodes['duration'] / total_duration
+        
+        # Calculate fragmentation metrics
+        sum_squared = (normalized_durations ** 2).sum()
+        S = len(valid_episodes)
+        
+        # Calculate base fragmentation index
+        if S == 1:
+            frag_index = 0
         else:
-            aid = np.nan
-            duration_stats = {
-                'inter_episode_std': np.nan,
-                'inter_episode_min': np.nan,
-                'inter_episode_max': np.nan
-            }
-    else:
-        aid = np.nan
-        duration_stats = {
-            'inter_episode_std': np.nan,
-            'inter_episode_min': np.nan,
-            'inter_episode_max': np.nan,
-        }
-    
-    return aid, duration_stats
-
-def calculate_fragmentation_index(episodes_df, frag_type, min_episodes=3, date=None, participant_id=None):
-    """
-    Calculate fragmentation index with improved logging.
-    
-    Args:
-        episodes_df: DataFrame containing episode data
-        frag_type: String indicating type of fragmentation ('digital', 'moving', or 'digital_during_mobility')
-        min_episodes: Minimum number of episodes required
-    """
-    S = len(episodes_df)
-    T = episodes_df['duration'].sum()
-    
-    if S < min_episodes:
-        print(f"{frag_type.capitalize()} fragmentation: Insufficient episodes ({S} < {min_episodes})")
-        fragmentation_stats[frag_type]['insufficient_episodes'] += 1
-        if date and participant_id:
-            fragmentation_stats[frag_type]['failed_days'].append({
-                'date': date,
-                'participant_id': participant_id,
-                'reason': 'insufficient_episodes',
-                'episodes': S,
-                'total_duration': T
-            })
-        return np.nan
-    
-    if T <= 0:
-        print(f"{frag_type.capitalize()} fragmentation: Zero total duration")
-        fragmentation_stats[frag_type]['zero_duration'] += 1
-        if date and participant_id:
-            fragmentation_stats[frag_type]['failed_days'].append({
-                'date': date,
-                'participant_id': participant_id,
-                'reason': 'zero_duration',
-                'episodes': S,
-                'total_duration': T
-            })
-        return np.nan
-        
-    normalized_durations = episodes_df['duration'] / T
-    sum_squared = sum(normalized_durations ** 2)
-    index = (1 - sum_squared) / (1 - (1 / S))
-    
-    if index > 0.9999:
-        print(f"{frag_type.capitalize()} fragmentation warning: Very high index ({index:.4f})")
-        print(f"  Number of episodes: {S}")
-        print(f"  Total duration: {T:.2f}")
-        print(f"  Normalized durations: {[f'{d:.4f}' for d in normalized_durations]}")
-        print(f"  Sum of squared normalized durations: {sum_squared:.4f}")
-    
-    fragmentation_stats[frag_type]['success'] += 1
-    return index
-
-def calculate_digital_frag_during_mobility(digital_df, moving_df):
-    """Calculate fragmentation of digital use during mobility periods with improved logging."""
-    if digital_df.empty or moving_df.empty:
-        print("Digital during mobility fragmentation: Empty dataframes")
-        fragmentation_stats['digital_during_mobility']['insufficient_episodes'] += 1
-        return np.nan
-        
-    mobility_periods = []
-    for _, move in moving_df.iterrows():
-        mobility_periods.append((move['start_time'], move['end_time']))
-    
-    mobile_digital_episodes = []
-    for _, digital in digital_df.iterrows():
-        digital_start = digital['start_time']
-        digital_end = digital['end_time']
-        
-        for mob_start, mob_end in mobility_periods:
-            if (digital_start < mob_end) and (digital_end > mob_start):
-                episode_end = max(digital_end, mob_end)
-                duration = (episode_end - digital_start).total_seconds() / 60
+            frag_index = (1 - sum_squared) / (1 - (1/S))
+            
+            # Apply correction for very high values
+            if frag_index > 0.99:
+                # Calculate coefficient of variation
+                cv = std_duration / mean_duration
                 
-                mobile_digital_episodes.append({
-                    'start_time': digital_start,
-                    'end_time': episode_end,
-                    'duration': duration
-                })
-                break
-    
-    if mobile_digital_episodes:
-        episodes_df = pd.DataFrame(mobile_digital_episodes)
-        return calculate_fragmentation_index(episodes_df, 'digital_during_mobility')
-    
-    print("Digital during mobility fragmentation: No overlapping episodes found")
-    fragmentation_stats['digital_during_mobility']['insufficient_episodes'] += 1
-    return np.nan
-
-def print_summary_statistics(df):
-    """Print summary statistics and create visualization histograms."""
-    print("\nSummary Statistics:")
-    print(f"Total participants: {df['participant_id'].nunique()}")
-    print(f"Total days: {len(df)}")
-    
-    for col in df.columns:
-        if col not in ['participant_id', 'date']:
-            print(f"Average {col}: {df[col].mean():.4f}")
-
-    # Create histograms
-    for col in ['digital_fragmentation_index', 'moving_fragmentation_index', 'digital_frag_during_mobility']:
-        plt.figure(figsize=(10, 6))
-        plt.hist(df[col].dropna(), bins=50)
-        plt.title(f'Histogram of {col}')
-        plt.xlabel(col)
-        plt.ylabel('Frequency')
-        plt.savefig(f'{col}_histogram.png')
-        plt.close()
-
-def analyze_failed_days():
-    """Analyze and summarize statistics about failed calculations."""
-    print("\nDetailed Analysis of Failed Days:")
-    print("-" * 50)
-    
-    for frag_type in fragmentation_stats:
-        failed_days = fragmentation_stats[frag_type]['failed_days']
-        if not failed_days:
-            continue
-            
-        print(f"\n{frag_type.replace('_', ' ').title()} Failures:")
+                # Apply correction based on variation in episode durations
+                if cv < 0.1:  # Very similar episodes
+                    frag_index = frag_index * (1 - (0.1 - cv))
         
-        # Convert to DataFrame for easier analysis
-        df = pd.DataFrame(failed_days)
+        self.stats[episode_type]['success'] += 1
         
-        # Analyze by participant
-        participant_counts = df['participant_id'].value_counts()
-        print("\nParticipants with failures:")
-        print(f"Total participants with failures: {len(participant_counts)}")
-        print("\nTop 5 participants by number of failures:")
-        for pid, count in participant_counts.head().items():
-            print(f"  Participant {pid}: {count} failed days")
-            
-        # Analyze by reason
-        reason_counts = df['reason'].value_counts()
-        print("\nFailure reasons:")
-        for reason, count in reason_counts.items():
-            print(f"  {reason}: {count} days")
-            
-        # Statistics for failed days
-        if 'episodes' in df.columns:
-            print("\nEpisode statistics for failed days:")
-            print(f"  Average episodes: {df['episodes'].mean():.2f}")
-            print(f"  Min episodes: {df['episodes'].min()}")
-            print(f"  Max episodes: {df['episodes'].max()}")
-        
-        if 'total_duration' in df.columns:
-            print("\nDuration statistics for failed days:")
-            print(f"  Average duration: {df['total_duration'].mean():.2f} minutes")
-            print(f"  Min duration: {df['total_duration'].min():.2f} minutes")
-            print(f"  Max duration: {df['total_duration'].max():.2f} minutes")
-
-def print_fragmentation_summary():
-    """Print summary of fragmentation calculation statistics."""
-    print("\nFragmentation Calculation Summary:")
-    print("-" * 50)
-    
-    for frag_type in fragmentation_stats:
-        stats = fragmentation_stats[frag_type]
-        # Only sum the numeric statistics, excluding the failed_days list
-        total = stats['success'] + stats['insufficient_episodes'] + stats['zero_duration']
-        
-        print(f"\n{frag_type.replace('_', ' ').title()} Fragmentation:")
-        print(f"  Total calculations attempted: {total}")
-        print(f"  Successful calculations: {stats['success']} ({stats['success']/total*100:.1f}%)")
-        print(f"  Failed due to insufficient episodes: {stats['insufficient_episodes']} ({stats['insufficient_episodes']/total*100:.1f}%)")
-        print(f"  Failed due to zero duration: {stats['zero_duration']} ({stats['zero_duration']/total*100:.1f}%)")
-
-def process_episode_summary(digital_file_path, moving_file_path, print_sample=False):
-    """Process episode data and calculate fragmentation metrics."""
-    try:
-        digital_df = pd.read_csv(digital_file_path)
-        moving_df = pd.read_csv(moving_file_path)
-        
-        for df in [digital_df, moving_df]:
-            df['start_time'] = pd.to_datetime(df['start_time'])
-            df['end_time'] = pd.to_datetime(df['end_time'])
-        
-        total_time = (digital_df['end_time'] - digital_df['start_time']).dt.total_seconds().sum() / 60
-
-        if print_sample:
-            print(f"\nSample data for {os.path.basename(digital_file_path)}:")
-            print(digital_df.head())
-            print(f"\nSample data for {os.path.basename(moving_file_path)}:")
-            print(moving_df.head())
-
-        participant_id, date = extract_info_from_filename(os.path.basename(digital_file_path))
-
-        digital_frag_index = calculate_fragmentation_index(digital_df, 'digital', date=date, participant_id=participant_id)
-        moving_frag_index = calculate_fragmentation_index(moving_df, 'moving', date=date, participant_id=participant_id)
-        digital_frag_during_mobility = calculate_digital_frag_during_mobility(digital_df, moving_df)
-
-        total_duration_mobility, avg_duration_mobility, count_mobility = calculate_mobility_metrics(moving_df)
-
-        result = {
-            'participant_id': participant_id,
-            'date': date,
-            'total_time_on_device': total_time,
-            'digital_fragmentation_index': digital_frag_index,
-            'moving_fragmentation_index': moving_frag_index,
-            'digital_frag_during_mobility': digital_frag_during_mobility,
-            'total_duration_mobility': total_duration_mobility,
-            'avg_duration_mobility': avg_duration_mobility,
-            'count_mobility': count_mobility
+        return {
+            'fragmentation_index': frag_index,
+            'episode_count': S,
+            'total_duration': total_duration,
+            'mean_duration': mean_duration,
+            'std_duration': std_duration,
+            'cv': std_duration / mean_duration if mean_duration > 0 else np.nan,
+            'status': 'success'
         }
 
-        for episode_type, df in [('digital', digital_df), ('moving', moving_df)]:
-            aid, duration_stats = calculate_aid(df)
-            result[f'{episode_type}_AID'] = aid
-            for stat_name, stat_value in duration_stats.items():
-                result[f'{episode_type}_{stat_name}'] = stat_value
+    def calculate_digital_frag_during_mobility(self, 
+                                             digital_df: pd.DataFrame, 
+                                             moving_df: pd.DataFrame) -> Dict:
+        """
+        Calculate fragmentation of digital use during mobility periods
+        
+        Args:
+            digital_df: DataFrame with digital episodes
+            moving_df: DataFrame with mobility episodes
+            
+        Returns:
+            Dictionary with fragmentation metrics for digital use during mobility
+        """
+        if digital_df.empty or moving_df.empty:
+            return {
+                'fragmentation_index': np.nan,
+                'episode_count': 0,
+                'total_duration': 0,
+                'status': 'no_episodes'
+            }
+            
+        # Convert times to datetime if needed
+        for df in [digital_df, moving_df]:
+            for col in ['start_time', 'end_time']:
+                if df[col].dtype != 'datetime64[ns]':
+                    df[col] = pd.to_datetime(df[col])
+        
+        # Find overlapping episodes
+        overlapping_episodes = []
+        for _, digital in digital_df.iterrows():
+            for _, mobility in moving_df.iterrows():
+                if (digital['start_time'] < mobility['end_time'] and 
+                    digital['end_time'] > mobility['start_time']):
+                    # Calculate overlap duration
+                    overlap_start = max(digital['start_time'], mobility['start_time'])
+                    overlap_end = min(digital['end_time'], mobility['end_time'])
+                    duration = (overlap_end - overlap_start).total_seconds() / 60
+                    
+                    if duration > 0:
+                        overlapping_episodes.append({
+                            'start_time': overlap_start,
+                            'end_time': overlap_end,
+                            'duration': duration
+                        })
+        
+        if not overlapping_episodes:
+            return {
+                'fragmentation_index': np.nan,
+                'episode_count': 0,
+                'total_duration': 0,
+                'status': 'no_overlapping_episodes'
+            }
+            
+        overlap_df = pd.DataFrame(overlapping_episodes)
+        return self.calculate_fragmentation_index(overlap_df, 'digital')
 
-        return pd.DataFrame([result])
-    except Exception as e:
-        print(f"Error processing files {digital_file_path} and {moving_file_path}: {str(e)}")
-        return None
+    def process_episode_summary(self, 
+                              digital_file_path: str, 
+                              moving_file_path: str,
+                              print_sample: bool = False) -> Optional[Dict]:
+        """Process episode data and calculate all fragmentation metrics"""
+        try:
+            digital_df = pd.read_csv(digital_file_path)
+            moving_df = pd.read_csv(moving_file_path)
+            
+            for df in [digital_df, moving_df]:
+                df['start_time'] = pd.to_datetime(df['start_time'])
+                df['end_time'] = pd.to_datetime(df['end_time'])
+            
+            if print_sample:
+                self.logger.info(f"\nSample data from {os.path.basename(digital_file_path)}:")
+                self.logger.info(digital_df.head())
+                self.logger.info(f"\nSample data from {os.path.basename(moving_file_path)}:")
+                self.logger.info(moving_df.head())
+            
+            participant_id, date = self._extract_info_from_filename(os.path.basename(digital_file_path))
+            
+            # Calculate various fragmentation metrics
+            digital_metrics = self.calculate_fragmentation_index(digital_df, 'digital')
+            moving_metrics = self.calculate_fragmentation_index(moving_df, 'moving')
+            overlap_metrics = self.calculate_digital_frag_during_mobility(digital_df, moving_df)
+            
+            result = {
+                'participant_id': participant_id,
+                'date': date,
+                'digital_fragmentation_index': digital_metrics['fragmentation_index'],
+                'moving_fragmentation_index': moving_metrics['fragmentation_index'],
+                'digital_frag_during_mobility': overlap_metrics['fragmentation_index'],
+                'digital_episode_count': digital_metrics['episode_count'],
+                'moving_episode_count': moving_metrics['episode_count'],
+                'digital_total_duration': digital_metrics['total_duration'],
+                'moving_total_duration': moving_metrics['total_duration'],
+                'digital_status': digital_metrics['status'],
+                'moving_status': moving_metrics['status'],
+                'overlap_status': overlap_metrics['status']
+            }
+            
+            # Add additional metrics if available
+            for metrics_type in [digital_metrics, moving_metrics]:
+                if 'cv' in metrics_type:
+                    prefix = 'digital_' if metrics_type == digital_metrics else 'moving_'
+                    result[f'{prefix}cv'] = metrics_type['cv']
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Error processing files {digital_file_path} and {moving_file_path}: {str(e)}")
+            return None
 
-def main(input_dir, output_dir):
-    """Main function to process all episode files and generate summary."""
-    digital_files = sorted([f for f in os.listdir(input_dir) if f.startswith('digital_episodes_') and f.endswith('.csv')])
-    moving_files = sorted([f for f in os.listdir(input_dir) if f.startswith('moving_episodes_') and f.endswith('.csv')])
+    def _extract_info_from_filename(self, filename: str) -> Tuple[str, datetime.date]:
+        """Extract participant ID and date from filename"""
+        # Original format: "digital_episodes_2022-06-13_29.csv"
+        # Parts will be: ['digital', 'episodes', '2022-06-13', '29.csv']
+        parts = filename.split('_')
+        
+        # Get date from third part
+        date_str = parts[2]
+        # Get participant ID from fourth part (remove .csv)
+        participant_id = parts[3].split('.')[0]
+        
+        date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        return participant_id, date
+
+    def generate_analysis_plots(self, df: pd.DataFrame, output_dir: Path):
+        """Generate visualization plots for fragmentation analysis"""
+        metrics = ['digital_fragmentation_index', 'moving_fragmentation_index', 
+                  'digital_frag_during_mobility']
+        
+        for metric in metrics:
+            plt.figure(figsize=(10, 6))
+            
+            # Create histogram
+            plt.hist(df[metric].dropna(), bins=50, alpha=0.7)
+            plt.title(f'Distribution of {metric}')
+            plt.xlabel('Fragmentation Index')
+            plt.ylabel('Frequency')
+            
+            # Add vertical lines for quartiles
+            quartiles = df[metric].quantile([0.25, 0.5, 0.75])
+            for q, q_value in quartiles.items():
+                plt.axvline(q_value, color='r', linestyle='--', alpha=0.5)
+                plt.text(q_value, plt.ylim()[1]*0.9, f'Q{int(q*4)}={q_value:.2f}', 
+                        rotation=90, verticalalignment='top')
+            
+            plt.savefig(output_dir / f'{metric}_distribution.png')
+            plt.close()
+
+def main():
+    # Configure paths
+    input_dir = Path('/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/episodes')
+    output_dir = Path('/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/fragmentation')
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Initialize analyzer
+    analyzer = FragmentationAnalyzer()
+    
+    # Process all episode files
+    digital_files = sorted([f for f in os.listdir(input_dir) 
+                          if f.startswith('digital_episodes_') and f.endswith('.csv')])
+    moving_files = sorted([f for f in os.listdir(input_dir) 
+                         if f.startswith('moving_episodes_') and f.endswith('.csv')])
     
     if len(digital_files) != len(moving_files):
-        print("Warning: Mismatch in the number of digital and moving episode files.")
+        logging.warning("Mismatch in number of digital and moving episode files")
     
     all_results = []
-    for i, (digital_file, moving_file) in enumerate(tqdm(zip(digital_files, moving_files), desc="Processing episodes")):
-        digital_path = os.path.join(input_dir, digital_file)
-        moving_path = os.path.join(input_dir, moving_file)
-        results = process_episode_summary(digital_path, moving_path, print_sample=(i==0))
+    for i, (digital_file, moving_file) in enumerate(tqdm(zip(digital_files, moving_files), 
+                                                       desc="Processing episodes")):
+        digital_path = input_dir / digital_file
+        moving_path = input_dir / moving_file
+        
+        results = analyzer.process_episode_summary(digital_path, moving_path, 
+                                                 print_sample=(i==0))
         if results is not None:
             all_results.append(results)
     
-    combined_results = pd.concat(all_results, ignore_index=True)
-    output_file = os.path.join(output_dir, 'fragmentation_summary.csv')
-    combined_results.to_csv(output_file, index=False)
-    print(f"\nSaved fragmentation summary to {output_file}")
-    
-    print_summary_statistics(combined_results)
-    print_fragmentation_summary()
-    analyze_failed_days()
+    # Create summary DataFrame
+    if all_results:
+        combined_results = pd.DataFrame(all_results)
+        
+        # Save results
+        output_file = output_dir / 'fragmentation_summary.csv'
+        combined_results.to_csv(output_file, index=False)
+        logging.info(f"\nSaved fragmentation summary to {output_file}")
+        
+        # Generate analysis plots
+        analyzer.generate_analysis_plots(combined_results, output_dir)
+        
+        # Print statistics
+        logging.info("\nProcessing Statistics:")
+        for episode_type in ['digital', 'moving']:
+            stats = analyzer.stats[episode_type]
+            total = sum(stats.values())
+            logging.info(f"\n{episode_type.capitalize()} Episodes:")
+            for status, count in stats.items():
+                percentage = (count/total*100) if total > 0 else 0
+                logging.info(f"  {status}: {count} ({percentage:.1f}%)")
+        
+        # Print summary statistics
+        logging.info("\nSummary Statistics:")
+        for col in combined_results.select_dtypes(include=[np.number]).columns:
+            stats = combined_results[col].describe()
+            logging.info(f"\n{col}:")
+            logging.info(f"  Mean: {stats['mean']:.3f}")
+            logging.info(f"  Std: {stats['std']:.3f}")
+            logging.info(f"  Min: {stats['min']:.3f}")
+            logging.info(f"  Max: {stats['max']:.3f}")
+    else:
+        logging.warning("No valid results were generated")
 
 if __name__ == "__main__":
-    input_dir = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/episodes'
-    output_dir = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/fragmentation'
-    main(input_dir, output_dir)
+    main()
