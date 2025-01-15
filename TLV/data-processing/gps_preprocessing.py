@@ -5,14 +5,14 @@ from datetime import datetime, timedelta
 from tqdm import tqdm
 import logging
 from pathlib import Path
+import uuid
 
 class GPSPreprocessor:
     def __init__(self, 
                  raw_gps_path: str,
                  ema_path: str,
                  output_dir: str,
-                 early_morning_cutoff: int = 5,
-                 afternoon_cutoff: int = 16):  # Add second cutoff parameter
+                 early_morning_cutoff: int = 5):
         """
         Initialize GPS preprocessor with file paths
         
@@ -20,284 +20,334 @@ class GPSPreprocessor:
             raw_gps_path: Path to raw GPS Excel file
             ema_path: Path to EMA questionnaire Excel file
             output_dir: Directory for output files
-            early_morning_cutoff: Hour before which EMAs are assigned to previous day
-            afternoon_cutoff: Hour before which EMAs are excluded (default 16:00)
+            early_morning_cutoff: Hour before which EMAs are considered early morning
         """
         self.raw_gps_path = Path(raw_gps_path)
         self.ema_path = Path(ema_path)
         self.output_dir = Path(output_dir)
         self.early_morning_cutoff = early_morning_cutoff
-        self.afternoon_cutoff = afternoon_cutoff
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self._setup_logging()
-        
+
     def _setup_logging(self):
-        """Configure logging"""
+        """Configure logging with both console and file output"""
         logging.basicConfig(
             level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s'
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.StreamHandler(),
+                logging.FileHandler(self.output_dir / 'preprocessing.log')
+            ]
         )
         self.logger = logging.getLogger(__name__)
 
     def load_data(self):
-            """Load and prepare GPS and EMA datasets from CSV files"""
-            self.logger.info("Loading raw GPS data...")
-            self.raw_gps = pd.read_csv(self.raw_gps_path)
-            
-            self.logger.info("Loading EMA data...")
-            self.ema_data = pd.read_csv(self.ema_path)
-            
-            # Log columns for debugging
-            self.logger.info("GPS columns: %s", self.raw_gps.columns.tolist())
-            self.logger.info("EMA columns: %s", self.ema_data.columns.tolist())
-            
-            # Convert and standardize GPS data types
-            self.raw_gps['date'] = pd.to_datetime(self.raw_gps['date']).dt.date
-            self.raw_gps['user'] = self.raw_gps['user'].astype(str)
-            self.raw_gps['Timestamp'] = pd.to_datetime(self.raw_gps['Timestamp'])
-            
-            # Prepare EMA data using StartDate for matching
-            self.ema_data['timestamp'] = pd.to_datetime(self.ema_data['StartDate'])
-            self.ema_data['date'] = self.ema_data['timestamp'].dt.date
-            
-            # Adjust dates for early morning responses
-            early_morning_mask = self.ema_data['timestamp'].dt.hour < self.early_morning_cutoff
-            self.ema_data.loc[early_morning_mask, 'date'] = self.ema_data.loc[
-                early_morning_mask, 'timestamp'
-            ].dt.date - timedelta(days=1)
-            
-            # Verify early morning adjustment
-            verification_mask = early_morning_mask & (self.ema_data['timestamp'].dt.date != self.ema_data['date'])
-            if not verification_mask.equals(early_morning_mask):
-                mismatched = self.ema_data[early_morning_mask & ~verification_mask]
-                self.logger.error(
-                    f"Early morning adjustment verification failed for {len(mismatched)} records:"
-                )
-                for _, row in mismatched.iterrows():
-                    self.logger.error(
-                        f"User {row['user']}: Timestamp {row['timestamp']} not properly "
-                        f"adjusted to date {row['date']}"
-                    )
-                raise ValueError("Early morning date adjustment verification failed")
-            
-            # Log early morning adjustments
-            adjusted_count = early_morning_mask.sum()
-            if adjusted_count > 0:
-                self.logger.info(f"Verified {adjusted_count} early morning EMAs were correctly adjusted to previous day")
-                self.logger.info("Sample of adjusted EMAs:")
-                adjusted_emas = self.ema_data[early_morning_mask].head()
-                for _, row in adjusted_emas.iterrows():
-                    self.logger.info(
-                        f"Survey at {row['timestamp'].strftime('%Y-%m-%d %H:%M')} "
-                        f"assigned to {row['date']}"
-                    )
-            
-            # Standardize participant IDs
-            self.ema_data['user'] = self.ema_data['Participant_ID'].astype(str)
-            
-            # Log data loading results
-            self.logger.info(f"Loaded {len(self.raw_gps)} GPS records")
-            self.logger.info(f"Loaded {len(self.ema_data)} EMA records")
-            self.logger.info(f"GPS data date range: {self.raw_gps['date'].min()} to {self.raw_gps['date'].max()}")
-            self.logger.info(f"EMA data date range: {min(self.ema_data['date'])} to {max(self.ema_data['date'])}")
-            
-            # Check for multiple EMAs per day after date adjustment
-            ema_counts = self.ema_data.groupby(['user', 'date']).size()
-            multiple_emas = ema_counts[ema_counts > 1]
-            if not multiple_emas.empty:
-                self.logger.warning(f"Found {len(multiple_emas)} user-days with multiple EMAs:")
-                for (user, date), count in multiple_emas.items():
-                    ema_times = self.ema_data[
-                        (self.ema_data['user'] == user) & 
-                        (self.ema_data['date'] == date)
-                    ]['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S').tolist()
-                    self.logger.warning(f"User {user} on {date}: {count} EMAs at times: {ema_times}")
-
-            # After the early morning adjustment, filter out responses between cutoffs
-            invalid_time_mask = (
-                (self.ema_data['timestamp'].dt.hour >= self.early_morning_cutoff) & 
-                (self.ema_data['timestamp'].dt.hour < self.afternoon_cutoff)
-            )
-            
-            if invalid_time_mask.any():
-                excluded_count = invalid_time_mask.sum()
-                self.logger.warning(
-                    f"Excluding {excluded_count} EMAs between {self.early_morning_cutoff}:00 "
-                    f"and {self.afternoon_cutoff}:00"
-                )
-                self.logger.info("Sample of excluded EMAs:")
-                excluded_emas = self.ema_data[invalid_time_mask].head()
-                for _, row in excluded_emas.iterrows():
-                    self.logger.info(
-                        f"Excluded survey at {row['timestamp'].strftime('%Y-%m-%d %H:%M')} "
-                        f"for user {row['user']}"
-                    )
-                
-                # Remove the invalid responses
-                self.ema_data = self.ema_data[~invalid_time_mask]
-
-    def create_daily_summaries(self) -> pd.DataFrame:
-        """Create daily summaries with quality metrics and EMA matching"""
-        self.logger.info("Creating daily summaries with EMA matching...")
-        daily_summaries = []
+        """Load and prepare GPS and EMA datasets"""
+        self.logger.info("Loading raw GPS data...")
+        self.raw_gps = pd.read_csv(self.raw_gps_path, low_memory=False)
         
-        # Create set of valid user-date combinations from EMA data
-        valid_days = set(
-            zip(self.ema_data['user'], self.ema_data['date'])
+        self.logger.info("Loading EMA data...")
+        self.ema_data = pd.read_csv(self.ema_path)
+        
+        # Log initial data shapes
+        self.logger.info(f"Raw GPS data shape: {self.raw_gps.shape}")
+        self.logger.info(f"EMA data shape: {self.ema_data.shape}")
+        
+        # Convert timestamps and standardize data types
+        self.raw_gps['Timestamp'] = pd.to_datetime(self.raw_gps['Timestamp'])
+        self.raw_gps['calendar_date'] = self.raw_gps['Timestamp'].dt.date
+        self.raw_gps['user'] = self.raw_gps['user'].astype(str)
+        
+        # Sort GPS data by timestamp
+        self.raw_gps = self.raw_gps.sort_values('Timestamp')
+        
+        # Prepare EMA data
+        self.ema_data['timestamp'] = pd.to_datetime(self.ema_data['StartDate'])
+        self.ema_data['response_time'] = pd.to_datetime(self.ema_data['EndDate'])
+        self.ema_data['calendar_date'] = self.ema_data['response_time'].dt.date
+        self.ema_data['user'] = self.ema_data['Participant_ID'].astype(str)
+        
+        # Add early morning flags and data associations
+        self.ema_data['is_early_morning'] = self.ema_data['response_time'].dt.hour < self.early_morning_cutoff
+        self.ema_data['associated_data_date'] = self.ema_data.apply(
+            lambda row: (row['calendar_date'] - timedelta(days=1))
+            if row['is_early_morning'] else row['calendar_date'],
+            axis=1
         )
         
-        self.logger.info(f"Found {len(valid_days)} unique user-date combinations in EMA data")
+        # Generate unique IDs for each EMA response
+        self.ema_data['ema_id'] = [str(uuid.uuid4()) for _ in range(len(self.ema_data))]
         
-        # Group by user and date
-        skipped_count = 0
-        for (user, date), day_data in tqdm(self.raw_gps.groupby(['user', 'date'])):
-            # Skip if no matching EMA data
-            if (user, date) not in valid_days:
-                skipped_count += 1
-                continue
-                
-            # Calculate day summary
-            day_summary = {
-                'user': user,
-                'date': date,
-                'first_reading': day_data['Timestamp'].min(),
-                'last_reading': day_data['Timestamp'].max(),
-                'total_readings': len(day_data),
-                'has_morning_data': any(day_data['Timestamp'].dt.hour < 12),
-                'has_evening_data': any(day_data['Timestamp'].dt.hour >= 17),
-                'max_gap_minutes': (
-                    day_data['Timestamp'].diff().max().total_seconds() / 60 
-                    if len(day_data) > 1 else np.nan
-                ),
-                'coverage_hours': (
-                    day_data['Timestamp'].max() - day_data['Timestamp'].min()
-                ).total_seconds() / 3600
-            }
-            
-            # Get matching EMA data
-            ema_match = self.ema_data[
-                (self.ema_data['user'] == user) & 
-                (self.ema_data['date'] == date)
-            ].iloc[0]
-            
-            # Add EMA timestamp information
-            day_summary['ema_timestamp'] = ema_match['timestamp']
-            day_summary['ema_hour'] = ema_match['timestamp'].hour
-            
-            # Add relevant EMA data
-            ema_cols = ['Gender', 'School', 'Class', 'PEACE', 'TENSE', 'IRRITATION', 
-                       'RELAXATION', 'SATISFACTION', 'WORRY', 'HAPPY']
-            for col in ema_cols:
-                if col in self.ema_data.columns:
-                    day_summary[col] = ema_match[col]
-            
-            day_summary['has_ema'] = True
-            
-            daily_summaries.append(day_summary)
-        
-        self.logger.info(f"Skipped {skipped_count} days without matching EMA data")
-        
-        # Convert to DataFrame
-        gps_summary_df = pd.DataFrame(daily_summaries)
-        
-        # Add quality metrics
-        gps_summary_df['data_quality'] = np.where(
-            (gps_summary_df['has_morning_data']) & 
-            (gps_summary_df['has_evening_data']) & 
-            (gps_summary_df['coverage_hours'] >= 5),
-            'good',
-            'partial'
-        )
-        
-        return gps_summary_df
+        # Log data ranges and early morning counts
+        early_morning_count = self.ema_data['is_early_morning'].sum()
+        self.logger.info(f"Found {early_morning_count} early morning responses")
+        self.logger.info(f"GPS data date range: {min(self.raw_gps['calendar_date'])} to {max(self.raw_gps['calendar_date'])}")
+        self.logger.info(f"EMA data date range: {min(self.ema_data['calendar_date'])} to {max(self.ema_data['calendar_date'])}")
 
-    def create_preprocessed_files(self, gps_summary_df: pd.DataFrame):
-        """Create preprocessed GPS files for days with good data and EMA matches"""
-        self.logger.info("Creating preprocessed GPS files...")
+    def _create_ema_summary(self) -> pd.DataFrame:
+        """Create summary of EMA responses with unique IDs"""
+        ema_cols = ['ema_id', 'user', 'calendar_date', 'associated_data_date', 'timestamp', 
+                   'response_time', 'is_early_morning', 'Gender', 'School', 'Class', 
+                   'PEACE', 'TENSE', 'IRRITATION', 'RELAXATION', 'SATISFACTION', 
+                   'WORRY', 'HAPPY']
         
-        # Create output directory for preprocessed files
+        ema_summary = self.ema_data[ema_cols].copy()
+        ema_summary['response_hour'] = ema_summary['response_time'].dt.hour
+        ema_summary['response_weekday'] = ema_summary['response_time'].dt.day_name()
+        
+        return ema_summary
+
+    def create_preprocessed_files(self):
+        """Create preprocessed files with proper data windows and associations"""
+        self.logger.info("Creating preprocessed files...")
+        
         preprocess_dir = self.output_dir / 'preprocessed_data'
         preprocess_dir.mkdir(parents=True, exist_ok=True)
         
-        # Get valid user-date combinations
-        valid_days = gps_summary_df[
-            (gps_summary_df['data_quality'] == 'good') & 
-            (gps_summary_df['has_ema'])
-        ]
+        # Handle multiple responses per associated_data_date
+        response_groups = self.ema_data.groupby(['user', 'associated_data_date'])
         
+        latest_responses = []
+        multiple_response_cases = []
+        
+        for (user, data_date), group in response_groups:
+            # Convert all times to same day for proper temporal comparison
+            normalized_times = group.apply(lambda row: 
+                row['response_time'] - timedelta(days=1) if row['is_early_morning'] 
+                else row['response_time'], axis=1)
+            
+            # Get index of temporally latest response
+            latest_idx = normalized_times.idxmax()
+            latest_response = group.loc[latest_idx]
+            
+            # Record multiple response cases for logging
+            if len(group) > 1:
+                response_info = {
+                    'user': user,
+                    'data_date': data_date,
+                    'response_times': group['response_time'].tolist(),
+                    'normalized_times': normalized_times.tolist(),
+                    'selected_time': latest_response['response_time'],
+                    'is_early_morning': latest_response['is_early_morning'],
+                    'ema_ids': group['ema_id'].tolist()
+                }
+                multiple_response_cases.append(response_info)
+            
+            # Log warning if selecting early morning over same day
+            same_day_responses = group[~group['is_early_morning']]
+            if latest_response['is_early_morning'] and not same_day_responses.empty:
+                self.logger.warning(
+                    f"⚠️ Selected early morning response over same-day response(s)\n"
+                    f"User: {user}\n"
+                    f"Data date: {data_date}\n"
+                    f"Selected: {latest_response['response_time']} (early morning)\n"
+                    f"Other responses: {', '.join(same_day_responses['response_time'].dt.strftime('%Y-%m-%d %H:%M:%S'))}\n"
+                    f"Normalized selected time: {normalized_times[latest_idx]}\n"
+                    f"EMA IDs: Selected={latest_response['ema_id']}, "
+                    f"Others={', '.join(same_day_responses['ema_id'])}"
+                )
+            
+            latest_responses.append(latest_response)
+        
+        latest_responses_df = pd.DataFrame(latest_responses)
+        self.logger.info(f"Processing {len(latest_responses_df)} days after resolving multiple responses")
+        
+        # Process GPS data for each user-day
         processed_count = 0
-        for _, row in tqdm(valid_days.iterrows()):
-            # Get day's data
+        skipped_count = 0
+        total_points = 0
+        early_morning_count = 0
+        
+        for _, ema_row in tqdm(latest_responses_df.iterrows(), desc="Processing user-days"):
+            # Set data window based on associated_data_date
+            start_time = datetime.combine(ema_row['associated_data_date'], 
+                                        datetime.min.time()) + timedelta(hours=self.early_morning_cutoff)
+            end_time = ema_row['response_time']
+            
+            # Get GPS data for the time window
             day_data = self.raw_gps[
-                (self.raw_gps['user'] == row['user']) & 
-                (self.raw_gps['date'] == row['date'])
+                (self.raw_gps['user'] == ema_row['user']) & 
+                (self.raw_gps['Timestamp'] >= start_time) & 
+                (self.raw_gps['Timestamp'] <= end_time)
             ].copy()
             
             if not day_data.empty:
-                # Add EMA data
-                ema_cols = [col for col in gps_summary_df.columns 
-                           if col not in day_data.columns and
-                           col not in ['data_quality', 'has_morning_data', 'has_evening_data']]
-                for col in ema_cols:
-                    day_data[col] = row[col]
+                # Sort by timestamp
+                day_data = day_data.sort_values('Timestamp')
                 
-                # Save preprocessed file
-                output_file = preprocess_dir / f"{row['date']}_{row['user']}.csv"
+                # Add EMA linking information
+                day_data['ema_id'] = ema_row['ema_id']
+                day_data['ema_response_time'] = ema_row['response_time']
+                day_data['is_early_morning_response'] = ema_row['is_early_morning']
+                day_data['calendar_date'] = ema_row['calendar_date']
+                day_data['associated_data_date'] = ema_row['associated_data_date']
+                day_data['had_multiple_responses'] = any(
+                    case['user'] == ema_row['user'] and 
+                    case['data_date'] == ema_row['associated_data_date']
+                    for case in multiple_response_cases
+                )
+                
+                # Add time period classification
+                day_data['time_period'] = day_data['Timestamp'].apply(
+                    lambda x: 'early_morning' if x.hour < self.early_morning_cutoff else
+                            'morning' if x.hour < 12 else
+                            'afternoon' if x.hour < 17 else
+                            'evening' if x.hour < 22 else 'night'
+                )
+                
+                # Calculate quality metrics
+                quality_metrics = {
+                    'first_reading': day_data['Timestamp'].min(),
+                    'last_reading': day_data['Timestamp'].max(),
+                    'total_readings': len(day_data),
+                    'time_periods_covered': day_data['time_period'].nunique(),
+                    'max_gap_minutes': (
+                        day_data['Timestamp'].diff().max().total_seconds() / 60 
+                        if len(day_data) > 1 else np.nan
+                    ),
+                    'coverage_hours': (
+                        day_data['Timestamp'].max() - day_data['Timestamp'].min()
+                    ).total_seconds() / 3600,
+                    'early_morning_points': sum(day_data['time_period'] == 'early_morning')
+                }
+                
+                # Add quality metrics to each row
+                for metric, value in quality_metrics.items():
+                    day_data[metric] = value
+                
+                # Save file with clear naming
+                output_filename = (
+                    f"{ema_row['associated_data_date']}_{ema_row['user']}_"
+                    f"{'early_morning_' if ema_row['is_early_morning'] else ''}"
+                    f"{ema_row['ema_id'][:8]}.csv"
+                )
+                output_file = preprocess_dir / output_filename
                 day_data.to_csv(output_file, index=False)
+                
+                if ema_row['is_early_morning']:
+                    early_morning_count += 1
+                
                 processed_count += 1
+                total_points += len(day_data)
+            else:
+                skipped_count += 1
+                self.logger.warning(
+                    f"No GPS data found for user {ema_row['user']}\n"
+                    f"Calendar date: {ema_row['calendar_date']}\n"
+                    f"Associated data date: {ema_row['associated_data_date']}\n"
+                    f"Time window: {start_time} to {end_time}"
+                )
         
+        self.logger.info(f"\nProcessing Summary:")
         self.logger.info(f"Created {processed_count} preprocessed files")
+        self.logger.info(f"Processed {early_morning_count} early morning responses")
+        self.logger.info(f"Skipped {skipped_count} user-days with no GPS data")
+        self.logger.info(f"Total GPS points processed: {total_points}")
+        
+        # Create and save data quality summary
+        self._save_quality_summary()
 
-    def save_summaries(self, gps_summary_df: pd.DataFrame):
-        """Save summary files"""
-        # Save main summary
-        summary_path = self.output_dir / 'gps_daily_summary.csv'
-        gps_summary_df.to_csv(summary_path, index=False)
+    def _save_quality_summary(self):
+        """Create and save summary of data quality"""
+        quality_summary = []
+        
+        for _, ema_row in self.ema_data.iterrows():
+            # Find corresponding GPS file
+            gps_file = next(self.output_dir.glob(
+                f"preprocessed_data/{ema_row['associated_data_date']}_{ema_row['user']}_"
+                f"{'early_morning_' if ema_row['is_early_morning'] else ''}"
+                f"{ema_row['ema_id'][:8]}.csv"
+            ), None)
+            
+            if gps_file:
+                gps_data = pd.read_csv(gps_file)
+                
+                summary = {
+                    'ema_id': ema_row['ema_id'],
+                    'user': ema_row['user'],
+                    'calendar_date': ema_row['calendar_date'],
+                    'associated_data_date': ema_row['associated_data_date'],
+                    'is_early_morning': ema_row['is_early_morning'],
+                    'ema_timestamp': ema_row['timestamp'],
+                    'ema_response_time': ema_row['response_time'],
+                    'gps_file': gps_file.name,
+                    'total_gps_points': len(gps_data),
+                    'coverage_hours': gps_data['coverage_hours'].iloc[0],
+                    'has_morning_data': any(pd.to_datetime(gps_data['Timestamp']).dt.hour < 12),
+                    'has_evening_data': any(pd.to_datetime(gps_data['Timestamp']).dt.hour >= 17),
+                    'has_early_morning_data': any(pd.to_datetime(gps_data['Timestamp']).dt.hour < self.early_morning_cutoff),
+                    'max_gap_minutes': gps_data['max_gap_minutes'].iloc[0]
+                }
+                
+                # Add data quality classification
+                summary['data_quality'] = 'good' if (
+                    summary['has_morning_data'] and 
+                    summary['has_evening_data'] and 
+                    summary['coverage_hours'] >= 5 and
+                    summary['max_gap_minutes'] <= 120  # 2-hour max gap
+                ) else 'partial'
+                
+                quality_summary.append(summary)
+        
+        # Convert to DataFrame and save
+        quality_df = pd.DataFrame(quality_summary)
+        quality_df.to_csv(self.output_dir / 'data_quality_summary.csv', index=False)
         
         # Log summary statistics
-        self.logger.info("\nSummary Statistics:")
-        self.logger.info(f"Total days: {len(gps_summary_df)}")
-        self.logger.info(f"Days with good quality: {(gps_summary_df['data_quality'] == 'good').sum()}")
-        self.logger.info(f"Days with EMA data: {gps_summary_df['has_ema'].sum()}")
-        self.logger.info(f"Unique participants: {gps_summary_df['user'].nunique()}")
+        self.logger.info("\nData Quality Summary:")
+        self.logger.info(f"Total EMAs processed: {len(self.ema_data)}")
+        self.logger.info(f"EMAs with matching GPS data: {len(quality_summary)}")
+        self.logger.info(f"EMAs with good quality data: {(quality_df['data_quality'] == 'good').sum()}")
+        self.logger.info(f"Early morning responses: {quality_df['is_early_morning'].sum()}")
+        self.logger.info(f"Average GPS points per day: {quality_df['total_gps_points'].mean():.1f}")
+        self.logger.info(f"Average coverage hours: {quality_df['coverage_hours'].mean():.1f}")
         
-        # Add EMA timing statistics
-        self.logger.info("\nEMA Timing Distribution:")
-        hour_counts = gps_summary_df['ema_hour'].value_counts().sort_index()
-        for hour, count in hour_counts.items():
-            self.logger.info(f"  {hour:02d}:00-{hour:02d}:59: {count} responses")
+        # Create summary by participant
+        participant_summary = quality_df.groupby('user').agg({
+            'ema_id': 'count',
+            'total_gps_points': 'mean',
+            'coverage_hours': 'mean',
+            'data_quality': lambda x: (x == 'good').mean() * 100,
+            'is_early_morning': 'sum'
+        }).round(2)
         
-        # Get demographic breakdowns
-        for col in ['Gender', 'School', 'Class']:
-            if col in gps_summary_df.columns:
-                self.logger.info(f"\n{col} Distribution:")
-                counts = gps_summary_df[col].value_counts()
-                for val, count in counts.items():
-                    self.logger.info(f"  {val}: {count}")
+        participant_summary.columns = ['total_days', 'avg_gps_points', 
+                                    'avg_coverage_hours', 'good_quality_percent',
+                                    'early_morning_responses']
+        
+        # Add additional early morning metrics
+        early_morning_stats = quality_df[quality_df['is_early_morning']].groupby('user').agg({
+            'total_gps_points': 'mean',
+            'coverage_hours': 'mean',
+            'data_quality': lambda x: (x == 'good').mean() * 100
+        }).round(2)
+        
+        if not early_morning_stats.empty:
+            participant_summary['early_morning_avg_points'] = early_morning_stats['total_gps_points']
+            participant_summary['early_morning_avg_coverage'] = early_morning_stats['coverage_hours']
+            participant_summary['early_morning_good_quality_percent'] = early_morning_stats['data_quality']
+        
+        participant_summary.to_csv(self.output_dir / 'participant_summary.csv')
+        
+        self.logger.info("\nParticipant Summary:")
+        self.logger.info(f"Total participants: {len(participant_summary)}")
+        self.logger.info(f"Average days per participant: {participant_summary['total_days'].mean():.1f}")
+        self.logger.info(f"Average good quality data percentage: {participant_summary['good_quality_percent'].mean():.1f}%")
+        self.logger.info(f"Average early morning responses per participant: {participant_summary['early_morning_responses'].mean():.1f}")
 
     def process(self):
         """Run the complete preprocessing pipeline"""
         try:
-            # Load all required data
             self.load_data()
-            
-            # Create daily summaries
-            gps_summary_df = self.create_daily_summaries()
-            
-            # Create preprocessed files
-            self.create_preprocessed_files(gps_summary_df)
-            
-            # Save summary files
-            self.save_summaries(gps_summary_df)
-            
-            return gps_summary_df
+            self.create_preprocessed_files()
+            self.logger.info("Preprocessing completed successfully")
             
         except Exception as e:
             self.logger.error(f"Error in preprocessing: {str(e)}")
             raise
 
 def main():
-    # Define paths
+    # Define paths (modify these as needed)
     RAW_GPS_PATH = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/Survey/csv/gpsappS_9.1_excel.csv'
     EMA_PATH = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/Survey/csv/End_of_the_day_questionnaire.csv'
     OUTPUT_DIR = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/preprocessed_summaries'
@@ -309,8 +359,11 @@ def main():
         output_dir=OUTPUT_DIR
     )
     
-    gps_summary_df = preprocessor.process()
-    print("Preprocessing completed successfully")
+    preprocessor.process()
 
 if __name__ == "__main__":
     main()
+
+
+
+    
