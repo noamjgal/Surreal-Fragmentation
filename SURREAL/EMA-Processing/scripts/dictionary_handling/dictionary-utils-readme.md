@@ -1,6 +1,6 @@
 # EMA Response Dictionary Construction Utilities
 
-This folder contains the utilities used to construct and validate the response dictionaries and mappings used in the main EMA processing pipeline. These scripts document the process of creating standardized response mappings across different EMA versions and languages. They are *not used in the main pipeline*, but are kept for documentation and potential future updates.
+This folder contains the utilities used to construct and validate the response dictionaries and mappings used in the main EMA processing pipeline. These scripts document the process of creating standardized response mappings across different EMA versions and languages. They are **not used in the main pipeline**, but are kept for documentation and potential future updates.
 
 ## Core Files
 

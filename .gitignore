@@ -6,3 +6,12 @@ __pycache__
 *output*
 SURREAL/EMA-Processing/data
 *.log
+*.png
+*.csv
+*.xlsx
+*.xls
+*.json
+*.pkl
+*.h5
+*.joblib
+*.joblib

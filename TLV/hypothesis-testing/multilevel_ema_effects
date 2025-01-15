@@ -94,16 +94,6 @@ class FragmentationAnalysis:
             if metric in df.columns:
                 df[f'{metric}_zscore'] = stats.zscore(df[metric], nan_policy='omit')
         
-        # Calculate tertiles for relevant metrics
-        for metric in self.fragmentation_metrics['raw']:
-            if metric in df.columns:
-                df[f'{metric}_tertile'] = pd.qcut(
-                    df[metric].dropna(),
-                    q=3,
-                    labels=['low', 'medium', 'high'],
-                    duplicates='drop'
-                )
-        
         self.data = df
         return df
 
@@ -138,18 +128,6 @@ class FragmentationAnalysis:
                         )
                     except Exception as e:
                         self.logger.error(f"Error in model: {str(e)}")
-                        
-                    # Add tertile analysis if available
-                    if f'{metric_raw}_tertile' in self.data.columns:
-                        try:
-                            self._run_tertile_model(
-                                dv=emotion,
-                                pred=metric_raw,
-                                controls=controls,
-                                model_name=f"Step {step} Tertile"
-                            )
-                        except Exception as e:
-                            self.logger.error(f"Error in tertile model: {str(e)}")
         
         # 2. Secondary Analysis: Episode Counts and Duration Effects
         for metric in self.episode_metrics + self.duration_metrics:
@@ -245,46 +223,6 @@ class FragmentationAnalysis:
             self.logger.error(f"Model fitting failed: {str(e)}")
             self.logger.error(f"Variables in data: {current_data.columns.tolist()}")
 
-    def _run_tertile_model(self, dv, pred, controls=None, model_name=""):
-        """Run model with tertile interactions"""
-        if controls is None:
-            controls = []
-            
-        model_vars = [dv, pred, f'{pred}_tertile'] + controls + ['user']
-        current_data = self.data[model_vars].dropna()
-        
-        # Prepare variables including tertile interactions
-        within_pred, between_pred = self.prepare_within_between_data(
-            current_data, pred
-        )
-        current_data['within_pred'] = within_pred
-        current_data['between_pred'] = between_pred
-        
-        # Build formula with tertile interactions
-        formula = (f"{dv} ~ within_pred * C({pred}_tertile) + between_pred + "
-                  f"{' + '.join(controls)} + (1|user)")
-        
-        # Fit model and store results
-        model = smf.mixedlm(formula, data=current_data, groups='user')
-        results = model.fit()
-        
-        # Extract and store interaction results
-        result_dict = {
-            'dependent_var': dv,
-            'predictor': pred,
-            'model': f"{model_name} (Tertile)",
-            'n_observations': len(current_data),
-            'n_participants': current_data['user'].nunique()
-        }
-        
-        # Add interaction terms
-        for param in results.params.index:
-            if 'within_pred:' in param:
-                result_dict[f'interaction_{param}'] = results.params[param]
-                result_dict[f'interaction_{param}_p'] = results.pvalues[param]
-        
-        self.results.append(result_dict)
-
     def prepare_within_between_data(self, data, var):
         """Prepare within and between person components"""
         participant_means = data.groupby('user')[var].transform('mean')
@@ -353,3 +291,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+					
