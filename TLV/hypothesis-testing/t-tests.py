@@ -52,27 +52,30 @@ class FragmentationComparison:
         df = df[df['data_quality'] == 'good'].copy()
         self.data = df
         return df
-
+        
     def get_descriptive_stats(self, split_type='quartile'):
-        """Calculate descriptive statistics for high vs low groups"""
+        """Calculate descriptive statistics for high vs low groups using all observations"""
         stats_results = []
         
         for pred in self.predictor_cols:
-            # Calculate participant means
-            participant_means = self.data.groupby('user')[pred].mean()
-            
-            # Get split point based on type
+            # Calculate overall threshold for splitting observations
             if split_type == 'quartile':
-                split_point = participant_means.quantile(0.75)
+                split_point = self.data[pred].quantile(0.75)
                 split_name = '75th percentile'
             else:  # median
-                split_point = participant_means.median()
+                split_point = self.data[pred].median()
                 split_name = 'median'
             
-            # Identify high/low fragmentation participants
-            high_frag_users = participant_means[participant_means > split_point].index
-            high_frag_data = self.data[self.data['user'].isin(high_frag_users)]
-            low_frag_data = self.data[~self.data['user'].isin(high_frag_users)]
+            # Split observations directly based on threshold
+            high_frag_data = self.data[self.data[pred] > split_point]
+            low_frag_data = self.data[self.data[pred] <= split_point]
+            
+            # Calculate unique participants in each group
+            high_frag_users = high_frag_data['user'].unique()
+            low_frag_users = low_frag_data['user'].unique()
+            
+            # Account for users that appear in both groups
+            overlap_users = set(high_frag_users) & set(low_frag_users)
             
             stats_results.append({
                 'predictor': pred,
@@ -84,48 +87,48 @@ class FragmentationComparison:
                 'high_frag_std': high_frag_data[pred].std(),
                 'low_frag_mean': low_frag_data[pred].mean(),
                 'low_frag_std': low_frag_data[pred].std(),
-                'n_high_frag_participants': len(high_frag_users),
-                'n_low_frag_participants': len(participant_means.index) - len(high_frag_users),
                 'n_high_frag_observations': len(high_frag_data),
-                'n_low_frag_observations': len(low_frag_data)
+                'n_low_frag_observations': len(low_frag_data),
+                'n_unique_high_frag_participants': len(high_frag_users),
+                'n_unique_low_frag_participants': len(low_frag_users),
+                'n_participants_in_both': len(overlap_users)
             })
         
         return pd.DataFrame(stats_results)
 
     def run_emotion_comparisons(self, split_type='quartile'):
-        """Compare emotional outcomes between high/low fragmentation groups"""
+        """Compare emotional outcomes between high/low fragmentation groups using all observations"""
         results = []
         
         for pred in self.predictor_cols:
-            # Calculate participant means
-            participant_means = self.data.groupby('user')[pred].mean()
-            
-            # Get split point based on type
+            # Calculate split point based on all observations
             if split_type == 'quartile':
-                split_point = participant_means.quantile(0.75)
+                split_point = self.data[pred].quantile(0.75)
             else:  # median
-                split_point = participant_means.median()
+                split_point = self.data[pred].median()
             
-            # Identify groups
-            high_frag_users = participant_means[participant_means > split_point].index
+            # Split observations directly
+            high_frag_mask = self.data[pred] > split_point
             
             for emotion in self.emotion_cols:
-                # Get participant-level emotion means
-                emotion_means = self.data.groupby('user')[emotion].mean()
+                # Get all observations for each group
+                high_frag_emotions = self.data[high_frag_mask][emotion].dropna()
+                low_frag_emotions = self.data[~high_frag_mask][emotion].dropna()
                 
-                # Compare high vs low fragmentation groups
-                high_frag_emotions = emotion_means[high_frag_users]
-                low_frag_emotions = emotion_means[~emotion_means.index.isin(high_frag_users)]
-                
-                # Run t-test
+                # Run t-test on all observations
                 t_stat, p_val = stats.ttest_ind(
-                    high_frag_emotions.dropna(),
-                    low_frag_emotions.dropna()
+                    high_frag_emotions,
+                    low_frag_emotions
                 )
                 
-                # Calculate effect size
-                pooled_std = np.sqrt((high_frag_emotions.std()**2 + low_frag_emotions.std()**2) / 2)
+                # Calculate effect size using all observations
+                pooled_std = np.sqrt((high_frag_emotions.var() + low_frag_emotions.var()) / 2)
                 cohens_d = (high_frag_emotions.mean() - low_frag_emotions.mean()) / pooled_std if pooled_std != 0 else np.nan
+                
+                # Count unique participants in each group for this emotion
+                high_frag_users = self.data[high_frag_mask & self.data[emotion].notna()]['user'].unique()
+                low_frag_users = self.data[~high_frag_mask & self.data[emotion].notna()]['user'].unique()
+                overlap_users = set(high_frag_users) & set(low_frag_users)
                 
                 results.append({
                     'predictor': pred,
@@ -138,8 +141,11 @@ class FragmentationComparison:
                     'high_frag_std': high_frag_emotions.std(),
                     'low_frag_std': low_frag_emotions.std(),
                     'cohens_d': cohens_d,
-                    'n_high': len(high_frag_emotions),
-                    'n_low': len(low_frag_emotions)
+                    'n_high_observations': len(high_frag_emotions),
+                    'n_low_observations': len(low_frag_emotions),
+                    'n_unique_high_participants': len(high_frag_users),
+                    'n_unique_low_participants': len(low_frag_users),
+                    'n_participants_in_both': len(overlap_users)
                 })
         
         return pd.DataFrame(results)
@@ -171,12 +177,8 @@ class FragmentationComparison:
         
         with pd.ExcelWriter(self.output_dir / f'fragmentation_analysis_{timestamp}.xlsx') as writer:
             desc_stats.to_excel(writer, sheet_name='Descriptive Stats', index=False)
-            
-            # Save emotion comparisons separately for each split type
             quartile_results.to_excel(writer, sheet_name='Quartile Comparisons', index=False)
             median_results.to_excel(writer, sheet_name='Median Comparisons', index=False)
-            
-            # Save combined results
             emotion_results.to_excel(writer, sheet_name='All Comparisons', index=False)
         
         # Log summary statistics
@@ -186,10 +188,14 @@ class FragmentationComparison:
             
             self.logger.info(f"\n{split_type.capitalize()} Split Analysis:")
             self.logger.info(f"Found {len(sig_results)} significant relationships (p < 0.05):")
-            self.logger.info(sig_results[['predictor', 'emotion', 'p_value', 'cohens_d']])
+            for _, row in sig_results.iterrows():
+                self.logger.info(
+                    f"{row['predictor']} -> {row['emotion']}: "
+                    f"t={row['t_statistic']:.2f}, p={row['p_value']:.3f}, d={row['cohens_d']:.2f}, "
+                    f"n_high={row['n_high_observations']}, n_low={row['n_low_observations']}"
+                )
 
 def main():
-    
     input_path = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/metrics/combined_metrics.csv'
     output_dir = '/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/analysis_results'
     
@@ -200,4 +206,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
