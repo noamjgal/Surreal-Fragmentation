@@ -34,7 +34,7 @@ class FragmentationComparison:
         self._setup_logging()
         
     def _setup_logging(self):
-        log_path = self.output_dir / 'fragmentation_analysis.log'
+        log_path = self.output_dir / 'frag_t_tests.log'
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
@@ -175,7 +175,7 @@ class FragmentationComparison:
         # Save results
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         
-        with pd.ExcelWriter(self.output_dir / f'fragmentation_analysis_{timestamp}.xlsx') as writer:
+        with pd.ExcelWriter(self.output_dir / f'frag_t_tests_{timestamp}.xlsx') as writer:
             desc_stats.to_excel(writer, sheet_name='Descriptive Stats', index=False)
             quartile_results.to_excel(writer, sheet_name='Quartile Comparisons', index=False)
             median_results.to_excel(writer, sheet_name='Median Comparisons', index=False)

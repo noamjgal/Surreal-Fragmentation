@@ -66,11 +66,6 @@ class FragmentationAnalysis:
             'overlap_total_duration_minutes'
         ]
         
-        self.cv_metrics = [
-            'digital_cv',
-            'moving_cv'
-        ]
-        
         # Define outcome variables
         self.emotion_components = [
             'TENSE',
@@ -142,20 +137,6 @@ class FragmentationAnalysis:
                     )
                 except Exception as e:
                     self.logger.error(f"Error in episode/duration model: {str(e)}")
-        
-        # 3. Variability Analysis using CV metrics
-        for cv_metric in self.cv_metrics:
-            for emotion in self.emotion_components:
-                self.logger.info(f"\nAnalyzing {emotion} ~ {cv_metric}")
-                try:
-                    self._run_single_model(
-                        dv=emotion,
-                        pred_raw=cv_metric,
-                        controls=['is_weekend'],
-                        model_name="CV Analysis"
-                    )
-                except Exception as e:
-                    self.logger.error(f"Error in CV model: {str(e)}")
 
     def _run_single_model(self, dv, pred_raw, pred_z=None, controls=None, model_name=""):
         """Run a single multilevel model with given parameters"""
@@ -194,17 +175,63 @@ class FragmentationAnalysis:
         self.logger.info(f"Formula: {formula}")
         self.logger.info(f"Data shape: {current_data.shape}")
         
-        # Fit model
+        # Fit model with more robust settings
         try:
+            # Add check for variance in random effects
+            group_means = current_data.groupby('user')[dv].mean()
+            group_var = group_means.var()
+            if group_var < 1e-6:  # threshold for meaningful variance
+                self.logger.warning(f"Very low between-person variance ({group_var:.6f}) for {dv}")
+            
+            # Add correlation check between predictors
+            if controls:
+                pred_vars = [pred_raw] + controls
+                corr_matrix = current_data[pred_vars].corr()
+                high_corr = np.where(np.abs(corr_matrix) > 0.7)
+                if len(high_corr[0]) > len(pred_vars):  # more correlations than just diagonal
+                    self.logger.warning(f"High correlations detected between predictors")
+                    for i, j in zip(*high_corr):
+                        if i < j:  # avoid printing both (i,j) and (j,i)
+                            self.logger.warning(f"Correlation between {pred_vars[i]} and {pred_vars[j]}: {corr_matrix.iloc[i,j]:.3f}")
+            
             model = smf.mixedlm(formula, data=current_data, groups='user')
-            results = model.fit()
+            results = model.fit(reml=True, method=['lbfgs', 'nm', 'cg'], maxiter=1000)
+            
+            # Check convergence
+            if not results.converged:
+                self.logger.warning(f"Model did not converge for {dv} ~ {pred_raw}")
+                return
+            
+            # Verify model results are valid
+            if np.isnan(results.llf) or np.isinf(results.llf):
+                self.logger.warning(f"Invalid log-likelihood for {dv} ~ {pred_raw}")
+                return
+                
+            # Calculate AIC and BIC manually if needed
+            n = len(current_data)
+            k = len(results.params)  # number of parameters
+            llf = results.llf  # log-likelihood
+            
+            aic = 2 * k - 2 * llf
+            bic = k * np.log(n) - 2 * llf
+            
+            # Log detailed model diagnostics
+            self.logger.info(f"""
+            Model diagnostics for {dv} ~ {pred_raw}:
+            - Log-likelihood: {llf:.2f}
+            - Number of parameters: {k}
+            - Sample size: {n}
+            - AIC (calculated): {aic:.2f}
+            - BIC (calculated): {bic:.2f}
+            - Converged: {results.converged}
+            """)
             
             # Store results
             result_dict = {
                 'dependent_var': dv,
                 'predictor': pred_raw,
                 'model': model_name,
-                'n_observations': len(current_data),
+                'n_observations': n,
                 'n_participants': current_data['user'].nunique(),
                 'within_coef': results.params['within_pred'],
                 'within_se': results.bse['within_pred'],
@@ -212,12 +239,19 @@ class FragmentationAnalysis:
                 'between_coef': results.params['between_pred'],
                 'between_se': results.bse['between_pred'],
                 'between_p': results.pvalues['between_pred'],
-                'aic': results.aic,
-                'bic': results.bic,
+                'aic': float(aic),  # Use manually calculated AIC
+                'bic': float(bic),  # Use manually calculated BIC
+                'converged': results.converged,
                 'controls': ', '.join(controls) if controls else 'None'
             }
             
             self.results.append(result_dict)
+            
+            # Add relative model comparison metrics
+            if hasattr(self, 'previous_aic'):
+                delta_aic = aic - self.previous_aic
+                self.logger.info(f"Change in AIC from previous model: {delta_aic:.2f}")
+            self.previous_aic = aic
             
         except Exception as e:
             self.logger.error(f"Model fitting failed: {str(e)}")
@@ -259,7 +293,7 @@ class FragmentationAnalysis:
             results_df.to_excel(writer, sheet_name='All Results', index=False)
             
             # Create summary sheets by analysis type
-            for analysis_type in ['Fragmentation', 'Episodes', 'Duration', 'CV']:
+            for analysis_type in ['Fragmentation', 'Episodes', 'Duration']:
                 mask = results_df['model'].str.contains(analysis_type, case=False, na=False)
                 if mask.any():
                     subset = results_df[mask]
