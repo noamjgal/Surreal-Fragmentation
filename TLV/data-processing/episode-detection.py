@@ -14,7 +14,7 @@ class EpisodeDetector:
                  moving_settings: Dict = None):
         """Initialize episode detector with configurable settings"""
         self.digital_settings = digital_settings or {
-            'min_duration': timedelta(minutes=1),
+            'min_duration': timedelta(seconds=20),
             'merge_gap': timedelta(minutes=1),
             'max_gap': timedelta(minutes=5)
         }
@@ -74,22 +74,43 @@ class EpisodeDetector:
             raise
 
     def _extract_digital_episodes(self, df: pd.DataFrame) -> List[Tuple]:
-        """Extract digital episodes from StartEnd markers"""
+        """Extract digital episodes from StartEnd markers and App usage"""
         episodes = []
         start_time = None
+        in_digital = False
         
-        # Find Start and End events
+        # Find Start and End events or App usage
         for idx, row in df.iterrows():
             timestamp = row['Timestamp']
             
+            # Check primary StartEnd marker
+            is_digital = False
             if isinstance(row.get('StartEnd'), str):
                 if 'Start' in row['StartEnd']:
+                    is_digital = True
                     start_time = timestamp
-                elif 'End' in row['StartEnd'] and start_time is not None:
-                    duration = timestamp - start_time
-                    if duration >= self.digital_settings['min_duration']:
-                        episodes.append((start_time, timestamp))
+                elif 'End' in row['StartEnd']:
+                    is_digital = False
+                    if start_time is not None:
+                        duration = timestamp - start_time
+                        if duration >= self.digital_settings['min_duration']:
+                            episodes.append((start_time, timestamp))
                     start_time = None
+            
+            # Backup check: App usage
+            if isinstance(row.get('App'), str) and row['App'] != 'No use':
+                is_digital = True
+            
+            # Handle transitions based on App usage
+            if is_digital and not in_digital:
+                start_time = timestamp
+            elif not is_digital and in_digital and start_time is not None:
+                duration = timestamp - start_time
+                if duration >= self.digital_settings['min_duration']:
+                    episodes.append((start_time, timestamp))
+                start_time = None
+            
+            in_digital = is_digital
         
         # Handle any unclosed episode
         if start_time is not None:
@@ -100,26 +121,32 @@ class EpisodeDetector:
         return self._merge_episodes(episodes, self.digital_settings['merge_gap'])
 
     def _extract_moving_episodes(self, df: pd.DataFrame) -> Tuple[List[Tuple], Counter]:
-        """Extract moving episodes from Travel_mode and speed as fallback"""
+        """Extract moving episodes from Travel_mode and speed"""
         episodes = []
         start_time = None
         travel_modes = Counter()
-        
         prev_mode = None
-        episode_mode = None
         
         for idx, row in df.iterrows():
             timestamp = row['Timestamp']
             
-            # Check Travel_mode first, fall back to speed if Missing
-            if row['Travel_mode'] == 'Missing':
-                is_moving = row['speed'] > 1.0
-                if is_moving:
-                    travel_modes['Speed > 1 (Missing)'] += 1
-            else:
+            # Primary check: Travel_mode
+            is_moving = False
+            if row['Travel_mode'] != 'Missing':
                 is_moving = row['Travel_mode'] != 'Staying'
                 if is_moving:
                     travel_modes[row['Travel_mode']] += 1
+            
+            # Backup checks
+            if not is_moving:
+                # Check speed > 3 (more conservative threshold)
+                if pd.notna(row['speed']) and row['speed'] > 3.0:
+                    is_moving = True
+                    travel_modes['Speed > 3'] += 1
+                # If speed > 2 and Travel_mode was Missing (changed from > 1)
+                elif row['Travel_mode'] == 'Missing' and pd.notna(row['speed']) and row['speed'] > 2.0:
+                    is_moving = True
+                    travel_modes['Speed > 2 (Missing)'] += 1  # Updated counter label
             
             if is_moving and prev_mode != 'moving':
                 start_time = timestamp
@@ -294,3 +321,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+

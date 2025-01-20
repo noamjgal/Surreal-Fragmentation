@@ -20,6 +20,16 @@ class MetricsProcessor:
         self.base_dir = Path(base_dir)
         self.output_dir = self.base_dir / 'metrics'
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Data quality thresholds
+        self.quality_thresholds = {
+            'min_digital_episodes': 2,
+            'min_moving_episodes': 2,
+            'min_digital_duration': 30,  # minutes
+            'min_coverage_hours': 6,
+            'min_overlap_episodes': 1
+        }
+        
         self._setup_logging()
         
     def _setup_logging(self):
@@ -33,6 +43,41 @@ class MetricsProcessor:
             ]
         )
         self.logger = logging.getLogger(__name__)
+
+    def _validate_data_quality(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Filter out rows with insufficient data quality based on episode counts and durations.
+        
+        Args:
+            df: DataFrame with combined metrics
+            
+        Returns:
+            DataFrame with only valid rows meeting quality thresholds
+        """
+        # Create mask for valid data
+        valid_data = (
+            (df['digital_episode_count'] >= self.quality_thresholds['min_digital_episodes']) &
+            (df['moving_episode_count'] >= self.quality_thresholds['min_moving_episodes']) &
+            (df['digital_total_duration'] >= self.quality_thresholds['min_digital_duration']) &
+            (df['coverage_hours'] >= self.quality_thresholds['min_coverage_hours']) &
+            (df['overlap_num_episodes'] >= self.quality_thresholds['min_overlap_episodes'])  # new condition
+        )
+        
+        # Log excluded data
+        excluded = ~valid_data
+        if excluded.any():
+            self.logger.warning(f"\nExcluded {excluded.sum()} rows due to insufficient data quality:")
+            self.logger.warning(f"Low digital episodes: {(df['digital_episode_count'] < self.quality_thresholds['min_digital_episodes']).sum()}")
+            self.logger.warning(f"Low moving episodes: {(df['moving_episode_count'] < self.quality_thresholds['min_moving_episodes']).sum()}")
+            self.logger.warning(f"Low digital duration: {(df['digital_total_duration'] < self.quality_thresholds['min_digital_duration']).sum()}")
+            self.logger.warning(f"Low coverage hours: {(df['coverage_hours'] < self.quality_thresholds['min_coverage_hours']).sum()}")
+            self.logger.warning(f"Low overlap episodes: {(df['overlap_num_episodes'] < self.quality_thresholds['min_overlap_episodes']).sum()}")  # new log
+            
+            # Save excluded data for analysis
+            excluded_df = df[excluded].copy()
+            excluded_df.to_csv(self.output_dir / 'excluded_data.csv', index=False)
+            
+        return df[valid_data].copy()
 
     def process_ema_scores(self, ema_df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -145,8 +190,7 @@ class MetricsProcessor:
                 suffixes=('', '_episode')
             )
             
-            # Merge EMA data using Participant_ID and timestamp matching
-            # Convert timestamps to the same format before merging
+            # Merge EMA data
             merged_df = pd.merge(
                 merged_df,
                 processed_ema,
@@ -168,7 +212,10 @@ class MetricsProcessor:
             merged_df['weekday'] = pd.to_datetime(merged_df['associated_data_date']).dt.dayofweek
             merged_df['is_weekend'] = merged_df['weekday'].isin([5, 6]).astype(int)
             
-            # Calculate z-scores for key metrics with better error handling
+            # Apply data quality validation
+            merged_df = self._validate_data_quality(merged_df)
+            
+            # Calculate z-scores for key metrics
             metric_cols = [
                 'digital_fragmentation_index',
                 'moving_fragmentation_index',
@@ -178,46 +225,28 @@ class MetricsProcessor:
                 'STAI6_score'
             ]
             
-            # Log metrics availability
-            self.logger.info("\nMetrics availability check:")
-            for col in metric_cols:
-                if col in merged_df.columns:
-                    non_null = merged_df[col].notna().sum()
-                    total = len(merged_df)
-                    self.logger.info(f"{col}: {non_null}/{total} non-null values ({(non_null/total)*100:.1f}%)")
-                else:
-                    self.logger.warning(f"Missing metric column: {col}")
-
-            # Calculate z-scores with proper handling of NaN values
+            # Calculate z-scores only on validated data
             for col in metric_cols:
                 if col in merged_df.columns:
                     valid_data = merged_df[col].dropna()
                     if len(valid_data) > 0:
                         mean = valid_data.mean()
                         std = valid_data.std()
-                        if std > 0:  # Avoid division by zero
+                        if std > 0:
                             merged_df[f'{col}_zscore'] = (merged_df[col] - mean) / std
                         else:
                             self.logger.warning(f"Zero standard deviation for {col}, skipping z-score calculation")
-                    else:
-                        self.logger.warning(f"No valid data for {col}, skipping z-score calculation")
-
-            # Verify z-score columns
-            zscore_cols = [col for col in merged_df.columns if col.endswith('_zscore')]
-            self.logger.info("\nCreated z-score columns:")
-            for col in zscore_cols:
-                non_null = merged_df[col].notna().sum()
-                total = len(merged_df)
-                self.logger.info(f"{col}: {non_null}/{total} non-null values ({(non_null/total)*100:.1f}%)")
-
-            # Save the combined dataset
+            
+            # Save the filtered dataset
             output_path = self.output_dir / 'combined_metrics.csv'
             merged_df.to_csv(output_path, index=False)
             
             # Generate summary statistics
             self._generate_summary_statistics(merged_df)
             
-            self.logger.info(f"Successfully combined metrics and saved to {output_path}")
+            self.logger.info(f"Successfully combined and filtered metrics. Saved to {output_path}")
+            self.logger.info(f"Final dataset contains {len(merged_df)} rows")
+            
             return merged_df
             
         except Exception as e:
@@ -256,6 +285,7 @@ class MetricsProcessor:
         self.logger.info(f"Days with good quality data: {(df['data_quality'] == 'good').sum()}")
         self.logger.info(f"Early morning responses: {df['is_early_morning'].sum()}")
 
+   
 def main():
     # Define base directory
     base_dir = Path('/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon')  # Update this path
@@ -272,4 +302,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

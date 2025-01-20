@@ -10,7 +10,7 @@ from typing import Dict, List, Tuple, Optional
 
 class FragmentationAnalyzer:
     def __init__(self, 
-                 min_episodes: int = 3,
+                 min_episodes: int = 1,
                  max_episode_duration: float = 24 * 60,  # 24 hours in minutes
                  outlier_threshold: float = 3.0):  # Standard deviations for outlier detection
         """
@@ -105,7 +105,7 @@ class FragmentationAnalyzer:
         
         # Calculate base fragmentation index
         if S == 1:
-            frag_index = 0
+            frag_index = 0  # Single episode means no fragmentation
         else:
             frag_index = (1 - sum_squared) / (1 - (1/S))
             
