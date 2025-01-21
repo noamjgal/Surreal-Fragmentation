@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Complete Statistical Analysis Dashboard</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.7.0/chart.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .section {
+            margin-bottom: 30px;
+        }
+        .chart-container {
+            background-color: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .chart-title {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: #333;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+        }
+        h2 {
+            color: #444;
+            border-bottom: 2px solid #ddd;
+            padding-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Complete Statistical Analysis Results</h1>
+
+    <div class="section">
+        <h2>Moving Fragmentation Index Comparisons</h2>
+        <div class="grid">
+            <div class="chart-container">
+                <div class="chart-title">School Location - Moving Fragmentation</div>
+                <canvas id="movingFragSchool"></canvas>
+            </div>
+            <div class="chart-container">
+                <div class="chart-title">Gender - Moving Fragmentation</div>
+                <canvas id="movingFragGender"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Digital Fragmentation Comparisons</h2>
+        <div class="grid">
+            <div class="chart-container">
+                <div class="chart-title">School Location - Digital Fragmentation Index</div>
+                <canvas id="digitalFragSchool"></canvas>
+            </div>
+            <div class="chart-container">
+                <div class="chart-title">School Location - Digital Frag During Mobility</div>
+                <canvas id="digitalFragMobilitySchool"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Temporal and Class Comparisons</h2>
+        <div class="grid">
+            <div class="chart-container">
+                <div class="chart-title">Weekend Effect - Digital Frag During Mobility</div>
+                <canvas id="digitalFragWeekend"></canvas>
+            </div>
+            <div class="chart-container">
+                <div class="chart-title">Class Comparison - Moving Total Duration</div>
+                <canvas id="classDuration"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Tooltip callback function for comprehensive stats
+        function getTooltipLabel(context, extra) {
+            const value = context.raw;
+            const stats = extra[context.dataIndex];
+            return [
+                `Mean: ${value.toFixed(3)}`,
+                `SD: ${stats.sd.toFixed(3)}`,
+                `n: ${stats.n}`
+            ];
+        }
+
+        // Moving Fragmentation - School Location
+        new Chart(document.getElementById('movingFragSchool'), {
+            type: 'bar',
+            data: {
+                labels: ['Suburb', 'City Center'],
+                datasets: [{
+                    label: 'Mean',
+                    data: [0.919, 0.972],
+                    backgroundColor: 'rgba(54, 162, 235, 0.5)',
+                    borderColor: 'rgba(54, 162, 235, 1)',
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                plugins: {
+                    tooltip: {
+                        callbacks: {
+                            label: (context) => getTooltipLabel(context, [
+                                {sd: 0.09, n: 61},
+                                {sd: 0.019, n: 38}
+                            ])
+                        }
+                    },
+                    title: {
+                        display: true,
+                        text: 't = -3.529, p = 0.001, Cohen\'s d = 0.811'
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: false,
+                        min: 0.8,
+                        max: 1.0
+                    }
+                }
+            }
+        });
+
+        // Moving Fragmentation - Gender
+        new Chart(document.getElementById('movingFragGender'), {
+            type: 'bar',
+            data: {
+                labels: ['Female', 'Male'],
+                datasets: [{
+                    label: 'Mean',
+                    data: [0.931, 0.966],
+                    backgroundColor: 'rgba(255, 99, 132, 0.5)',
+                    borderColor: 'rgba(255, 99, 132, 1)',
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                plugins: {
+                    tooltip: {
+                        callbacks: {
+                            label: (context) => getTooltipLabel(context, [
+                                {sd: 0.085, n: 75},
+                                {sd: 0.02, n: 24}
+                            ])
+                        }
+                    },
+                    title: {
+                        display: true,
+                        text: 't = -1.989, p = 0.050, Cohen\'s d = 0.569'
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: false,
+                        min: 0.8,
+                        max: 1.0
+                    }
+                }
+            }
+        });
+
+        // Digital Fragmentation Index - School
+        new Chart(document.getElementById('digitalFragSchool'), {
+            type: 'bar',
+            data: {
+                labels: ['Suburb', 'City Center'],
+                datasets: [{
+                    label: 'Mean',
+                    data: [0.949, 0.962],
+                    backgroundColor: 'rgba(75, 192, 192, 0.5)',
+                    borderColor: 'rgba(75, 192, 192, 1)',
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                plugins: {
+                    tooltip: {
+                        callbacks: {
+                            label: (context) => getTooltipLabel(context, [
+                                {sd: 0.031, n: 61},
+                                {sd: 0.019, n: 38}
+                            ])
+                        }
+                    },
+                    title: {
+                        display: true,
+                        text: 't = -2.184, p = 0.031, Cohen\'s d = 0.479'
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: false,
+                        min: 0.9,
+                        max: 1.0
+                    }
+                }
+            }
+        });
+
+        // Digital Fragmentation During Mobility - School
+        new Chart(document.getElementById('digitalFragMobilitySchool'), {
+            type: 'bar',
+            data: {
+                labels: ['Suburb', 'City Center'],
+                datasets: [{
+                    label: 'Mean',
+                    data: [0.859, 0.932],
+                    backgroundColor: 'rgba(153, 102, 255, 0.5)',
+                    borderColor: 'rgba(153, 102, 255, 1)',
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                plugins: {
+                    tooltip: {
+                        callbacks: {
+                            label: (context) => getTooltipLabel(context, [
+                                {sd: 0.123, n: 52},
+                                {sd: 0.057, n: 28}
+                            ])
+                        }
+                    },
+                    title: {
+                        display: true,
+                        text: 't = -2.933, p = 0.004, Cohen\'s d = 0.760'
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: false,
+                        min: 0.8,
+                        max: 1.0
+                    }
+                }
+            }
+        });
+
+        // Digital Fragmentation During Mobility - Weekend
+        new Chart(document.getElementById('digitalFragWeekend'), {
+            type: 'bar',
+            data: {
+                labels: ['Weekday', 'Weekend'],
+                datasets: [{
+                    label: 'Mean',
+                    data: [0.903, 0.816],
+                    backgroundColor: 'rgba(255, 159, 64, 0.5)',
+                    borderColor: 'rgba(255, 159, 64, 1)',
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                plugins: {
+                    tooltip: {
+                        callbacks: {
+                            label: (context) => getTooltipLabel(context, [
+                                {sd: 0.083, n: 63},
+                                {sd: 0.16, n: 17}
+                            ])
+                        }
+                    },
+                    title: {
+                        display: true,
+                        text: 't = 3.024, p = 0.003, Cohen\'s d = 0.685'
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: false,
+                        min: 0.7,
+                        max: 1.0
+                    }
+                }
+            }
+        });
+
+        // Moving Total Duration - Class
+        new Chart(document.getElementById('classDuration'), {
+            type: 'bar',
+            data: {
+                labels: ['Class 3', 'Class 2', 'Class 1'],
+                datasets: [{
+                    label: 'Mean Duration',
+                    data: [247.195, 167.301, 141.821],
+                    backgroundColor: 'rgba(54, 162, 235, 0.5)',
+                    borderColor: 'rgba(54, 162, 235, 1)',
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                plugins: {
+                    tooltip: {
+                        callbacks: {
+                            label: (context) => getTooltipLabel(context, [
+                                {sd: 161.112, n: 41},
+                                {sd: 133.095, n: 45},
+                                {sd: 72.834, n: 13}
+                            ])
+                        }
+                    },
+                    title: {
+                        display: true,
+                        text: 'F = 4.54, p = 0.013, η² = 0.086'
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true
+                    }
+                }
+            }
+        });
+    </script>
+</body>
+</html>

@@ -42,7 +42,7 @@ class FragmentationGroupAnalysis:
         """Load and preprocess the data, keeping only good quality records"""
         self.logger.info(f"Loading data from {self.input_path}")
         df = pd.read_csv(self.input_path)
-        df = df[df['data_quality'] == 'good'].copy()
+        #df = df[df['data_quality'] == 'good'].copy()
         self.data = df
         return df
 
