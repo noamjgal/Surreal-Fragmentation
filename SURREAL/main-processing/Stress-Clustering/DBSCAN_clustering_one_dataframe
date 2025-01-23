@@ -1,0 +1,195 @@
+import pandas as pd
+from sklearn.cluster import DBSCAN
+import os
+import glob
+
+
+def detect_mos_clusters_dbscan_range(df, time_col='time_iso', mos_score_col='MOS_Score', min_score=0.5, max_score=1.0, eps=3, min_samples=3):
+    """
+    Detect clusters of moments of stress (MOS) in the given dataframe using DBSCAN based on a range of MOS_Score values.
+    
+    Args:
+        df (pandas.DataFrame): The input dataframe.
+        time_col (str): The name of the column containing the timestamp.
+        mos_score_col (str): The name of the column containing the MOS score.
+        min_score (float): The minimum MOS score value to consider for clustering.
+        max_score (float): The maximum MOS score value to consider for clustering.
+        eps (int): Max number of minutes between two samples for them to be considered as in the same neighborhood.
+        Note that no other clusters can form under within the neighborhood of a core point.
+        min_samples (int): The number of samples in a neighborhood for a point to be considered as a core point.
+        
+    Returns:
+        pandas.DataFrame: A dataframe containing the start and end times of each detected cluster along with the number of observations, number of stress observations, number of non-stress observations, and percentage of real stress observations in each cluster.
+    """
+    # Convert the time column to datetime
+    df[time_col] = pd.to_datetime(df[time_col])
+    
+    # Convert the time column to a numeric representation (minutes since the start of the study)
+    df['time_numeric'] = (df[time_col] - df[time_col].min()).dt.total_seconds() // 60
+    
+    # Filter only the MOS entries where MOS_Score is within the specified range
+    # This part updates the previous function to work with continuous valuables instead of Booleans
+    df_mos = df[(df[mos_score_col] >= min_score) & (df[mos_score_col] <= max_score)].copy()
+    
+    # Apply DBSCAN clustering to the filtered MOS observations
+    clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(df_mos[['time_numeric']])
+    
+    # Add cluster labels to the dataframe
+    df_mos.loc[:, 'cluster'] = clustering.labels_
+    
+    # Identify clusters (excluding noise)
+    clusters = df_mos[df_mos['cluster'] != -1].groupby('cluster')
+    
+    # Prepare the results by adding the start and end times for each cluster to a dataframe
+    cluster_df = []
+    for cluster_id, cluster_data in clusters:
+        start_time = cluster_data[time_col].min()
+        end_time = cluster_data[time_col].max()
+        cluster_df.append({'start_time': start_time, 'end_time': end_time, 'cluster_id': cluster_id})
+    # Convert to dataframe
+    cluster_df = pd.DataFrame(cluster_df)
+    
+    # Include all entries that fall within the clusters' start and end times
+    def assign_to_cluster(row):
+        for index, cluster in cluster_df.iterrows():
+            if cluster['start_time'] <= row[time_col] <= cluster['end_time']:
+                return cluster['cluster_id']
+        return -1  # Noise   
+    df['cluster'] = df.apply(assign_to_cluster, axis=1)
+    
+    # Calculate the number of observations, positive observations, and negative observations in each cluster
+    for cluster_id in cluster_df['cluster_id']:
+        
+        num_observations = df[df['cluster'] == cluster_id].shape[0]
+        num_positive = df[(df['cluster'] == cluster_id) & (df[mos_score_col] >= min_score) & (df[mos_score_col] <= max_score)].shape[0]
+        num_negative = num_observations - num_positive
+        percentage_true_positive = (num_positive / num_observations) * 100
+        cluster_df.loc[cluster_df['cluster_id'] == cluster_id, 'num_observations'] = num_observations
+        cluster_df.loc[cluster_df['cluster_id'] == cluster_id, 'num_positive_observations'] = num_positive
+        cluster_df.loc[cluster_df['cluster_id'] == cluster_id, 'num_negative_observations'] = num_negative
+        cluster_df.loc[cluster_df['cluster_id'] == cluster_id, 'percentage_true_positive'] = percentage_true_positive
+    
+    return cluster_df
+
+
+def detect_cold_spots_filtered(df, time_col='time_iso', mos_score_col='MOS_Score', min_duration=5):
+    # Convert the time column to datetime and sort
+    df[time_col] = pd.to_datetime(df[time_col])
+    df = df.sort_values(by=time_col)
+    
+    # Create a mask for rows where MOS_Score is 0
+    mask = df[mos_score_col] == 0
+    
+    # Create groups of consecutive 0s
+    groups = mask.ne(mask.shift()).cumsum()[mask]
+    
+    # Group the data
+    grouped = df[mask].groupby(groups)
+    
+    # Filter groups that are at least min_duration minutes long
+    cold_spots = grouped.filter(lambda x: (x[time_col].max() - x[time_col].min()).total_seconds() >= min_duration * 60)
+    
+    # Create the result dataframe
+    result = cold_spots.groupby(groups).agg({
+        time_col: ['min', 'max'],
+        mos_score_col: 'count'
+    }).reset_index(drop=True)
+    
+    result.columns = ['start_time', 'end_time', 'num_observations']
+    result['num_positive_observations'] = result['num_observations']
+    result['num_negative_observations'] = 0
+    result['percentage_true_positive'] = 100
+    
+    # Add cluster ID
+    result['cluster_id'] = range(len(result))
+    
+    # Reorder columns to put cluster_id first
+    result = result[['cluster_id', 'start_time', 'end_time', 'num_observations', 
+                     'num_positive_observations', 'num_negative_observations', 'percentage_true_positive']]
+    
+    return result
+
+def report_percentage(df, cluster_df):
+        # Print the percentage of all observations that are in a cluster
+        total_observations = df.shape[0]
+        observations_in_clusters = cluster_df['num_observations'].sum()
+        percentage_in_clusters = (observations_in_clusters / total_observations) * 100
+        print(f"Percentage of all observations that are in a cluster: {percentage_in_clusters:.2f}%")
+
+
+# runs function for every stress file in the input folder
+# adds output for each participant to an outputs file
+
+# file name of directory of participant data on your computer
+directory = "D:/SURREAL Backup/6 - Processed files/Processed/6_Empatica_processed"
+# file name of outputs file for cluster-data on your computer
+cluster_file = "D:/SURREAL Backup/6 - Processed files/Processed/6_Empatica_processed/Stress-Outputs-new/" 
+# error list
+error = []
+big_df = pd.DataFrame()
+
+
+for participant in os.listdir(directory): # loop through all the participant folders
+    # skips file that start with a . in order to avoid the hidden files such as .DS_Store
+    if participant.startswith('S'):
+        continue 
+    pID = participant.split("_", 1)[1] 
+
+    try:
+        print(pID)
+        # access data file
+        file = glob.glob(directory + '/P_' + pID + '/MOS_*_analysis_extended_output.csv', recursive=True)
+        path = str(file[0])
+        print(path)
+        df = pd.read_csv(path)
+        print('read')
+        df = df.head(100000)
+        print(df['MOS_Score'].value_counts())
+        # Call clustering function for the three stress ranges
+        
+        # replace with filtering for five minutes of continuous non-stress
+        try:
+            no_stress_cluster_df = detect_cold_spots_filtered(df, time_col='time_iso', mos_score_col='MOS_Score')
+            report_percentage(df, no_stress_cluster_df)
+            no_stress_cluster_df = no_stress_cluster_df.assign(cluster='no')
+            no_stress_cluster_df.to_csv(f'{cluster_file}/{pID}_no_stress_clusters.csv')
+            print(f'success for no_stress filtering for pID: {pID}')
+        except Exception as e:
+            print(f' The error with no_stress clustering for {pID} was:')
+            print(str(e))
+            error.append(pID) 
+        # continue
+        try:
+            regular_stress_cluster_df = detect_mos_clusters_dbscan_range(df, time_col='time_iso', mos_score_col='MOS_Score', min_score=0.5, max_score=1.0, eps=4, min_samples=3)
+            report_percentage(df, regular_stress_cluster_df)
+            regular_stress_cluster_df = regular_stress_cluster_df.assign(cluster='regular')
+            regular_stress_cluster_df.to_csv(f'{cluster_file}/{pID}_regular_stress_clusters.csv')
+            print(f'success for regular_stress for pID: {pID}')
+        except Exception as e:
+            print(f' The error with regular_stress clustering for {pID} was:')
+            print(str(e))  
+            error.append(pID) 
+        try:
+            high_stress_cluster_df = detect_mos_clusters_dbscan_range(df, time_col='time_iso', mos_score_col='MOS_Score', min_score=1.5, max_score=2, eps=4, min_samples=3)
+            report_percentage(df, high_stress_cluster_df)
+            high_stress_cluster_df = high_stress_cluster_df.assign(cluster='high_stress')
+            high_stress_cluster_df.to_csv(f'{cluster_file}/{pID}_high_stress_clusters.csv')
+            print(f'success for high_stress for pID: {pID}')
+        except Exception as e:
+            print(f' The error with high_stress clustering for {pID} was:')
+            print(str(e))
+            error.append(pID) 
+
+        big_df= pd.concat([no_stress_cluster_df, regular_stress_cluster_df, high_stress_cluster_df])
+        big_df = big_df.assign(participant_ID = pID)
+        big_df.to_csv(f'{cluster_file}/{pID}_all_clusters.csv')
+
+    except Exception as e:
+        print(f'error with {e}')    
+        error.append(pID)    
+
+print("There were errors with the following participants:")
+print(error)
+
+
+                                                  
