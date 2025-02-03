@@ -99,24 +99,16 @@ class FragmentationAnalyzer:
         total_duration = valid_episodes['duration'].sum()
         normalized_durations = valid_episodes['duration'] / total_duration
         
-        # Calculate fragmentation metrics
-        sum_squared = (normalized_durations ** 2).sum()
+        # Calculate fragmentation metrics using normalized entropy
         S = len(valid_episodes)
         
-        # Calculate base fragmentation index
         if S == 1:
-            frag_index = 0  # Single episode means no fragmentation
+            frag_index = 0.0  # Single episode means no fragmentation
         else:
-            frag_index = (1 - sum_squared) / (1 - (1/S))
-            
-            # Apply correction for very high values
-            if frag_index > 0.99:
-                # Calculate coefficient of variation
-                cv = std_duration / mean_duration
-                
-                # Apply correction based on variation in episode durations
-                if cv < 0.1:  # Very similar episodes
-                    frag_index = frag_index * (1 - (0.1 - cv))
+            # Calculate Shannon entropy
+            entropy = -np.sum(normalized_durations * np.log(normalized_durations))
+            # Normalize by maximum possible entropy (ln(S))
+            frag_index = entropy / np.log(S)
         
         self.stats[episode_type]['success'] += 1
         
@@ -124,9 +116,9 @@ class FragmentationAnalyzer:
             'fragmentation_index': frag_index,
             'episode_count': S,
             'total_duration': total_duration,
-            'mean_duration': mean_duration,
-            'std_duration': std_duration,
-            'cv': std_duration / mean_duration if mean_duration > 0 else np.nan,
+            'mean_duration': valid_episodes['duration'].mean(),
+            'std_duration': valid_episodes['duration'].std(),
+            'cv': valid_episodes['duration'].std() / valid_episodes['duration'].mean() if valid_episodes['duration'].mean() > 0 else np.nan,
             'status': 'success'
         }
 
