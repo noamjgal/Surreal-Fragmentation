@@ -60,6 +60,7 @@ class FragmentationAnalyzer:
             self.stats[episode_type]['insufficient_episodes'] += 1
             return {
                 'fragmentation_index': np.nan,
+                'old_fragmentation_index': np.nan,
                 'episode_count': len(episodes_df),
                 'total_duration': episodes_df['duration'].sum() if not episodes_df.empty else 0,
                 'status': 'insufficient_episodes'
@@ -75,6 +76,7 @@ class FragmentationAnalyzer:
             self.stats[episode_type]['invalid_duration'] += 1
             return {
                 'fragmentation_index': np.nan,
+                'old_fragmentation_index': np.nan,
                 'episode_count': len(valid_episodes),
                 'total_duration': valid_episodes['duration'].sum(),
                 'status': 'invalid_duration'
@@ -90,6 +92,7 @@ class FragmentationAnalyzer:
             self.stats[episode_type]['insufficient_episodes'] += 1
             return {
                 'fragmentation_index': np.nan,
+                'old_fragmentation_index': np.nan,
                 'episode_count': len(valid_episodes),
                 'total_duration': valid_episodes['duration'].sum(),
                 'status': 'insufficient_episodes_after_outlier_removal'
@@ -99,21 +102,26 @@ class FragmentationAnalyzer:
         total_duration = valid_episodes['duration'].sum()
         normalized_durations = valid_episodes['duration'] / total_duration
         
-        # Calculate fragmentation metrics using normalized entropy
+        # Calculate both indices
         S = len(valid_episodes)
         
-        if S == 1:
-            frag_index = 0.0  # Single episode means no fragmentation
-        else:
-            # Calculate Shannon entropy
+        # Original HHI-based calculation
+        old_index = 0.0
+        if S > 1:
+            hhi = np.sum(normalized_durations**2)
+            old_index = (1 - hhi) / (1 - 1/S)
+        
+        # New entropy-based calculation
+        new_index = 0.0
+        if S > 1:
             entropy = -np.sum(normalized_durations * np.log(normalized_durations))
-            # Normalize by maximum possible entropy (ln(S))
-            frag_index = entropy / np.log(S)
+            new_index = entropy / np.log(S)
         
         self.stats[episode_type]['success'] += 1
         
         return {
-            'fragmentation_index': frag_index,
+            'fragmentation_index': new_index,
+            'old_fragmentation_index': old_index,
             'episode_count': S,
             'total_duration': total_duration,
             'mean_duration': valid_episodes['duration'].mean(),
@@ -138,6 +146,7 @@ class FragmentationAnalyzer:
         if digital_df.empty or moving_df.empty:
             return {
                 'fragmentation_index': np.nan,
+                'old_fragmentation_index': np.nan,
                 'episode_count': 0,
                 'total_duration': 0,
                 'status': 'no_episodes'
@@ -170,6 +179,7 @@ class FragmentationAnalyzer:
         if not overlapping_episodes:
             return {
                 'fragmentation_index': np.nan,
+                'old_fragmentation_index': np.nan,
                 'episode_count': 0,
                 'total_duration': 0,
                 'status': 'no_overlapping_episodes'
@@ -210,6 +220,10 @@ class FragmentationAnalyzer:
                 'digital_fragmentation_index': digital_metrics['fragmentation_index'],
                 'moving_fragmentation_index': moving_metrics['fragmentation_index'],
                 'digital_frag_during_mobility': overlap_metrics['fragmentation_index'],
+                'digital_old_frag': digital_metrics['old_fragmentation_index'],
+                'moving_old_frag': moving_metrics['old_fragmentation_index'],
+                'digital_delta_frag': digital_metrics['fragmentation_index'] - digital_metrics['old_fragmentation_index'],
+                'moving_delta_frag': moving_metrics['fragmentation_index'] - moving_metrics['old_fragmentation_index'],
                 'digital_episode_count': digital_metrics['episode_count'],
                 'moving_episode_count': moving_metrics['episode_count'],
                 'digital_total_duration': digital_metrics['total_duration'],
@@ -269,6 +283,45 @@ class FragmentationAnalyzer:
             plt.savefig(output_dir / f'{metric}_distribution.png')
             plt.close()
 
+        # Add comparison plot
+        plt.figure(figsize=(10, 5))
+        plt.scatter(df['digital_old_frag'], df['digital_fragmentation_index'], alpha=0.5)
+        plt.plot([0,1], [0,1], 'r--')
+        plt.xlabel('Original Fragmentation Index')
+        plt.ylabel('New Fragmentation Index')
+        plt.title('Digital Fragmentation Index Comparison')
+        plt.savefig(output_dir / 'formula_comparison_digital.png')
+        plt.close()
+
+        # Add quartile comparison plot
+        plt.figure(figsize=(12, 6))
+        
+        for idx, ep_type in enumerate(['digital', 'moving']):
+            plt.subplot(1, 2, idx+1)
+            
+            # Correct column names
+            old_col = f'{ep_type}_old_frag'
+            new_col = f'{ep_type}_fragmentation_index'
+            
+            # Plot distributions
+            plt.hist(df[old_col], bins=50, alpha=0.5, label='Old Index')
+            plt.hist(df[new_col], bins=50, alpha=0.5, label='New Index')
+            
+            # Add quartile markers
+            for col, color in [(old_col, '#1f77b4'), (new_col, '#ff7f0e')]:
+                q = df[col].quantile([0.25, 0.5, 0.75])
+                for q_val in q:
+                    plt.axvline(q_val, color=color, linestyle='--', alpha=0.6)
+            
+            plt.title(f'{ep_type.capitalize()} Fragmentation Comparison')
+            plt.xlabel('Fragmentation Index')
+            plt.ylabel('Frequency')
+            plt.legend()
+        
+        plt.tight_layout()
+        plt.savefig(output_dir / 'quartile_comparison.png')
+        plt.close()
+
 def main():
     # Configure paths
     input_dir = Path('/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/episodes')
@@ -302,14 +355,58 @@ def main():
     if all_results:
         combined_results = pd.DataFrame(all_results)
         
-        # Save results
-        output_file = output_dir / 'fragmentation_summary.csv'
-        combined_results.to_csv(output_file, index=False)
-        logging.info(f"\nSaved fragmentation summary to {output_file}")
-        
-        # Generate analysis plots
+        # Generate and save analysis files first
         analyzer.generate_analysis_plots(combined_results, output_dir)
+        stats_comparison = pd.DataFrame()
+        for ep_type in ['digital', 'moving']:
+            old_stats = combined_results[f'{ep_type}_old_frag'].describe().rename(f'{ep_type}_old')
+            new_stats = combined_results[f'{ep_type}_fragmentation_index'].describe().rename(f'{ep_type}_new')
+            stats_comparison = pd.concat([old_stats, new_stats], axis=1)
         
+        # Format statistics table
+        stats_comparison = stats_comparison.T.round(3)
+        stats_comparison['IQR'] = stats_comparison['75%'] - stats_comparison['25%']
+        
+        # Save and log statistics
+        stats_file = output_dir / 'metric_comparison_stats.csv'
+        stats_comparison.to_csv(stats_file)
+        
+        logging.info("\nDetailed Statistics Comparison:")
+        logging.info(stats_comparison.to_string())
+        
+        # Generate comparison report
+        comparison_stats = pd.DataFrame({
+            'Metric': ['Digital', 'Moving'],
+            'Old Mean': [
+                combined_results['digital_old_frag'].mean(),
+                combined_results['moving_old_frag'].mean()
+            ],
+            'New Mean': [
+                combined_results['digital_fragmentation_index'].mean(),
+                combined_results['moving_fragmentation_index'].mean()
+            ],
+            'Mean Δ': [
+                combined_results['digital_delta_frag'].mean(),
+                combined_results['moving_delta_frag'].mean()
+            ]
+        }).round(3)
+        
+        logging.info("\nMetric Comparison:")
+        logging.info(comparison_stats.to_string(index=False))
+        
+        # Remove old index values from final output
+        columns_to_drop = [
+            'digital_old_frag', 'moving_old_frag',
+            'digital_delta_frag', 'moving_delta_frag'
+        ]
+        final_output = combined_results.drop(columns=columns_to_drop)
+        
+        # Save cleaned results
+        final_output.to_csv(output_dir / 'fragmentation_summary.csv', index=False)
+        logging.info(f"\nSaved cleaned fragmentation summary to {output_dir}/fragmentation_summary.csv")
+        
+        # Keep full comparison data in separate file
+        combined_results.to_csv(output_dir / 'legacy_comparison_archive.csv', index=False)
         # Print statistics
         logging.info("\nProcessing Statistics:")
         for episode_type in ['digital', 'moving']:
