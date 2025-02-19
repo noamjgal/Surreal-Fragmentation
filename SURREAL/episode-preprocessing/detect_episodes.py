@@ -16,8 +16,8 @@ MAX_SCREEN_GAP = '5min'  # Consider gaps longer than this as screen off
 
 def load_participant_data(participant_id, processed_dir):
     """Load and merge preprocessed GPS + app data"""
-    gps_path = os.path.join(processed_dir, f'{participant_id}_qstarz_preprocessed.csv')
-    app_path = os.path.join(processed_dir, f'{participant_id}_app_preprocessed.csv')
+    gps_path = os.path.join(processed_dir, f'{participant_id}_qstarz_prep.csv')
+    app_path = os.path.join(processed_dir, f'{participant_id}_app_prep.csv')
     
     # Load GPS data with proper datetime parsing
     gps_df = pd.read_csv(gps_path, parse_dates=['UTC DATE TIME'])
