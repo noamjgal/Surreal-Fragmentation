@@ -16,7 +16,7 @@ DATA_DIR = Path(os.environ.get("SURREAL_DATA_DIR",
                 Path(__file__).parent.parent / "data"))  # Default: SURREAL/data
 
 # Raw data locations
-RAW_DATA_DIR = DATA_DIR / "participants"
+RAW_DATA_DIR = DATA_DIR / "raw"
 PROCESSED_DATA_DIR = DATA_DIR / "processed"
 
 # Standardized subdirectories
