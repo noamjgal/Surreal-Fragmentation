@@ -4,15 +4,15 @@
 
 ```mermaid
 graph TD;
-    A[Raw GPS Data\n*.csv] --> B[preprocess-geospatial.py];
-    A --> C[Raw App Data\n*.csv];
-    B --> D[{pid}_qstarz_preprocessed.csv];
-    C --> E[{pid}_app_preprocessed.csv];
-    D --> F[detect_episodes.py];
-    E --> F;
-    F --> G[{pid}_episodes.csv];
-    G --> H[Map-episodes.py];
-    H --> I[{pid}_map.html];
+    A[Raw GPS Data\n*.csv] --> B[preprocess-geospatial.py]
+    A --> C[Raw App Data\n*.csv]
+    B --> D[{pid}_qstarz_preprocessed.csv]
+    C --> E[{pid}_app_preprocessed.csv]
+    D --> F[detect_episodes.py]
+    E --> F
+    F --> G[{pid}_episodes.csv]
+    G --> H[Map-episodes.py]
+    H --> I[{pid}_map.html]
 ```
 
 
