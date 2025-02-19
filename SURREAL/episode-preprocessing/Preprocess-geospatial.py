@@ -14,11 +14,17 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import folium
 from folium.plugins import HeatMap
+from pathlib import Path
+import sys
+
+# Add parent directory to path to find config
+sys.path.append(str(Path(__file__).parent.parent))
+from config.paths import RAW_DATA_DIR, PROCESSED_DATA_DIR, MAP_OUTPUT_DIR, GPS_PREP_DIR
 
 # Set the base directory
-base_dir = "/Users/noamgal/Downloads/Research-Projects/SURREAL/HUJI_data-main/"
-processed_dir = os.path.join(base_dir, "Processed")
-participants_dir = os.path.join(base_dir, "Participants")
+base_dir = RAW_DATA_DIR
+processed_dir = PROCESSED_DATA_DIR
+participants_dir = RAW_DATA_DIR / "Participants"
 
 def load_and_preprocess_qstarz(file_path):
     df = pd.read_csv(file_path)
@@ -64,19 +70,13 @@ def process_app_and_gps_data(app_file, gps_file):
     return merged_df
 
 def save_preprocessed_data(participant_id, qstarz_df, app_df, processed_dir):
-    # Create a directory for fragment-processed files if it doesn't exist
-    fragment_processed_dir = os.path.join(processed_dir, 'fragment-processed')
-    os.makedirs(fragment_processed_dir, exist_ok=True)
+    # Use configured GPS prep directory
+    qstarz_file = GPS_PREP_DIR / f'{participant_id}_qstarz_prep.csv'
+    app_file = GPS_PREP_DIR / f'{participant_id}_app_prep.csv'
     
-    # Save Qstarz data
-    qstarz_file = os.path.join(fragment_processed_dir, f'{participant_id}_qstarz_preprocessed.csv')
     qstarz_df.to_csv(qstarz_file, index=False)
-    
-    # Save App data
-    app_file = os.path.join(fragment_processed_dir, f'{participant_id}_app_preprocessed.csv')
     app_df.to_csv(app_file, index=False)
-    
-    print(f"Preprocessed data for Participant {participant_id} saved in {fragment_processed_dir}")
+    print(f"Preprocessed data saved in {GPS_PREP_DIR}")
 
 # Process Qstarz data
 all_qstarz_data = {}
@@ -97,7 +97,11 @@ for participant_folder in glob.glob(os.path.join(participants_dir, 'P*')):
     participant_id = folder_name.split('_')[-1]  # Get the last part after underscore
     app_folder = os.path.join(participant_folder, '9 - Smartphone Tracking App')
     
+    print(f"Looking for app files in: {app_folder}")
+    print(f"Files in directory: {os.listdir(app_folder)}")
     app_files = glob.glob(os.path.join(app_folder, '*-apps.csv'))
+    print(f"Found app files: {app_files}")
+    
     gps_files = glob.glob(os.path.join(app_folder, '*-gps.csv'))
     
     if app_files and gps_files:
@@ -172,18 +176,13 @@ for participant_id in common_participants:
     # Save preprocessed data
     save_preprocessed_data(participant_id, qstarz_data, app_data, processed_dir)
 
-    # Create maps
-    maps_dir = os.path.join(processed_dir, "maps")
-    os.makedirs(maps_dir, exist_ok=True)
-
-    # Qstarz map
+    # Create maps using configured output directory
     create_map(qstarz_data, 
-               os.path.join(maps_dir, f'{participant_id}_qstarz_map.html'),
+               MAP_OUTPUT_DIR / f'{participant_id}_qstarz_map.html',
                f'Participant {participant_id} - Qstarz Data')
 
-    # App GPS map
     create_map(app_data, 
-               os.path.join(maps_dir, f'{participant_id}_app_gps_map.html'),
+               MAP_OUTPUT_DIR / f'{participant_id}_app_gps_map.html',
                f'Participant {participant_id} - App GPS Data',
                fallback_data=qstarz_data)
 
