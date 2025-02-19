@@ -2,45 +2,68 @@
 """
 Visual validation of detected episodes
 """
-import folium
-import pandas as pd
 import os
 import glob
+import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 
-# Configuration
-BASE_DIR = "/Users/noamgal/Downloads/Research-Projects/SURREAL/HUJI_data-main/"
-EPISODE_DIR = os.path.join(BASE_DIR, "Processed", "episode-outputs")
-MAP_DIR = os.path.join(BASE_DIR, "Processed", "episode-maps")
-GPS_DIR = os.path.join(BASE_DIR, "Processed", "fragment-processed")
+# Add parent directory to path to find config
+sys.path.append(str(Path(__file__).parent.parent))
+from config.paths import PROCESSED_DATA_DIR, EPISODE_OUTPUT_DIR, MAP_OUTPUT_DIR, GPS_PREP_DIR
+
+# Rest of imports
+import folium
+import pandas as pd
+
+# Configuration - REPLACED with centralized config
+BASE_DIR = PROCESSED_DATA_DIR.parent  # Gets SURREAL/data parent directory
+EPISODE_DIR = EPISODE_OUTPUT_DIR
+MAP_DIR = MAP_OUTPUT_DIR
+GPS_DIR = GPS_PREP_DIR
 
 def load_episode_data(participant_id):
     """Load detected episodes and raw GPS data"""
-    episode_path = os.path.join(EPISODE_DIR, f'{participant_id}_episodes.csv')
-    gps_path = os.path.join(GPS_DIR, f'{participant_id}_qstarz_preprocessed.csv')
+    episode_path = EPISODE_OUTPUT_DIR / f'{participant_id}_episodes.csv'
+    qstarz_path = GPS_PREP_DIR / f'{participant_id}_qstarz_prep.csv'
+    
+    # Validate files exist
+    if not episode_path.exists():
+        raise FileNotFoundError(f"Missing episode file: {episode_path}")
+    if not qstarz_path.exists():
+        raise FileNotFoundError(f"Missing GPS data: {qstarz_path}")
     
     episodes = pd.read_csv(episode_path, parse_dates=['start_time', 'end_time'])
-    gps_df = pd.read_csv(gps_path, parse_dates=['UTC DATE TIME'])
+    gps_df = pd.read_csv(qstarz_path, parse_dates=['UTC DATE TIME'])
     
     return episodes, gps_df
 
 def create_episode_map(episodes, gps_df, participant_id):
     """Create interactive map with episodes and raw GPS points"""
-    # Base map centered on median coordinates
-    base_lat = gps_df['LATITUDE'].median()
-    base_lon = gps_df['LONGITUDE'].median()
-    m = folium.Map(location=[base_lat, base_lon], zoom_start=12)
-
-    # Add raw GPS points
-    gps_layer = folium.FeatureGroup(name='Raw GPS Points')
+    # Base map with improved styling
+    m = folium.Map(
+        location=[gps_df['LATITUDE'].median(), gps_df['LONGITUDE'].median()],
+        zoom_start=12,
+        tiles='CartoDB positron',  # Modern basemap
+        control_scale=True
+    )
+    
+    # Enhanced GPS point visualization
+    gps_layer = folium.FeatureGroup(name='Raw GPS', show=False)  # Start hidden
     for _, row in gps_df.iterrows():
         gps_layer.add_child(
             folium.CircleMarker(
                 location=[row['LATITUDE'], row['LONGITUDE']],
-                radius=2,
-                color='#555555',
+                radius=3,
+                color='#4a4a4a',
                 fill=True,
-                popup=f"Time: {row['UTC DATE TIME']}<br>Speed: {row['SPEED_MS']:.1f}m/s"
+                fill_opacity=0.7,
+                popup=folium.Popup(
+                    f"<b>{row['UTC DATE TIME'].strftime('%Y-%m-%d %H:%M')}</b><br>"
+                    f"Speed: {row['SPEED_MS']:.1f} m/s<br>"
+                    f"Sats: {row['NSAT_USED']}",
+                    max_width=250
+                )
             )
         )
     m.add_child(gps_layer)
@@ -102,9 +125,9 @@ def process_participant(participant_id):
         episodes, gps_df = load_episode_data(participant_id)
         m = create_episode_map(episodes, gps_df, participant_id)
         
-        os.makedirs(MAP_DIR, exist_ok=True)
-        map_path = os.path.join(MAP_DIR, f"{participant_id}_episodes.html")
-        m.save(map_path)
+        MAP_DIR.mkdir(parents=True, exist_ok=True)  # Path object directory creation
+        map_path = MAP_DIR / f"{participant_id}_episodes.html"
+        m.save(map_path.as_posix())
         print(f"Map saved to {map_path}")
         
     except Exception as e:
