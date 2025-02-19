@@ -4,8 +4,8 @@
 
 ```mermaid
 graph TD;
-    A[Raw GPS Data\n*.csv] --> B[preprocess-geospatial.py]
-    A --> C[Raw App Data\n*.csv]
+    A[Raw GPS Data.csv] --> B[preprocess-geospatial.py]
+    A --> C[Raw App Data.csv]
     B --> D["{pid}_qstarz_preprocessed.csv"]
     C --> E["{pid}_app_preprocessed.csv"]
     D --> F[detect_episodes.py]
