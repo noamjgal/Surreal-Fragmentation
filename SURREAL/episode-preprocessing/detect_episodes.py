@@ -7,6 +7,12 @@ import numpy as np
 import os
 from datetime import datetime
 import traceback
+from pathlib import Path
+import sys
+
+# Add parent directory to path to find config
+sys.path.append(str(Path(__file__).parent.parent))
+from config.paths import GPS_PREP_DIR, EPISODE_OUTPUT_DIR, PROCESSED_DATA_DIR
 
 # Configuration
 MOVEMENT_CUTOFF = 1.5  # m/s (stationary vs moving)
@@ -14,10 +20,10 @@ MIN_EPISODE_DURATION = '30s'  # Pandas-compatible duration string
 DIGITAL_USE_COL = 'action'  # Changed from 'foreground'
 MAX_SCREEN_GAP = '5min'  # Consider gaps longer than this as screen off
 
-def load_participant_data(participant_id, processed_dir):
-    """Load and merge preprocessed GPS + app data"""
-    gps_path = os.path.join(processed_dir, f'{participant_id}_qstarz_prep.csv')
-    app_path = os.path.join(processed_dir, f'{participant_id}_app_prep.csv')
+def load_participant_data(participant_id):
+    """Load and merge preprocessed GPS + app data using configured paths"""
+    gps_path = GPS_PREP_DIR / f'{participant_id}_qstarz_prep.csv'
+    app_path = GPS_PREP_DIR / f'{participant_id}_app_prep.csv'
     
     # Load GPS data with proper datetime parsing
     gps_df = pd.read_csv(gps_path, parse_dates=['UTC DATE TIME'])
@@ -158,20 +164,19 @@ def detect_episodes(df):
     episodes['duration'] = episodes['end_time'] - episodes['start_time']
     return episodes[episodes['duration'] >= pd.Timedelta(MIN_EPISODE_DURATION)]
 
-def process_participant(participant_id, processed_dir, output_dir):
-    """Full processing pipeline for single participant"""
+def process_participant(participant_id):
+    """Full processing pipeline using configured paths"""
     print(f"Processing {participant_id}")
     try:
         # Load and prepare data
-        df = load_participant_data(participant_id, processed_dir)
+        df = load_participant_data(participant_id)
         df = classify_states(df)
         
         # Detect and clean episodes
         episodes = detect_episodes(df)
         
-        # Save results
-        os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, f'{participant_id}_episodes.csv')
+        # Save results using episode output directory
+        output_path = EPISODE_OUTPUT_DIR / f'{participant_id}_episodes.csv'
         episodes.to_csv(output_path, index=False)
         
         print(f"Detected {len(episodes)} episodes for {participant_id}")
@@ -182,10 +187,10 @@ def process_participant(participant_id, processed_dir, output_dir):
         print(traceback.format_exc())
         return False
 
-def validate_data_structure(processed_dir):
+def validate_data_structure():
     """Check column consistency across files"""
-    sample_gps = pd.read_csv(os.path.join(processed_dir, '005_qstarz_preprocessed.csv'), nrows=1)
-    sample_app = pd.read_csv(os.path.join(processed_dir, '005_app_preprocessed.csv'), nrows=1)
+    sample_gps = pd.read_csv(GPS_PREP_DIR / '003_qstarz_prep.csv', nrows=1)
+    sample_app = pd.read_csv(GPS_PREP_DIR / '003_app_prep.csv', nrows=1)
     
     print("GPS Data Columns:", sample_gps.columns.tolist())
     print("App Data Columns:", sample_app.columns.tolist())
@@ -209,20 +214,45 @@ def validate_data_structure(processed_dir):
 
 # Main execution
 if __name__ == "__main__":
-    # Config paths
-    base_dir = "/Users/noamgal/Downloads/Research-Projects/SURREAL/HUJI_data-main/"
-    processed_dir = os.path.join(base_dir, "Processed", "fragment-processed")
-    output_dir = os.path.join(base_dir, "Processed", "episode-outputs")
+    # Get participants with COMPLETE preprocessed data from step 1
+    qstarz_files = {
+        f.stem.replace('_qstarz_prep', ''): f 
+        for f in GPS_PREP_DIR.glob('*_qstarz_prep.csv')
+    }
+    app_files = {
+        f.stem.replace('_app_prep', ''): f 
+        for f in GPS_PREP_DIR.glob('*_app_prep.csv')
+    }
+
+    # Find common participants with both files
+    common_ids = set(qstarz_files.keys()) & set(app_files.keys())
+    valid_participants = []
     
-    # Get all participants with both data files
-    qstarz_files = set(f.split('_')[0] for f in os.listdir(processed_dir) if '_qstarz_' in f)
-    app_files = set(f.split('_')[0] for f in os.listdir(processed_dir) if '_app_' in f)
-    participants = list(qstarz_files & app_files)
+    for pid in common_ids:
+        qstarz_path = qstarz_files[pid]
+        app_path = app_files[pid]
+        
+        if qstarz_path.exists() and app_path.exists():
+            valid_participants.append(pid)
+        else:
+            print(f"Invalid files for {pid}:")
+            print(f"Qstarz exists: {qstarz_path.exists()} @ {qstarz_path}")
+            print(f"App exists: {app_path.exists()} @ {app_path}")
+
+    print(f"\nValid participants: {valid_participants}")
     
+    if not valid_participants:
+        print("No valid participants found. Check that:")
+        print(f"1. Files exist in {GPS_PREP_DIR}")
+        print("2. Files follow naming convention: [participant_id]_qstarz_prep.csv")
+        print("   and [participant_id]_app_prep.csv")
+        sys.exit(1)
+
     # Validate data structure
-    validate_data_structure(processed_dir) 
-    # Process all valid participants
-    for pid in participants:
-        process_participant(pid, processed_dir, output_dir)
+    validate_data_structure()
     
-    print(f"\nProcessing complete. Outputs saved to: {output_dir}")
+    # Process all valid participants
+    for pid in valid_participants:
+        process_participant(pid)
+    
+    print(f"\nProcessing complete. Outputs saved to: {EPISODE_OUTPUT_DIR}")
