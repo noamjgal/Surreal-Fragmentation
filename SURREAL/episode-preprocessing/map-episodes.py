@@ -123,11 +123,13 @@ class EpisodeVisualizer:
         FastMarkerCluster(data=gps_points, callback=callback, 
                          name='GPS Points').add_to(m)
         
-        # Create separate feature groups for episodes
+        # Create separate feature groups for all episode types
         layers = {
             'digital': folium.FeatureGroup(name='Digital Episodes'),
-            'movement': folium.FeatureGroup(name='Movement Episodes'),
-            'overlap': folium.FeatureGroup(name='Overlap Episodes')
+            'moving': folium.FeatureGroup(name='Moving Episodes'),
+            'stationary': folium.FeatureGroup(name='Stationary Episodes'),
+            'moving_digital': folium.FeatureGroup(name='Moving-Digital Overlap'),
+            'gps': folium.FeatureGroup(name='GPS Points')
         }
         
         # Add episodes with enhanced styling
@@ -148,6 +150,14 @@ class EpisodeVisualizer:
                    episode.get('movement_state') == 'stationary':
                     color = self.colors['stationary']
                 
+                # Determine layer based on episode type and state
+                if episode['episode_type'] == 'movement':
+                    layer_key = 'moving' if episode.get('movement_state') == 'moving' else 'stationary'
+                elif episode['episode_type'] == 'overlap':
+                    layer_key = 'moving_digital'
+                else:
+                    layer_key = episode['episode_type']
+
                 # Create enhanced polyline
                 folium.PolyLine(
                     locations=episode_points[['LATITUDE', 'LONGITUDE']].values,
@@ -166,7 +176,7 @@ class EpisodeVisualizer:
                         + "</div>",
                         max_width=300
                     )
-                ).add_to(layers[episode['episode_type']])
+                ).add_to(layers[layer_key])
         
         # Add all layers to map
         for layer in layers.values():
@@ -202,7 +212,7 @@ class EpisodeVisualizer:
                 <div>
                     <span style="display: inline-block; width: 20px; height: 4px; 
                            background: {self.colors['overlap']}; margin-right: 8px;"></span>
-                    Overlap
+                    Moving-Digital Overlap
                 </div>
                 <div>
                     <span style="display: inline-block; width: 6px; height: 6px; 
