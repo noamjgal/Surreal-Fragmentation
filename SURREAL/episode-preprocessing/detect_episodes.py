@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Enhanced episode detection with separate processing for movement and digital states
-Organized by day with comprehensive logging and validation
+Includes overlap detection and comprehensive statistics reporting
 """
 import pandas as pd
 import numpy as np
@@ -12,6 +12,8 @@ from pathlib import Path
 import sys
 import logging
 from typing import Dict, List, Tuple
+from collections import Counter
+from tqdm import tqdm
 
 # Setup logging
 logging.basicConfig(
@@ -32,6 +34,7 @@ MOVEMENT_CUTOFF = 1.5  # m/s (stationary vs moving)
 MIN_EPISODE_DURATION = '30s'
 MAX_SCREEN_GAP = '5min'
 DIGITAL_USE_COL = 'action'
+MERGE_GAP = timedelta(minutes=1)
 
 class EpisodeProcessor:
     def __init__(self, participant_id: str):
@@ -39,6 +42,52 @@ class EpisodeProcessor:
         self.logger = logging.getLogger(f"EpisodeProcessor_{participant_id}")
         self.output_dir = EPISODE_OUTPUT_DIR / participant_id
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+    def _merge_episodes(self, episodes: List[Tuple], merge_gap: timedelta) -> List[Tuple]:
+        """Merge episodes that are close together"""
+        if not episodes:
+            return []
+        
+        episodes = sorted(episodes)
+        merged = [episodes[0]]
+        
+        for current in episodes[1:]:
+            prev = merged[-1]
+            gap = current[0] - prev[1]
+            
+            if gap <= merge_gap:
+                merged[-1] = (prev[0], max(prev[1], current[1]))
+            else:
+                merged.append(current)
+        
+        return merged
+
+    def _find_overlaps(self, digital_episodes: pd.DataFrame, 
+                      movement_episodes: pd.DataFrame) -> pd.DataFrame:
+        """Find temporal overlaps between digital and movement episodes"""
+        overlap_episodes = []
+        
+        for _, d_ep in digital_episodes.iterrows():
+            for _, m_ep in movement_episodes.iterrows():
+                start = max(d_ep['start_time'], m_ep['start_time'])
+                end = min(d_ep['end_time'], m_ep['end_time'])
+                
+                if start < end:  # There is an overlap
+                    duration = end - start
+                    if duration >= pd.Timedelta(minutes=1):
+                        overlap_episodes.append({
+                            'start_time': start,
+                            'end_time': end,
+                            'state': 'overlap',
+                            'movement_state': m_ep['state'],
+                            'latitude': m_ep['latitude'],
+                            'longitude': m_ep['longitude'],
+                            'duration': duration
+                        })
+        
+        if overlap_episodes:
+            return pd.DataFrame(overlap_episodes)
+        return pd.DataFrame()
 
     def load_gps_data(self) -> pd.DataFrame:
         """Load GPS data with validation"""
@@ -62,7 +111,6 @@ class EpisodeProcessor:
         try:
             app_df = pd.read_csv(app_path)
             
-            # Handle timestamp column
             if 'Timestamp' in app_df.columns:
                 app_df['timestamp'] = pd.to_datetime(app_df['Timestamp'])
             else:
@@ -84,7 +132,6 @@ class EpisodeProcessor:
         for date, day_data in app_df.groupby('date'):
             self.logger.info(f"Processing digital episodes for {date}")
             
-            # Filter screen events
             screen_events = day_data[day_data[DIGITAL_USE_COL].isin(['SCREEN ON', 'SCREEN OFF'])].copy()
             screen_events = screen_events.sort_values('timestamp')
             
@@ -92,7 +139,6 @@ class EpisodeProcessor:
                 self.logger.warning(f"No screen events found for {date}")
                 continue
                 
-            # Process screen events into episodes
             episodes = []
             current_on = None
             
@@ -110,7 +156,9 @@ class EpisodeProcessor:
             if len(episodes) == 0:
                 self.logger.warning(f"No digital episodes detected for {date}")
             else:
-                episodes_by_day[date] = pd.DataFrame(episodes)
+                episodes_df = pd.DataFrame(episodes)
+                episodes_df['duration'] = episodes_df['end_time'] - episodes_df['start_time']
+                episodes_by_day[date] = episodes_df
                 self.logger.info(f"Detected {len(episodes)} digital episodes for {date}")
                 
         return episodes_by_day
@@ -122,15 +170,12 @@ class EpisodeProcessor:
         for date, day_data in gps_df.groupby('date'):
             self.logger.info(f"Processing movement episodes for {date}")
             
-            # Classify movement states
             day_data['state'] = np.where(day_data['SPEED_MS'] > MOVEMENT_CUTOFF, 
                                        'moving', 'stationary')
             
-            # Detect state changes
             state_changes = day_data['state'].ne(day_data['state'].shift())
             day_data['episode_id'] = state_changes.cumsum()
             
-            # Create episodes
             episodes = day_data.groupby('episode_id').agg({
                 'UTC DATE TIME': ['min', 'max'],
                 'state': 'first',
@@ -142,7 +187,6 @@ class EpisodeProcessor:
             episodes.columns = ['start_time', 'end_time', 'state', 'latitude', 'longitude', 'n_points']
             episodes = episodes.reset_index(drop=True)
             
-            # Filter short episodes
             episodes['duration'] = episodes['end_time'] - episodes['start_time']
             episodes = episodes[episodes['duration'] >= pd.Timedelta(MIN_EPISODE_DURATION)]
             
@@ -151,22 +195,88 @@ class EpisodeProcessor:
             
         return episodes_by_day
 
-    def save_episodes(self, digital_episodes: Dict, movement_episodes: Dict):
-        """Save episodes by day"""
-        for date in set(digital_episodes.keys()) | set(movement_episodes.keys()):
-            # Save digital episodes
-            if date in digital_episodes:
-                digital_path = self.output_dir / f'{date}_digital_episodes.csv'
-                digital_episodes[date].to_csv(digital_path, index=False)
-                self.logger.info(f"Saved digital episodes to {digital_path}")
+    def create_daily_timeline(self, digital_episodes: pd.DataFrame, 
+                          movement_episodes: pd.DataFrame,
+                          overlap_episodes: pd.DataFrame) -> pd.DataFrame:
+        """Create a chronological timeline of all episodes for a day"""
+        # Add episode type column to each DataFrame
+        if not digital_episodes.empty:
+            digital_episodes = digital_episodes.copy()
+            digital_episodes['episode_type'] = 'digital'
+            digital_episodes['movement_state'] = None
+        
+        if not movement_episodes.empty:
+            movement_episodes = movement_episodes.copy()
+            movement_episodes['episode_type'] = 'movement'
+            movement_episodes['movement_state'] = movement_episodes['state']
+            movement_episodes = movement_episodes.drop(columns=['state'])
+        
+        if not overlap_episodes.empty:
+            overlap_episodes = overlap_episodes.copy()
+            overlap_episodes['episode_type'] = 'overlap'
+        
+        # Combine all episodes
+        all_episodes = pd.concat([digital_episodes, movement_episodes, overlap_episodes], 
+                               ignore_index=True)
+        
+        # Sort chronologically
+        if not all_episodes.empty:
+            all_episodes = all_episodes.sort_values('start_time')
             
-            # Save movement episodes
-            if date in movement_episodes:
-                movement_path = self.output_dir / f'{date}_movement_episodes.csv'
-                movement_episodes[date].to_csv(movement_path, index=False)
-                self.logger.info(f"Saved movement episodes to {movement_path}")
+            # Add sequential episode number
+            all_episodes['episode_number'] = range(1, len(all_episodes) + 1)
+            
+            # Calculate time since previous episode
+            all_episodes['time_since_prev'] = all_episodes['start_time'].diff()
+            
+            # Ensure consistent column order
+            columns = ['episode_number', 'episode_type', 'movement_state', 
+                      'start_time', 'end_time', 'duration', 'time_since_prev',
+                      'latitude', 'longitude']
+            all_episodes = all_episodes[columns]
+        
+        return all_episodes
 
-    def process(self):
+    def process_day(self, date: datetime.date, digital_episodes: pd.DataFrame, 
+                   movement_episodes: pd.DataFrame) -> dict:
+        """Process a single day and generate statistics"""
+        overlap_episodes = self._find_overlaps(digital_episodes, movement_episodes)
+        
+        # Create daily timeline
+        daily_timeline = self.create_daily_timeline(digital_episodes, movement_episodes, overlap_episodes)
+        
+        # Save daily timeline
+        if not daily_timeline.empty:
+            timeline_file = self.output_dir / f"{date}_daily_timeline.csv"
+            daily_timeline.to_csv(timeline_file, index=False)
+            self.logger.info(f"Saved daily timeline to {timeline_file}")
+        
+        # Calculate statistics
+        day_stats = {
+            'user': self.participant_id,
+            'date': date,
+            'digital_episodes': len(digital_episodes),
+            'movement_episodes': len(movement_episodes),
+            'overlap_episodes': len(overlap_episodes),
+            'digital_duration': digital_episodes['duration'].sum().total_seconds() / 60,
+            'movement_duration': movement_episodes['duration'].sum().total_seconds() / 60,
+            'overlap_duration': overlap_episodes['duration'].sum().total_seconds() / 60 if not overlap_episodes.empty else 0,
+        }
+        
+        # Save episodes
+        for ep_type, episodes in [
+            ('digital', digital_episodes),
+            ('movement', movement_episodes),
+            ('overlap', overlap_episodes)
+        ]:
+            if len(episodes) > 0:
+                output_file = self.output_dir / f"{date}_{ep_type}_episodes.csv"
+                episodes.to_csv(output_file, index=False)
+                self.logger.info(f"Saved {ep_type} episodes to {output_file}")
+        
+        return day_stats
+
+    def process(self) -> List[dict]:
         """Main processing pipeline"""
         try:
             # Load data
@@ -177,20 +287,34 @@ class EpisodeProcessor:
             digital_episodes = self.process_digital_episodes(app_df)
             movement_episodes = self.process_movement_episodes(gps_df)
             
-            # Validate coverage
-            dates_without_digital = set(movement_episodes.keys()) - set(digital_episodes.keys())
-            if dates_without_digital:
-                self.logger.warning(f"Dates missing digital episodes: {dates_without_digital}")
+            # Process each day
+            all_stats = []
+            all_dates = sorted(set(digital_episodes.keys()) | set(movement_episodes.keys()))
             
-            # Save results
-            self.save_episodes(digital_episodes, movement_episodes)
+            for date in all_dates:
+                digital_eps = digital_episodes.get(date, pd.DataFrame())
+                movement_eps = movement_episodes.get(date, pd.DataFrame())
+                
+                if len(digital_eps) == 0:
+                    self.logger.warning(f"No digital episodes for {date}")
+                if len(movement_eps) == 0:
+                    self.logger.warning(f"No movement episodes for {date}")
+                
+                day_stats = self.process_day(date, digital_eps, movement_eps)
+                all_stats.append(day_stats)
             
-            return True
+            # Save summary statistics
+            summary_df = pd.DataFrame(all_stats)
+            summary_file = self.output_dir / 'episode_summary.csv'
+            summary_df.to_csv(summary_file, index=False)
+            self.logger.info(f"Saved summary statistics to {summary_file}")
+            
+            return all_stats
             
         except Exception as e:
             self.logger.error(f"Processing failed: {str(e)}")
             self.logger.error(traceback.format_exc())
-            return False
+            return []
 
 def main():
     # Find valid participants
@@ -202,13 +326,40 @@ def main():
     common_ids = set(qstarz_files.keys()) & set(app_files.keys())
     logging.info(f"Found {len(common_ids)} participants with complete data")
     
-    for pid in common_ids:
+    all_stats = []
+    
+    for pid in tqdm(common_ids, desc="Processing participants"):
         processor = EpisodeProcessor(pid)
-        success = processor.process()
-        if success:
-            logging.info(f"Successfully processed participant {pid}")
-        else:
-            logging.error(f"Failed to process participant {pid}")
+        participant_stats = processor.process()
+        all_stats.extend(participant_stats)
+    
+    if all_stats:
+        # Create overall summary
+        all_summary = pd.DataFrame(all_stats)
+        summary_file = EPISODE_OUTPUT_DIR / 'all_participants_summary.csv'
+        all_summary.to_csv(summary_file, index=False)
+        
+        # Log overall statistics
+        logging.info("\nOverall Processing Summary:")
+        logging.info(f"Total participants processed: {len(common_ids)}")
+        logging.info(f"Total days processed: {len(all_summary)}")
+        logging.info("\nEpisode Statistics:")
+        logging.info(f"Total digital episodes: {all_summary['digital_episodes'].sum()}")
+        logging.info(f"Total movement episodes: {all_summary['movement_episodes'].sum()}")
+        logging.info(f"Total overlap episodes: {all_summary['overlap_episodes'].sum()}")
+        logging.info("\nDuration Statistics (minutes):")
+        logging.info(f"Total digital duration: {all_summary['digital_duration'].sum():.1f}")
+        logging.info(f"Total movement duration: {all_summary['movement_duration'].sum():.1f}")
+        logging.info(f"Total overlap duration: {all_summary['overlap_duration'].sum():.1f}")
+        
+        # Per-participant statistics
+        for pid in common_ids:
+            participant_data = all_summary[all_summary['user'] == pid]
+            logging.info(f"\nParticipant {pid}:")
+            logging.info(f"Days of data: {len(participant_data)}")
+            logging.info(f"Average daily digital episodes: {participant_data['digital_episodes'].mean():.1f}")
+            logging.info(f"Average daily movement episodes: {participant_data['movement_episodes'].mean():.1f}")
+            logging.info(f"Average daily overlap episodes: {participant_data['overlap_episodes'].mean():.1f}")
 
 if __name__ == "__main__":
     main()
