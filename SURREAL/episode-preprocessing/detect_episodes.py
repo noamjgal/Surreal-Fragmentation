@@ -64,11 +64,14 @@ class EpisodeProcessor:
 
     def _find_overlaps(self, digital_episodes: pd.DataFrame, 
                       movement_episodes: pd.DataFrame) -> pd.DataFrame:
-        """Find temporal overlaps between digital and movement episodes"""
+        """Find temporal overlaps between digital and MOVING episodes only"""
         overlap_episodes = []
         
+        # Filter movement episodes to only moving states
+        moving_episodes = movement_episodes[movement_episodes['state'] == 'moving']
+        
         for _, d_ep in digital_episodes.iterrows():
-            for _, m_ep in movement_episodes.iterrows():
+            for _, m_ep in moving_episodes.iterrows():  # Only consider moving episodes
                 start = max(d_ep['start_time'], m_ep['start_time'])
                 end = min(d_ep['end_time'], m_ep['end_time'])
                 
