@@ -61,12 +61,19 @@ def load_and_preprocess_qstarz(file_path):
 
 def process_app_and_gps_data(app_file, gps_file):
     try:
-        # Try multiple encodings for robustness
+        # Modified CSV reading with delimiter detection
         encodings = ['utf-8', 'latin-1', 'utf-16']
         for encoding in encodings:
             try:
-                app_df = pd.read_csv(app_file, encoding=encoding)
-                gps_df = pd.read_csv(gps_file, encoding=encoding)
+                # First try with semicolon delimiter
+                app_df = pd.read_csv(app_file, encoding=encoding, delimiter=';')
+                gps_df = pd.read_csv(gps_file, encoding=encoding, delimiter=';')
+                
+                # Fallback to comma if only 1 column found
+                if len(app_df.columns) == 1:
+                    app_df = pd.read_csv(app_file, encoding=encoding, delimiter=',')
+                if len(gps_df.columns) == 1:
+                    gps_df = pd.read_csv(gps_file, encoding=encoding, delimiter=',')
                 break
             except UnicodeDecodeError as e:
                 if encoding == encodings[-1]:  # Last encoding failed
@@ -77,14 +84,35 @@ def process_app_and_gps_data(app_file, gps_file):
                     raise
                 continue
                 
+        # Add column cleanup for semicolon-separated headers
+        app_df.columns = app_df.columns.str.replace(';', '').str.strip().str.lower()
+        gps_df.columns = gps_df.columns.str.replace(';', '').str.strip().str.lower()
+
         # Add debug logging for date columns
         print(f"\nColumns in app data: {app_df.columns.tolist()}")
         print(f"Sample app data:\n{app_df.head(1)}")
         print(f"\nColumns in GPS data: {gps_df.columns.tolist()}")
         print(f"Sample GPS data:\n{gps_df.head(1)}")
 
-        # Modified date parsing with proper error context
-        def parse_datetime_with_debug(df, date_col='date', time_col='time'):
+        # Enhanced date column detection
+        def find_datetime_columns(df):
+            date_candidates = ['date', 'timestamp', 'datetime']
+            time_candidates = ['time', 'timestamp', 'datetime']
+            
+            date_col = next((col for col in df.columns if col in date_candidates), 'date')
+            time_col = next((col for col in df.columns if col in time_candidates), 'time')
+            return date_col, time_col
+
+        # Modified date parsing with column detection
+        def parse_datetime_with_debug(df):
+            date_col, time_col = find_datetime_columns(df)
+            
+            # Validate columns exist
+            if date_col not in df.columns:
+                raise KeyError(f"Missing date column. Found columns: {df.columns.tolist()}")
+            if time_col not in df.columns:
+                raise KeyError(f"Missing time column. Found columns: {df.columns.tolist()}")
+
             # Check for null values
             null_dates = df[date_col].isna().sum()
             null_times = df[time_col].isna().sum()
@@ -103,7 +131,7 @@ def process_app_and_gps_data(app_file, gps_file):
             df.attrs['debug_samples'] = sample_combos[:3]
             return pd.to_datetime(df[date_col] + ' ' + df[time_col], errors='coerce')
 
-        # Parse timestamps
+        # Parse timestamps with enhanced detection
         app_df['Timestamp'] = parse_datetime_with_debug(app_df)
         gps_df['Timestamp'] = parse_datetime_with_debug(gps_df)
 
