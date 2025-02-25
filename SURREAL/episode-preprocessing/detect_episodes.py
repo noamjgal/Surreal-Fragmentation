@@ -18,6 +18,15 @@ import trackintel as ti
 import geopandas as gpd
 from shapely.geometry import Point
 
+# Suppress pandas FutureWarnings related to inplace operations
+import warnings
+warnings.filterwarnings("ignore", 
+                        message=".*inplace method.*", 
+                        category=FutureWarning)
+warnings.filterwarnings("ignore", 
+                        message=".*Downcasting object dtype arrays.*", 
+                        category=FutureWarning)
+
 # Setup logging - File logging remains detailed but console output is reduced
 file_handler = logging.FileHandler('episode_detection.log')
 file_handler.setLevel(logging.INFO)
