@@ -669,10 +669,14 @@ def main():
                            f"{participant_summary_df['avg_digital_episodes'].max():.1f}")
         summary_logger.info(f"Avg daily mobility episodes: {participant_summary_df['avg_mobility_episodes'].min():.1f}-"
                            f"{participant_summary_df['avg_mobility_episodes'].max():.1f}")
+        summary_logger.info(f"Avg daily overlap episodes: {participant_summary_df['avg_overlap_episodes'].min():.1f}-"
+                           f"{participant_summary_df['avg_overlap_episodes'].max():.1f}")
         summary_logger.info(f"Avg daily digital duration (mins): {participant_summary_df['avg_digital_mins'].min():.1f}-"
                            f"{participant_summary_df['avg_digital_mins'].max():.1f}")
         summary_logger.info(f"Avg daily mobility duration (mins): {participant_summary_df['avg_mobility_mins'].min():.1f}-"
                            f"{participant_summary_df['avg_mobility_mins'].max():.1f}")
+        summary_logger.info(f"Avg daily overlap duration (mins): {participant_summary_df['avg_overlap_mins'].min():.1f}-"
+                           f"{participant_summary_df['avg_overlap_mins'].max():.1f}")
         
         # Output file locations
         summary_logger.info("\nOUTPUT FILES:")
