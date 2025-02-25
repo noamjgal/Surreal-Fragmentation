@@ -55,12 +55,12 @@ sys.path.append(str(Path(__file__).parent.parent))
 from config.paths import GPS_PREP_DIR, EPISODE_OUTPUT_DIR, PROCESSED_DATA_DIR
 
 # Trackintel configuration parameters
-STAYPOINT_DISTANCE_THRESHOLD = 100  # meters - distance threshold for staypoint detection
-STAYPOINT_TIME_THRESHOLD = 5.0  # minutes - time threshold for staypoint detection
-STAYPOINT_GAP_THRESHOLD = 15.0  # minutes - max gap between consecutive positionfixes
+STAYPOINT_DISTANCE_THRESHOLD = 50  # meters - distance threshold for staypoint detection
+STAYPOINT_TIME_THRESHOLD = 2.0  # minutes - time threshold for staypoint detection
+STAYPOINT_GAP_THRESHOLD = 1.0  # minutes - max gap between consecutive positionfixes
 LOCATION_EPSILON = 100  # meters - distance threshold for clustering staypoints into locations
-LOCATION_MIN_SAMPLES = 1  # minimum number of staypoints to form a location
-TRIP_GAP_THRESHOLD = 25  # minutes - maximum gap between consecutive staypoints
+LOCATION_MIN_SAMPLES = 1  # minimum number of staypoints to form a significant location- does not really matter for this research
+TRIP_GAP_THRESHOLD = 1 # minutes - maximum gap between consecutive staypoints
 DIGITAL_USE_COL = 'action'  # column name for screen events
 
 def ensure_tz_naive(datetime_series: pd.Series) -> pd.Series:
