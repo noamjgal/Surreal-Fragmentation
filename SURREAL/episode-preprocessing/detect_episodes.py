@@ -41,6 +41,12 @@ class EpisodeProcessor:
         self.participant_id = participant_id
         self.logger = logging.getLogger(f"EpisodeProcessor_{participant_id}")
         self.output_dir = EPISODE_OUTPUT_DIR / participant_id
+        
+        # Skip creation if the path is a macOS hidden file
+        if '._' in str(self.output_dir):
+            self.logger.warning(f"Skipping macOS hidden file: {self.output_dir}")
+            return
+            
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
     def _merge_episodes(self, episodes: List[Tuple], merge_gap: timedelta) -> List[Tuple]:
@@ -66,6 +72,16 @@ class EpisodeProcessor:
                       movement_episodes: pd.DataFrame) -> pd.DataFrame:
         """Find temporal overlaps between digital and MOVING episodes only"""
         overlap_episodes = []
+        
+        # Check if dataframes are empty or missing required columns
+        if digital_episodes.empty or movement_episodes.empty:
+            self.logger.warning("Empty dataframe(s) provided to _find_overlaps, returning empty result")
+            return pd.DataFrame()
+            
+        # Check if required columns exist
+        if 'state' not in movement_episodes.columns:
+            self.logger.warning("'state' column missing in movement_episodes, returning empty result")
+            return pd.DataFrame()
         
         # Filter movement episodes to only moving states
         moving_episodes = movement_episodes[movement_episodes['state'] == 'moving']
@@ -207,6 +223,11 @@ class EpisodeProcessor:
             digital_episodes = digital_episodes.copy()
             digital_episodes['episode_type'] = 'digital'
             digital_episodes['movement_state'] = None
+            # Add empty location columns if they don't exist
+            if 'latitude' not in digital_episodes.columns:
+                digital_episodes['latitude'] = np.nan
+            if 'longitude' not in digital_episodes.columns:
+                digital_episodes['longitude'] = np.nan
         
         if not movement_episodes.empty:
             movement_episodes = movement_episodes.copy()
@@ -232,11 +253,14 @@ class EpisodeProcessor:
             # Calculate time since previous episode
             all_episodes['time_since_prev'] = all_episodes['start_time'].diff()
             
-            # Ensure consistent column order
-            columns = ['episode_number', 'episode_type', 'movement_state', 
-                      'start_time', 'end_time', 'duration', 'time_since_prev',
-                      'latitude', 'longitude']
-            all_episodes = all_episodes[columns]
+            # Define desired column order
+            desired_columns = ['episode_number', 'episode_type', 'movement_state', 
+                             'start_time', 'end_time', 'duration', 'time_since_prev',
+                             'latitude', 'longitude']
+            
+            # Only select columns that exist in the dataframe
+            existing_columns = [col for col in desired_columns if col in all_episodes.columns]
+            all_episodes = all_episodes[existing_columns]
         
         return all_episodes
 
@@ -254,16 +278,16 @@ class EpisodeProcessor:
             daily_timeline.to_csv(timeline_file, index=False)
             self.logger.info(f"Saved daily timeline to {timeline_file}")
         
-        # Calculate statistics
+        # Calculate statistics safely with empty dataframe handling
         day_stats = {
             'user': self.participant_id,
             'date': date,
             'digital_episodes': len(digital_episodes),
             'movement_episodes': len(movement_episodes),
             'overlap_episodes': len(overlap_episodes),
-            'digital_duration': digital_episodes['duration'].sum().total_seconds() / 60,
-            'movement_duration': movement_episodes['duration'].sum().total_seconds() / 60,
-            'overlap_duration': overlap_episodes['duration'].sum().total_seconds() / 60 if not overlap_episodes.empty else 0,
+            'digital_duration': digital_episodes['duration'].sum().total_seconds() / 60 if not digital_episodes.empty and 'duration' in digital_episodes.columns else 0,
+            'movement_duration': movement_episodes['duration'].sum().total_seconds() / 60 if not movement_episodes.empty and 'duration' in movement_episodes.columns else 0,
+            'overlap_duration': overlap_episodes['duration'].sum().total_seconds() / 60 if not overlap_episodes.empty and 'duration' in overlap_episodes.columns else 0,
         }
         
         # Save episodes
@@ -322,19 +346,33 @@ class EpisodeProcessor:
 def main():
     # Find valid participants
     qstarz_files = {f.stem.replace('_qstarz_prep', ''): f 
-                    for f in GPS_PREP_DIR.glob('*_qstarz_prep.csv')}
+                    for f in GPS_PREP_DIR.glob('*_qstarz_prep.csv')
+                    if not f.stem.startswith('._')}  # Filter out macOS hidden files
     app_files = {f.stem.replace('_app_prep', ''): f 
-                 for f in GPS_PREP_DIR.glob('*_app_prep.csv')}
+                 for f in GPS_PREP_DIR.glob('*_app_prep.csv')
+                 if not f.stem.startswith('._')}  # Filter out macOS hidden files
     
     common_ids = set(qstarz_files.keys()) & set(app_files.keys())
+    # Filter out macOS hidden files (like '._005')
+    common_ids = {pid for pid in common_ids if not pid.startswith('._')}
     logging.info(f"Found {len(common_ids)} participants with complete data")
     
     all_stats = []
     
     for pid in tqdm(common_ids, desc="Processing participants"):
-        processor = EpisodeProcessor(pid)
-        participant_stats = processor.process()
-        all_stats.extend(participant_stats)
+        # Skip macOS hidden files
+        if pid.startswith('._'):
+            logging.warning(f"Skipping macOS hidden file participant: {pid}")
+            continue
+            
+        try:
+            processor = EpisodeProcessor(pid)
+            participant_stats = processor.process()
+            all_stats.extend(participant_stats)
+        except Exception as e:
+            logging.error(f"Error processing participant {pid}: {str(e)}")
+            logging.error(traceback.format_exc())
+            continue
     
     if all_stats:
         # Create overall summary
