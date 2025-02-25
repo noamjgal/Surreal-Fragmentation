@@ -15,15 +15,28 @@ from typing import Dict, List, Tuple
 from collections import Counter
 from tqdm import tqdm
 
-# Setup logging
+# Setup logging - File logging remains detailed but console output is reduced
+file_handler = logging.FileHandler('episode_detection.log')
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.WARNING)  # Only warnings and errors to console by default
+console_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+
+# Configure root logger
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('episode_detection.log'),
-        logging.StreamHandler()
-    ]
+    handlers=[file_handler, console_handler]
 )
+
+# Create a special logger for summary statistics that will always print to console
+summary_logger = logging.getLogger("summary")
+summary_handler = logging.StreamHandler()
+summary_handler.setFormatter(logging.Formatter('%(message)s'))
+summary_logger.addHandler(summary_handler)
+summary_logger.setLevel(logging.INFO)
+summary_logger.propagate = False  # Don't propagate to root logger
 
 # Add parent directory to path to find config
 sys.path.append(str(Path(__file__).parent.parent))
@@ -75,7 +88,7 @@ class EpisodeProcessor:
         
         # Check if dataframes are empty or missing required columns
         if digital_episodes.empty or movement_episodes.empty:
-            self.logger.warning("Empty dataframe(s) provided to _find_overlaps, returning empty result")
+            self.logger.debug("Empty dataframe(s) provided to _find_overlaps, returning empty result")
             return pd.DataFrame()
             
         # Check if required columns exist
@@ -111,12 +124,12 @@ class EpisodeProcessor:
     def load_gps_data(self) -> pd.DataFrame:
         """Load GPS data with validation"""
         gps_path = GPS_PREP_DIR / f'{self.participant_id}_qstarz_prep.csv'
-        self.logger.info(f"Loading GPS data from {gps_path}")
+        self.logger.debug(f"Loading GPS data from {gps_path}")
         
         try:
             gps_df = pd.read_csv(gps_path, parse_dates=['UTC DATE TIME'])
             gps_df['date'] = gps_df['UTC DATE TIME'].dt.date
-            self.logger.info(f"Loaded {len(gps_df)} GPS points")
+            self.logger.debug(f"Loaded {len(gps_df)} GPS points")
             return gps_df
         except Exception as e:
             self.logger.error(f"Failed to load GPS data: {str(e)}")
@@ -125,7 +138,7 @@ class EpisodeProcessor:
     def load_app_data(self) -> pd.DataFrame:
         """Load app data with validation"""
         app_path = GPS_PREP_DIR / f'{self.participant_id}_app_prep.csv'
-        self.logger.info(f"Loading app data from {app_path}")
+        self.logger.debug(f"Loading app data from {app_path}")
         
         try:
             app_df = pd.read_csv(app_path)
@@ -138,7 +151,7 @@ class EpisodeProcessor:
                                                    dayfirst=True)
             
             app_df['date'] = app_df['timestamp'].dt.date
-            self.logger.info(f"Loaded {len(app_df)} app events")
+            self.logger.debug(f"Loaded {len(app_df)} app events")
             return app_df
         except Exception as e:
             self.logger.error(f"Failed to load app data: {str(e)}")
@@ -149,13 +162,13 @@ class EpisodeProcessor:
         episodes_by_day = {}
         
         for date, day_data in app_df.groupby('date'):
-            self.logger.info(f"Processing digital episodes for {date}")
+            self.logger.debug(f"Processing digital episodes for {date}")
             
             screen_events = day_data[day_data[DIGITAL_USE_COL].isin(['SCREEN ON', 'SCREEN OFF'])].copy()
             screen_events = screen_events.sort_values('timestamp')
             
             if len(screen_events) == 0:
-                self.logger.warning(f"No screen events found for {date}")
+                self.logger.debug(f"No screen events found for {date}")
                 continue
                 
             episodes = []
@@ -173,12 +186,12 @@ class EpisodeProcessor:
                     current_on = None
             
             if len(episodes) == 0:
-                self.logger.warning(f"No digital episodes detected for {date}")
+                self.logger.debug(f"No digital episodes detected for {date}")
             else:
                 episodes_df = pd.DataFrame(episodes)
                 episodes_df['duration'] = episodes_df['end_time'] - episodes_df['start_time']
                 episodes_by_day[date] = episodes_df
-                self.logger.info(f"Detected {len(episodes)} digital episodes for {date}")
+                self.logger.debug(f"Detected {len(episodes)} digital episodes for {date}")
                 
         return episodes_by_day
 
@@ -187,7 +200,7 @@ class EpisodeProcessor:
         episodes_by_day = {}
         
         for date, day_data in gps_df.groupby('date'):
-            self.logger.info(f"Processing movement episodes for {date}")
+            self.logger.debug(f"Processing movement episodes for {date}")
             
             day_data['state'] = np.where(day_data['SPEED_MS'] > MOVEMENT_CUTOFF, 
                                        'moving', 'stationary')
@@ -210,7 +223,7 @@ class EpisodeProcessor:
             episodes = episodes[episodes['duration'] >= pd.Timedelta(MIN_EPISODE_DURATION)]
             
             episodes_by_day[date] = episodes
-            self.logger.info(f"Detected {len(episodes)} movement episodes for {date}")
+            self.logger.debug(f"Detected {len(episodes)} movement episodes for {date}")
             
         return episodes_by_day
 
@@ -276,7 +289,7 @@ class EpisodeProcessor:
         if not daily_timeline.empty:
             timeline_file = self.output_dir / f"{date}_daily_timeline.csv"
             daily_timeline.to_csv(timeline_file, index=False)
-            self.logger.info(f"Saved daily timeline to {timeline_file}")
+            self.logger.debug(f"Saved daily timeline to {timeline_file}")
         
         # Calculate statistics safely with empty dataframe handling
         day_stats = {
@@ -299,7 +312,7 @@ class EpisodeProcessor:
             if len(episodes) > 0:
                 output_file = self.output_dir / f"{date}_{ep_type}_episodes.csv"
                 episodes.to_csv(output_file, index=False)
-                self.logger.info(f"Saved {ep_type} episodes to {output_file}")
+                self.logger.debug(f"Saved {ep_type} episodes to {output_file}")
         
         return day_stats
 
@@ -323,9 +336,9 @@ class EpisodeProcessor:
                 movement_eps = movement_episodes.get(date, pd.DataFrame())
                 
                 if len(digital_eps) == 0:
-                    self.logger.warning(f"No digital episodes for {date}")
+                    self.logger.debug(f"No digital episodes for {date}")
                 if len(movement_eps) == 0:
-                    self.logger.warning(f"No movement episodes for {date}")
+                    self.logger.debug(f"No movement episodes for {date}")
                 
                 day_stats = self.process_day(date, digital_eps, movement_eps)
                 all_stats.append(day_stats)
@@ -334,7 +347,7 @@ class EpisodeProcessor:
             summary_df = pd.DataFrame(all_stats)
             summary_file = self.output_dir / 'episode_summary.csv'
             summary_df.to_csv(summary_file, index=False)
-            self.logger.info(f"Saved summary statistics to {summary_file}")
+            self.logger.debug(f"Saved summary statistics to {summary_file}")
             
             return all_stats
             
@@ -357,9 +370,15 @@ def main():
     common_ids = {pid for pid in common_ids if not pid.startswith('._')}
     logging.info(f"Found {len(common_ids)} participants with complete data")
     
-    all_stats = []
+    # Show a progress bar but suppress detailed logging during processing
+    logging.getLogger().setLevel(logging.WARNING)
     
-    for pid in tqdm(common_ids, desc="Processing participants"):
+    # Track processing statistics
+    all_stats = []
+    participant_summaries = []
+    processed_count = 0
+    
+    for pid in tqdm(common_ids, desc="Processing participants", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt}'):
         # Skip macOS hidden files
         if pid.startswith('._'):
             logging.warning(f"Skipping macOS hidden file participant: {pid}")
@@ -368,11 +387,36 @@ def main():
         try:
             processor = EpisodeProcessor(pid)
             participant_stats = processor.process()
-            all_stats.extend(participant_stats)
+            
+            if participant_stats:
+                all_stats.extend(participant_stats)
+                
+                # Calculate participant summary
+                participant_df = pd.DataFrame(participant_stats)
+                
+                participant_summary = {
+                    'participant_id': pid,
+                    'days_of_data': len(participant_df),
+                    'avg_digital_episodes': participant_df['digital_episodes'].mean(),
+                    'avg_movement_episodes': participant_df['movement_episodes'].mean(),
+                    'avg_overlap_episodes': participant_df['overlap_episodes'].mean(),
+                    'avg_digital_mins': participant_df['digital_duration'].mean(),
+                    'avg_movement_mins': participant_df['movement_duration'].mean(),
+                    'avg_overlap_mins': participant_df['overlap_duration'].mean(),
+                    'total_digital_mins': participant_df['digital_duration'].sum(),
+                    'total_movement_mins': participant_df['movement_duration'].sum(),
+                    'total_overlap_mins': participant_df['overlap_duration'].sum(),
+                }
+                
+                participant_summaries.append(participant_summary)
+                processed_count += 1
+                
         except Exception as e:
             logging.error(f"Error processing participant {pid}: {str(e)}")
-            logging.error(traceback.format_exc())
             continue
+    
+    # Restore logging level
+    logging.getLogger().setLevel(logging.INFO)
     
     if all_stats:
         # Create overall summary
@@ -380,27 +424,59 @@ def main():
         summary_file = EPISODE_OUTPUT_DIR / 'all_participants_summary.csv'
         all_summary.to_csv(summary_file, index=False)
         
-        # Log overall statistics
-        logging.info("\nOverall Processing Summary:")
-        logging.info(f"Total participants processed: {len(common_ids)}")
-        logging.info(f"Total days processed: {len(all_summary)}")
-        logging.info("\nEpisode Statistics:")
-        logging.info(f"Total digital episodes: {all_summary['digital_episodes'].sum()}")
-        logging.info(f"Total movement episodes: {all_summary['movement_episodes'].sum()}")
-        logging.info(f"Total overlap episodes: {all_summary['overlap_episodes'].sum()}")
-        logging.info("\nDuration Statistics (minutes):")
-        logging.info(f"Total digital duration: {all_summary['digital_duration'].sum():.1f}")
-        logging.info(f"Total movement duration: {all_summary['movement_duration'].sum():.1f}")
-        logging.info(f"Total overlap duration: {all_summary['overlap_duration'].sum():.1f}")
+        # Save participant summaries
+        participant_summary_df = pd.DataFrame(participant_summaries)
+        participant_summary_file = EPISODE_OUTPUT_DIR / 'participant_summaries.csv'
+        participant_summary_df.to_csv(participant_summary_file, index=False)
         
-        # Per-participant statistics
-        for pid in common_ids:
-            participant_data = all_summary[all_summary['user'] == pid]
-            logging.info(f"\nParticipant {pid}:")
-            logging.info(f"Days of data: {len(participant_data)}")
-            logging.info(f"Average daily digital episodes: {participant_data['digital_episodes'].mean():.1f}")
-            logging.info(f"Average daily movement episodes: {participant_data['movement_episodes'].mean():.1f}")
-            logging.info(f"Average daily overlap episodes: {participant_data['overlap_episodes'].mean():.1f}")
+        # Log concise summary to terminal
+        summary_logger.info("\n" + "="*60)
+        summary_logger.info(f"EPISODE DETECTION SUMMARY")
+        summary_logger.info("="*60)
+        summary_logger.info(f"Successfully processed {processed_count}/{len(common_ids)} participants")
+        summary_logger.info(f"Total days processed: {len(all_summary)}")
+        
+        # Overall statistics
+        summary_logger.info("\nAVERAGE DAILY EPISODES PER PARTICIPANT:")
+        summary_logger.info(f"Digital: {participant_summary_df['avg_digital_episodes'].mean():.2f}")
+        summary_logger.info(f"Movement: {participant_summary_df['avg_movement_episodes'].mean():.2f}")
+        summary_logger.info(f"Overlapping: {participant_summary_df['avg_overlap_episodes'].mean():.2f}")
+        
+        summary_logger.info("\nAVERAGE DAILY DURATION PER PARTICIPANT (minutes):")
+        summary_logger.info(f"Digital: {participant_summary_df['avg_digital_mins'].mean():.2f}")
+        summary_logger.info(f"Movement: {participant_summary_df['avg_movement_mins'].mean():.2f}")
+        summary_logger.info(f"Overlapping: {participant_summary_df['avg_overlap_mins'].mean():.2f}")
+        
+        # Total study statistics
+        summary_logger.info("\nSTUDY TOTALS:")
+        summary_logger.info(f"Total digital episodes: {all_summary['digital_episodes'].sum()}")
+        summary_logger.info(f"Total movement episodes: {all_summary['movement_episodes'].sum()}")
+        summary_logger.info(f"Total overlap episodes: {all_summary['overlap_episodes'].sum()}")
+        summary_logger.info(f"Total digital duration (hours): {all_summary['digital_duration'].sum()/60:.2f}")
+        summary_logger.info(f"Total movement duration (hours): {all_summary['movement_duration'].sum()/60:.2f}")
+        summary_logger.info(f"Total overlap duration (hours): {all_summary['overlap_duration'].sum()/60:.2f}")
+        
+        # Statistics by participant
+        summary_logger.info("\nPARTICIPANT RANGE (min-max):")
+        summary_logger.info(f"Days of data: {participant_summary_df['days_of_data'].min()}-"
+                           f"{participant_summary_df['days_of_data'].max()}")
+        summary_logger.info(f"Avg daily digital episodes: {participant_summary_df['avg_digital_episodes'].min():.1f}-"
+                           f"{participant_summary_df['avg_digital_episodes'].max():.1f}")
+        summary_logger.info(f"Avg daily movement episodes: {participant_summary_df['avg_movement_episodes'].min():.1f}-"
+                           f"{participant_summary_df['avg_movement_episodes'].max():.1f}")
+        summary_logger.info(f"Avg daily digital duration (mins): {participant_summary_df['avg_digital_mins'].min():.1f}-"
+                           f"{participant_summary_df['avg_digital_mins'].max():.1f}")
+        summary_logger.info(f"Avg daily movement duration (mins): {participant_summary_df['avg_movement_mins'].min():.1f}-"
+                           f"{participant_summary_df['avg_movement_mins'].max():.1f}")
+        summary_logger.info(f"Avg daily overlap duration (mins): {participant_summary_df['avg_overlap_mins'].min():.1f}-"
+                           f"{participant_summary_df['avg_overlap_mins'].max():.1f}")
+        
+        # Output file locations
+        summary_logger.info("\nOUTPUT FILES:")
+        summary_logger.info(f"Detailed logs: episode_detection.log")
+        summary_logger.info(f"All participants summary: {summary_file}")
+        summary_logger.info(f"Participant-level summary: {participant_summary_file}")
+        summary_logger.info("="*60)
 
 if __name__ == "__main__":
     main()
