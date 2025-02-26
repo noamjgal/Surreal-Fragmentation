@@ -257,34 +257,69 @@ def main():
     """Main processing function"""
     logging.info("Starting preprocessing of GPS and app data")
     
-    # Get Qstarz files
-    qstarz_files = {f.stem.split('_')[0]: f 
-                   for f in Path(PROCESSED_DATA_DIR).glob('*_1_Qstarz_processed.csv')
-                   if not f.stem.startswith('._')}
+    # Define Qstarz data path
+    QSTARZ_DATA_DIR = Path("/Volumes/Extreme SSD/SURREAL-DataBackup/HUJI_data-main/processed/qstarz")
+    logging.info(f"Using Qstarz data from: {QSTARZ_DATA_DIR}")
+    
+    # Get Qstarz files with consistent ID format (keeping original format with leading zeros)
+    qstarz_files = {}
+    for f in QSTARZ_DATA_DIR.glob('*.csv'):
+        if not f.stem.startswith('._'):
+            # Extract ID and maintain original format (with leading zeros if present)
+            participant_id = f.stem.split('_')[0]
+            qstarz_files[participant_id] = f
     
     logging.info(f"Found {len(qstarz_files)} Qstarz files")
+    logging.debug(f"Qstarz participant IDs: {sorted(qstarz_files.keys())}")
     
     # Get app files
     app_files = {}
-    for participant_folder in (RAW_DATA_DIR / "Participants").glob("P*"):
-        participant_id = participant_folder.name.split('_')[-1]
+    missing_app_folders = []
+    missing_app_files = []
+    
+    for participant_folder in (RAW_DATA_DIR / "Participants").glob("Pilot_*"):
+        # Extract participant ID correctly - keep leading zeros to match Qstarz files
+        full_participant_id = participant_folder.name
+        # Extract the part after "Pilot_" but keep leading zeros
+        participant_id = full_participant_id.split('_')[-1]
+        
         app_folder = participant_folder / '9 - Smartphone Tracking App'
         
-        # Skip if folder doesn't exist
+        # Track missing folders
         if not app_folder.exists():
-            logging.warning(f"App folder not found for participant {participant_id}")
+            logging.warning(f"App folder not found for participant {participant_id} (folder: {full_participant_id})")
+            missing_app_folders.append(full_participant_id)
             continue
             
-        app_file = next(app_folder.glob('*-apps.csv'), None)
+        # Look for app files with consistent naming
+        app_file = next(app_folder.glob(f'{participant_id}-apps.csv'), None)
         
-        if app_file:
+        # Skip hidden files (those starting with ._)
+        if app_file and not app_file.name.startswith('._'):
             app_files[participant_id] = app_file
+        else:
+            logging.warning(f"No app file found for participant {participant_id} (folder: {full_participant_id})")
+            missing_app_files.append(full_participant_id)
     
     logging.info(f"Found {len(app_files)} app files")
+    logging.debug(f"App file participant IDs: {sorted(app_files.keys())}")
     
     # Find common participants
     common_participants = set(qstarz_files.keys()) & set(app_files.keys())
+    logging.info(f"Common participants: {sorted(common_participants)}")
+    
+    missing_qstarz = set(app_files.keys()) - set(qstarz_files.keys())
+    missing_apps = set(qstarz_files.keys()) - set(app_files.keys())
+    
     logging.info(f"Found {len(common_participants)} participants with both Qstarz and app data")
+    logging.info(f"Missing Qstarz data for {len(missing_qstarz)} participants: {missing_qstarz}")
+    logging.info(f"Missing app data for {len(missing_apps)} participants: {missing_apps}")
+    
+    # Update quality report with missing file information
+    quality_report['missing_files'].extend([f"Missing app folder: {folder}" for folder in missing_app_folders])
+    quality_report['missing_files'].extend([f"Missing app file: {folder}" for folder in missing_app_files])
+    quality_report['missing_files'].extend([f"Missing Qstarz data: Participant {p_id}" for p_id in missing_qstarz])
+    quality_report['missing_files'].extend([f"Missing app data: Participant {p_id}" for p_id in missing_apps])
     
     # Process each participant
     successful = 0
