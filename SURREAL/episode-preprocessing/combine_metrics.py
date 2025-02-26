@@ -7,6 +7,17 @@ import logging
 from typing import Dict, List, Optional, Tuple
 import json
 import re
+import os
+import sys
+
+# Get the current file's directory and add parent directory to path if needed
+current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+parent_dir = current_dir.parent
+if str(parent_dir) not in sys.path:
+    sys.path.append(str(parent_dir))
+    
+# Now we can import from config
+from config.paths import EMA_NORMALIZED_DIR
 
 # Configure logging
 logging.basicConfig(
@@ -731,10 +742,24 @@ class MetricsCombiner:
 
 def main():
     """Main function to run the analysis."""
-    # Define paths using Path objects
+    # Import paths from central configuration
+    from config.paths import EMA_NORMALIZED_DIR  # Removed unused EPISODE_OUTPUT_DIR and EMA_FRAGMENTATION_DIR
+    
+    # Define paths using centralized configuration - fix the path to match actual file location
     fragmentation_dir = Path('/Volumes/Extreme SSD/SURREAL-DataBackup/HUJI_data-main/processed/fragmentation')
-    ema_dir = Path('SURREAL/EMA-Processing/output/normalized')
-    output_dir = Path('SURREAL/metrics/output')
+    
+    ema_dir = EMA_NORMALIZED_DIR
+    
+    # Create output directory with the new path
+    daily_output_dir = Path('/Users/noamgal/DSProjects/Fragmentation/SURREAL/processed/daily_ema_fragmentation')
+    daily_output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Print debug information about directories
+    logger.info(f"Looking for fragmentation data in: {fragmentation_dir}")
+    logger.info(f"Directory exists: {fragmentation_dir.exists()}")
+    if fragmentation_dir.exists():
+        sample_files = list(fragmentation_dir.glob("*.csv"))[:3]
+        logger.info(f"Sample files found: {[f.name for f in sample_files]}")
     
     # Check if directories exist
     for name, directory in [('Fragmentation', fragmentation_dir), ('EMA', ema_dir)]:
@@ -743,23 +768,26 @@ def main():
             logger.error("Please check the path and try again.")
             return
     
-    # Create output directory if it doesn't exist
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
     # Initialize and run the combiner
     combiner = MetricsCombiner(
         fragmentation_dir=fragmentation_dir,
         ema_dir=ema_dir,
-        output_dir=output_dir,
-        end_of_day_only=True,  # Only use end-of-day EMA responses
-        debug_mode=False       # Set to True for more detailed logging
+        output_dir=daily_output_dir,
+        end_of_day_only=False,  # Changed to false to include all EMA responses, not just end-of-day
+        debug_mode=True       # Set to True for more detailed logging
     )
     
     # Run the analysis
     combined_data = combiner.run_analysis()
     
-    # Print summary
+    # Save with consistent naming matching window_fragmentation.py
     if combined_data is not None and not combined_data.empty:
+        # Save as daily_ema_fragmentation.csv to match naming convention
+        daily_file = daily_output_dir / 'daily_ema_fragmentation.csv'
+        combined_data.to_csv(daily_file, index=False)
+        logger.info(f"Saved daily EMA fragmentation data to {daily_file}")
+        
+        # Print summary
         logger.info("\n" + "="*50)
         logger.info("COMBINED METRICS ANALYSIS SUMMARY")
         logger.info("="*50)
@@ -792,9 +820,9 @@ def main():
         
         # Output file locations
         logger.info("\nOutput Files:")
-        logger.info(f"  Combined data: {output_dir / 'combined_fragmentation_ema.csv'}")
-        logger.info(f"  Analysis results: {output_dir / 'analysis_results.json'}")
-        logger.info(f"  Visualizations: {output_dir / 'plots/'}")
+        logger.info(f"  Combined data: {daily_file}")
+        logger.info(f"  Analysis results: {daily_output_dir / 'analysis_results.json'}")
+        logger.info(f"  Visualizations: {daily_output_dir / 'plots/'}")
         
         logger.info("\nAnalysis complete!")
     else:
