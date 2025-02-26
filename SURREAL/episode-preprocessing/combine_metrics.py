@@ -1,12 +1,9 @@
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
 from pathlib import Path
 import logging
 from typing import Dict, List, Optional, Tuple
 import json
-import re
 import os
 import sys
 
@@ -528,165 +525,6 @@ class MetricsCombiner:
         
         return results
     
-    def generate_visualizations(self, data: pd.DataFrame):
-        """
-        Generate visualization plots for combined metrics.
-        
-        Args:
-            data: DataFrame with combined fragmentation and EMA data
-        """
-        if data.empty:
-            logger.error("No data for visualizations")
-            return
-        
-        logger.info("Generating visualizations...")
-        
-        # Create plots directory
-        plots_dir = self.output_dir / 'plots'
-        plots_dir.mkdir(exist_ok=True)
-        
-        # Set plot style
-        plt.style.use('seaborn-v0_8-whitegrid')
-        sns.set(font_scale=1.6)  # Increase font size for better readability
-        
-        # Identify fragmentation and EMA metrics columns
-        frag_cols = [col for col in data.columns if 'fragmentation' in col.lower()]
-        
-        # Potential EMA metric columns (adjust based on actual data)
-        ema_indicators = ['anxiety', 'stress', 'mood', 'STAI', 'CES', 'CALM', 'PEACE', 
-                           'SATISFACTION', 'HAPPY', 'ENJOYMENT', 'NERVOUS', 'WORRY']
-        
-        ema_cols = [col for col in data.columns if any(
-            indicator in col for indicator in ema_indicators
-        )]
-        
-        if not frag_cols or not ema_cols:
-            logger.warning("Missing either fragmentation or EMA metrics for visualizations")
-            return
-        
-        # 1. Correlation heatmap
-        plt.figure(figsize=(16, 12))
-        mask = np.zeros((len(frag_cols), len(ema_cols)))
-        corr_matrix = data[frag_cols + ema_cols].corr().loc[frag_cols, ema_cols]
-        
-        # Create heatmap
-        ax = sns.heatmap(
-            corr_matrix, 
-            cmap='coolwarm', 
-            annot=True, 
-            fmt='.2f', 
-            linewidths=0.5,
-            annot_kws={"size": 16}
-        )
-        plt.title('Correlation between Fragmentation and EMA Metrics', fontsize=24)
-        plt.xticks(rotation=45, ha='right', fontsize=16)
-        plt.yticks(fontsize=16)
-        plt.tight_layout()
-        plt.savefig(plots_dir / 'correlation_heatmap.png', dpi=300)
-        plt.close()
-        
-        # 2. Scatter plots for top correlations
-        # Calculate correlations
-        top_correlations = []
-        for frag_col in frag_cols:
-            for ema_col in ema_cols:
-                corr = data[frag_col].corr(data[ema_col])
-                if pd.notna(corr):
-                    top_correlations.append((frag_col, ema_col, corr))
-        
-        # Sort by absolute correlation
-        top_correlations.sort(key=lambda x: abs(x[2]), reverse=True)
-        
-        # Create scatter plots for top 3 correlations
-        for i, (frag_col, ema_col, corr) in enumerate(top_correlations[:3]):
-            plt.figure(figsize=(12, 8))
-            
-            # Create scatter plot with regression line
-            sns.regplot(
-                x=frag_col, 
-                y=ema_col, 
-                data=data,
-                scatter_kws={"s": 80, "alpha": 0.7},
-                line_kws={"color": "red", "lw": 2}
-            )
-            
-            plt.title(f'{frag_col} vs {ema_col}\nCorrelation: {corr:.3f}', fontsize=24)
-            plt.xlabel(frag_col, fontsize=18)
-            plt.ylabel(ema_col, fontsize=18)
-            plt.xticks(fontsize=16)
-            plt.yticks(fontsize=16)
-            plt.tight_layout()
-            plt.savefig(plots_dir / f'scatter_{i+1}_{frag_col}_{ema_col}.png', dpi=300)
-            plt.close()
-        
-        # 3. Box plots of fragmentation by participant
-        if 'participant_id' in data.columns and len(data['participant_id'].unique()) <= 15:
-            for frag_col in frag_cols:
-                plt.figure(figsize=(14, 8))
-                
-                # Create box plot
-                sns.boxplot(
-                    x='participant_id', 
-                    y=frag_col, 
-                    data=data,
-                    palette='Set3'
-                )
-                
-                plt.title(f'{frag_col} by Participant', fontsize=24)
-                plt.xlabel('Participant ID', fontsize=18)
-                plt.ylabel(frag_col, fontsize=18)
-                plt.xticks(rotation=45, fontsize=16)
-                plt.yticks(fontsize=16)
-                plt.tight_layout()
-                plt.savefig(plots_dir / f'boxplot_{frag_col}_by_participant.png', dpi=300)
-                plt.close()
-        
-        # 4. Time series of fragmentation and EMA metrics
-        if 'date' in data.columns:
-            # Convert to datetime if needed
-            if not pd.api.types.is_datetime64_any_dtype(data['date']):
-                data['date'] = pd.to_datetime(data['date'])
-            
-            # Select top fragmentation and EMA metrics
-            top_frag = frag_cols[0] if frag_cols else None
-            top_ema = ema_cols[0] if ema_cols else None
-            
-            if top_frag and top_ema:
-                plt.figure(figsize=(15, 10))
-                
-                # Create two y-axes
-                fig, ax1 = plt.subplots(figsize=(15, 8))
-                ax2 = ax1.twinx()
-                
-                # Plot time series
-                sns.lineplot(
-                    x='date', y=top_frag, data=data, ax=ax1,
-                    color='blue', marker='o', markersize=8
-                )
-                
-                sns.lineplot(
-                    x='date', y=top_ema, data=data, ax=ax2,
-                    color='red', marker='s', markersize=8
-                )
-                
-                # Set labels and title
-                ax1.set_xlabel('Date', fontsize=18)
-                ax1.set_ylabel(top_frag, color='blue', fontsize=18)
-                ax2.set_ylabel(top_ema, color='red', fontsize=18)
-                
-                plt.title(f'Time Series of {top_frag} and {top_ema}', fontsize=24)
-                
-                # Set tick parameters
-                ax1.tick_params(axis='y', labelcolor='blue', labelsize=16)
-                ax2.tick_params(axis='y', labelcolor='red', labelsize=16)
-                ax1.tick_params(axis='x', labelsize=16, rotation=45)
-                
-                plt.tight_layout()
-                plt.savefig(plots_dir / 'time_series.png', dpi=300)
-                plt.close()
-        
-        logger.info(f"Saved visualizations to {plots_dir}")
-    
     def run_analysis(self):
         """
         Run the complete combined analysis workflow.
@@ -734,16 +572,13 @@ class MetricsCombiner:
                 json.dump(serializable_results, f, indent=4)
             logger.info(f"Saved analysis results to {results_file}")
         
-        # 5. Generate visualizations
-        self.generate_visualizations(combined_data)
-        
         logger.info("Analysis complete!")
         return combined_data
 
 def main():
     """Main function to run the analysis."""
     # Import paths from central configuration
-    from config.paths import EMA_NORMALIZED_DIR  # Removed unused EPISODE_OUTPUT_DIR and EMA_FRAGMENTATION_DIR
+    from config.paths import EMA_NORMALIZED_DIR  # Removed unused imports
     
     # Define paths using centralized configuration - fix the path to match actual file location
     fragmentation_dir = Path('/Volumes/Extreme SSD/SURREAL-DataBackup/HUJI_data-main/processed/fragmentation')
@@ -818,11 +653,10 @@ def main():
         
         logger.info(f"\nEMA Metrics: {len(ema_cols)}")
         
-        # Output file locations
+        # Output file locations (removed visualization reference)
         logger.info("\nOutput Files:")
         logger.info(f"  Combined data: {daily_file}")
         logger.info(f"  Analysis results: {daily_output_dir / 'analysis_results.json'}")
-        logger.info(f"  Visualizations: {daily_output_dir / 'plots/'}")
         
         logger.info("\nAnalysis complete!")
     else:
