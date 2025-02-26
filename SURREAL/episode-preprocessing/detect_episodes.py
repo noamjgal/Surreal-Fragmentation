@@ -326,7 +326,7 @@ class EpisodeProcessor:
                 self.logger.debug(f"Detected {len(episodes)} digital episodes for {date}")
                 
         return episodes_by_day
-
+    
     def process_mobility_episodes(self, positionfixes: ti.Positionfixes) -> Dict[datetime.date, pd.DataFrame]:
         """
         Process mobility episodes using the Trackintel library
@@ -341,56 +341,148 @@ class EpisodeProcessor:
                 gap_threshold=STAYPOINT_GAP_THRESHOLD
             )
             
-            # Generate triplegs from positionfixes and staypoints
+            # Debug info
+            if not staypoints.empty:
+                self.logger.debug(f"Generated {len(staypoints)} staypoints")
+                
+                # Print column info
+                if 'started_at' in staypoints.columns:
+                    self.logger.debug(f"started_at dtype: {staypoints['started_at'].dtype}")
+                    if len(staypoints) > 0:
+                        self.logger.debug(f"started_at first value: {staypoints['started_at'].iloc[0]}")
+                        self.logger.debug(f"started_at type: {type(staypoints['started_at'].iloc[0])}")
+                
+                # More robust conversion of started_at and finished_at
+                # Instead of conditional conversion, we'll force conversion to ensure consistency
+                if 'started_at' in staypoints.columns:
+                    try:
+                        # Force convert to datetime if it's not already
+                        if not isinstance(staypoints['started_at'].dtype, pd.DatetimeTZDtype):
+                            # If it's a float, treat as Unix timestamp in seconds
+                            if pd.api.types.is_float_dtype(staypoints['started_at']):
+                                self.logger.debug("Converting started_at from float to datetime")
+                                staypoints['started_at'] = pd.to_datetime(staypoints['started_at'], unit='s')
+                            else:
+                                # Otherwise try general conversion
+                                staypoints['started_at'] = pd.to_datetime(staypoints['started_at'])
+                        
+                        # Now ensure it's timezone-aware
+                        if not staypoints['started_at'].dt.tz:
+                            self.logger.debug("Adding timezone information to started_at")
+                            staypoints['started_at'] = staypoints['started_at'].dt.tz_localize('UTC')
+                        
+                        self.logger.debug(f"After conversion, started_at dtype: {staypoints['started_at'].dtype}")
+                    except Exception as e:
+                        self.logger.error(f"Error converting started_at: {str(e)}")
+                        # Last resort: recreate as new timezone-aware column
+                        try:
+                            # Create new column with timezone info
+                            if pd.api.types.is_float_dtype(staypoints['started_at']):
+                                temp_dt = pd.to_datetime(staypoints['started_at'], unit='s', utc=True)
+                                staypoints = staypoints.drop(columns=['started_at'])
+                                staypoints['started_at'] = temp_dt
+                                self.logger.debug("Recreated started_at column with UTC timezone")
+                        except Exception as e2:
+                            self.logger.error(f"Failed final attempt to convert started_at: {str(e2)}")
+                
+                # Same for finished_at
+                if 'finished_at' in staypoints.columns:
+                    try:
+                        # Force convert to datetime if it's not already
+                        if not isinstance(staypoints['finished_at'].dtype, pd.DatetimeTZDtype):
+                            # If it's a float, treat as Unix timestamp in seconds
+                            if pd.api.types.is_float_dtype(staypoints['finished_at']):
+                                self.logger.debug("Converting finished_at from float to datetime")
+                                staypoints['finished_at'] = pd.to_datetime(staypoints['finished_at'], unit='s')
+                            else:
+                                # Otherwise try general conversion
+                                staypoints['finished_at'] = pd.to_datetime(staypoints['finished_at'])
+                        
+                        # Now ensure it's timezone-aware
+                        if not staypoints['finished_at'].dt.tz:
+                            self.logger.debug("Adding timezone information to finished_at")
+                            staypoints['finished_at'] = staypoints['finished_at'].dt.tz_localize('UTC')
+                    except Exception as e:
+                        self.logger.error(f"Error converting finished_at: {str(e)}")
+                        # Last resort: recreate as new timezone-aware column
+                        try:
+                            # Create new column with timezone info
+                            if pd.api.types.is_float_dtype(staypoints['finished_at']):
+                                temp_dt = pd.to_datetime(staypoints['finished_at'], unit='s', utc=True)
+                                staypoints = staypoints.drop(columns=['finished_at'])
+                                staypoints['finished_at'] = temp_dt
+                                self.logger.debug("Recreated finished_at column with UTC timezone")
+                        except Exception as e2:
+                            self.logger.error(f"Failed final attempt to convert finished_at: {str(e2)}")
+            
+            # Check if we still have empty staypoints or if there was an error during generation
+            if staypoints.empty:
+                self.logger.warning("No staypoints were generated, skipping tripleg generation")
+                return {}
+            
+            # Verify datetime columns before proceeding
+            if 'started_at' in staypoints.columns:
+                if not isinstance(staypoints['started_at'].dtype, pd.DatetimeTZDtype):
+                    self.logger.error(f"After conversion, started_at is still not timezone-aware: {staypoints['started_at'].dtype}")
+                    # We'll create a minimal mock dataframe to prevent errors in the next steps
+                    return {}
+            
+            # Now proceed with generating triplegs
             self.logger.debug("Generating triplegs from positionfixes and staypoints")
-            pfs, triplegs = pfs.generate_triplegs(staypoints, gap_threshold=STAYPOINT_GAP_THRESHOLD)
-            
-            # Flag staypoints as activities (add is_activity column)
-            self.logger.debug("Adding activity flag to staypoints")
-            staypoints = staypoints.create_activity_flag()
-            
-            # Generate trips from staypoints and triplegs
-            self.logger.debug("Generating trips from staypoints and triplegs")
-            staypoints, triplegs, trips = staypoints.generate_trips(triplegs, gap_threshold=TRIP_GAP_THRESHOLD)
-            
-            # Convert trips into our format grouped by day
-            trips['date'] = trips['started_at'].dt.date
-            episodes_by_day = {}
-            
-            # Add centroid and distance for trips (since they don't have point geometry by default)
-            if not trips.empty:
-                trips['latitude'] = np.nan
-                trips['longitude'] = np.nan
+            try:
+                pfs, triplegs = pfs.generate_triplegs(staypoints, gap_threshold=STAYPOINT_GAP_THRESHOLD)
                 
-                # Try to get origin staypoint coordinates
-                if 'origin_staypoint_id' in trips.columns and not staypoints.empty:
-                    for idx, trip in trips.iterrows():
-                        if pd.notna(trip['origin_staypoint_id']):
-                            origin_sp = staypoints[staypoints.index == trip['origin_staypoint_id']]
-                            if not origin_sp.empty:
-                                trips.at[idx, 'latitude'] = origin_sp.iloc[0].geometry.y
-                                trips.at[idx, 'longitude'] = origin_sp.iloc[0].geometry.x
-            
-            for date, day_trips in trips.groupby('date'):
-                # Create a DataFrame in our expected format
-                mobility_episodes = pd.DataFrame({
-                    'started_at': day_trips['started_at'],
-                    'finished_at': day_trips['finished_at'],
-                    'duration': day_trips['finished_at'] - day_trips['started_at'],
-                    'latitude': day_trips['latitude'],
-                    'longitude': day_trips['longitude'],
-                    'state': 'mobility'
-                })
+                # Flag staypoints as activities (add is_activity column)
+                self.logger.debug("Adding activity flag to staypoints")
+                staypoints = staypoints.create_activity_flag()
                 
-                # Remove timezone information
-                mobility_episodes['started_at'] = ensure_tz_naive(mobility_episodes['started_at'])
-                mobility_episodes['finished_at'] = ensure_tz_naive(mobility_episodes['finished_at'])
+                # Generate trips from staypoints and triplegs
+                self.logger.debug("Generating trips from staypoints and triplegs")
+                staypoints, triplegs, trips = staypoints.generate_trips(triplegs, gap_threshold=TRIP_GAP_THRESHOLD)
                 
-                episodes_by_day[date] = mobility_episodes
-                self.logger.debug(f"Processed {len(mobility_episodes)} mobility episodes for {date}")
-            
-            return episodes_by_day
-            
+                # Convert trips into our format grouped by day
+                trips['date'] = trips['started_at'].dt.date
+                episodes_by_day = {}
+                
+                # Add centroid and distance for trips (since they don't have point geometry by default)
+                if not trips.empty:
+                    trips['latitude'] = np.nan
+                    trips['longitude'] = np.nan
+                    
+                    # Try to get origin staypoint coordinates
+                    if 'origin_staypoint_id' in trips.columns and not staypoints.empty:
+                        for idx, trip in trips.iterrows():
+                            if pd.notna(trip['origin_staypoint_id']):
+                                origin_sp = staypoints[staypoints.index == trip['origin_staypoint_id']]
+                                if not origin_sp.empty:
+                                    trips.at[idx, 'latitude'] = origin_sp.iloc[0].geometry.y
+                                    trips.at[idx, 'longitude'] = origin_sp.iloc[0].geometry.x
+                
+                for date, day_trips in trips.groupby('date'):
+                    # Create a DataFrame in our expected format
+                    mobility_episodes = pd.DataFrame({
+                        'started_at': day_trips['started_at'],
+                        'finished_at': day_trips['finished_at'],
+                        'duration': day_trips['finished_at'] - day_trips['started_at'],
+                        'latitude': day_trips['latitude'],
+                        'longitude': day_trips['longitude'],
+                        'state': 'mobility'
+                    })
+                    
+                    # Remove timezone information
+                    mobility_episodes['started_at'] = ensure_tz_naive(mobility_episodes['started_at'])
+                    mobility_episodes['finished_at'] = ensure_tz_naive(mobility_episodes['finished_at'])
+                    
+                    episodes_by_day[date] = mobility_episodes
+                    self.logger.debug(f"Processed {len(mobility_episodes)} mobility episodes for {date}")
+                
+                return episodes_by_day
+                
+            except Exception as e:
+                self.logger.error(f"Error generating triplegs: {str(e)}")
+                traceback.print_exc()
+                return {}
+                
         except Exception as e:
             self.logger.error(f"Error processing mobility episodes: {str(e)}")
             traceback.print_exc()
