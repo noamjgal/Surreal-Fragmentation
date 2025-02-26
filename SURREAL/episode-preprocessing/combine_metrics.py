@@ -1,666 +1,415 @@
 import pandas as pd
 import numpy as np
+import os
 from pathlib import Path
 import logging
-from typing import Dict, List, Optional, Tuple
-import json
-import os
-import sys
+from datetime import datetime
 
-# Get the current file's directory and add parent directory to path if needed
-current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
-parent_dir = current_dir.parent
-if str(parent_dir) not in sys.path:
-    sys.path.append(str(parent_dir))
-    
-# Now we can import from config
-from config.paths import EMA_NORMALIZED_DIR
-
-# Configure logging
+# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger(__name__)
 
-class MetricsCombiner:
-    """
-    Combines fragmentation metrics with EMA responses and generates analyses.
-    """
-    def __init__(self, 
-                 fragmentation_dir: Path, 
-                 ema_dir: Path,
-                 output_dir: Path,
-                 end_of_day_only: bool = True,
-                 debug_mode: bool = False):
-        """
-        Initialize the metrics combiner.
-        
-        Args:
-            fragmentation_dir: Directory containing fragmentation metrics
-            ema_dir: Directory containing EMA data
-            output_dir: Directory for saving outputs
-            end_of_day_only: Whether to use only end-of-day EMA responses
-            debug_mode: Whether to enable debug logging
-        """
-        self.fragmentation_dir = fragmentation_dir
-        self.ema_dir = ema_dir
-        self.output_dir = output_dir
-        self.end_of_day_only = end_of_day_only
-        self.debug_mode = debug_mode
-        
-        # Configure logging level
-        if debug_mode:
-            logger.setLevel(logging.DEBUG)
-            
-        # Ensure output directory exists
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+def load_normalized_ema_data(normalized_dir):
+    """Load all normalized EMA data and create daily averages."""
+    logging.info("Loading normalized EMA data...")
     
-    def load_fragmentation_data(self) -> pd.DataFrame:
-        """
-        Load fragmentation metrics from the fragmentation directory.
-        
-        Returns:
-            DataFrame containing fragmentation metrics
-        """
-        logger.info("Loading fragmentation data...")
-        
-        # Try different possible filenames for fragmentation data
-        possible_files = [
-            'fragmentation_all_metrics.csv',
-            'fragmentation_metrics.csv',
-            'daily_fragmentation.csv'
-        ]
-        
-        for filename in possible_files:
-            file_path = self.fragmentation_dir / filename
-            if file_path.exists():
-                logger.info(f"Found fragmentation data at: {file_path}")
-                frag_data = pd.read_csv(file_path)
-                
-                # Check if we have the expected columns
-                required_cols = ['participant_id', 'date']
-                frag_cols = [col for col in frag_data.columns if 'fragmentation' in col]
-                
-                if all(col in frag_data.columns for col in required_cols) and frag_cols:
-                    logger.info(f"Loaded fragmentation data with {len(frag_data)} rows and {len(frag_data.columns)} columns")
-                    
-                    # Convert date to datetime if it's not already
-                    if 'date' in frag_data.columns and not pd.api.types.is_datetime64_any_dtype(frag_data['date']):
-                        frag_data['date'] = pd.to_datetime(frag_data['date'])
-                    
-                    return frag_data
-        
-        logger.error("No valid fragmentation data found. Please check the path.")
-        return pd.DataFrame()
+    # Find all normalized participant files
+    normalized_files = list(normalized_dir.glob("normalized_participant_*.csv"))
+    logging.info(f"Found {len(normalized_files)} normalized participant files")
     
-    def load_ema_data(self) -> pd.DataFrame:
-        """
-        Load normalized EMA data, focusing on end-of-day responses if specified.
-        
-        Returns:
-            DataFrame containing EMA data
-        """
-        logger.info("Loading EMA data...")
-        
-        # First try the summary files
-        summary_files = [
-            'overall_summary_by_scale.csv',
-            'overall_summary_by_variable.csv'
-        ]
-        
-        for filename in summary_files:
-            file_path = self.ema_dir / filename
-            if file_path.exists():
-                logger.info(f"Found EMA summary data at: {file_path}")
-                ema_data = pd.read_csv(file_path)
-                
-                # Check if we have the expected columns
-                if 'Participant_ID' in ema_data.columns and ('Scale' in ema_data.columns or 'Variable' in ema_data.columns):
-                    logger.info(f"Loaded EMA summary data with {len(ema_data)} rows")
-                    
-                    # Convert date columns to datetime if they exist
-                    for date_col in ['First_Response', 'Last_Response']:
-                        if date_col in ema_data.columns and not pd.api.types.is_datetime64_any_dtype(ema_data[date_col]):
-                            ema_data[date_col] = pd.to_datetime(ema_data[date_col])
-                    
-                    # If this is variable-level data, we'll process it differently
-                    if 'Variable' in ema_data.columns:
-                        return self._process_variable_ema_data(ema_data)
-                    return ema_data
-        
-        # If summary files not found, look for individual normalized files
-        all_ema_data = []
-        normalized_files = list(self.ema_dir.glob("normalized_*.csv"))
-        
-        if normalized_files:
-            logger.info(f"Found {len(normalized_files)} normalized EMA files")
-            
-            for file_path in normalized_files:
-                try:
-                    ema_file = pd.read_csv(file_path)
-                    
-                    # Filter for end-of-day EMA if specified
-                    if self.end_of_day_only:
-                        # Look for indicators of end-of-day EMA
-                        # This will depend on your specific data, adapt as needed
-                        eod_indicators = ['end_of_day', 'evening', 'night', 'EOD']
-                        
-                        # Try different potential column names that might indicate EMA timing
-                        timing_cols = [col for col in ema_file.columns if any(
-                            timing_term in col.lower() for timing_term in 
-                            ['time', 'timing', 'period', 'session', 'type']
-                        )]
-                        
-                        if timing_cols:
-                            for col in timing_cols:
-                                mask = ema_file[col].astype(str).str.lower().apply(
-                                    lambda x: any(indicator.lower() in x for indicator in eod_indicators)
-                                )
-                                if mask.sum() > 0:
-                                    ema_file = ema_file[mask].copy()
-                                    logger.debug(f"Filtered to {len(ema_file)} end-of-day EMAs in {file_path.name}")
-                                    break
-                    
-                    # Add to our collection
-                    if not ema_file.empty:
-                        all_ema_data.append(ema_file)
-                
-                except Exception as e:
-                    logger.error(f"Error processing {file_path.name}: {str(e)}")
-            
-            if all_ema_data:
-                combined_ema = pd.concat(all_ema_data, ignore_index=True)
-                logger.info(f"Combined {len(combined_ema)} EMA rows from individual files")
-                return combined_ema
-        
-        logger.error("No valid EMA data found. Please check the path.")
-        return pd.DataFrame()
+    all_daily_ema = []
     
-    def _process_variable_ema_data(self, data: pd.DataFrame) -> pd.DataFrame:
-        """
-        Process variable-level EMA data to make it suitable for merging.
-        
-        Args:
-            data: DataFrame with variable-level EMA data
-            
-        Returns:
-            Processed DataFrame ready for merging
-        """
-        # Pivot the data to have variables as columns
-        # This makes it easier to merge with fragmentation data
-        
-        # First, determine which value column to use
-        value_cols = [col for col in data.columns if any(
-            term in col for term in ['Mean', 'SD', 'Score']
-        )]
-        
-        # Prioritize Z-standardized scores if available
-        value_col = next((col for col in value_cols if 'Zstd' in col and 'Mean' in col), None)
-        if not value_col:
-            value_col = next((col for col in value_cols if 'Mean' in col), None)
-        
-        if not value_col:
-            logger.warning("Could not find appropriate value column for EMA data")
-            return data
-        
-        # Create date column from First_Response if needed
-        if 'date' not in data.columns and 'First_Response' in data.columns:
-            data['date'] = pd.to_datetime(data['First_Response']).dt.date
-        
-        # Pivot the data
-        pivot_cols = ['Participant_ID', 'date']
-        if all(col in data.columns for col in pivot_cols):
-            try:
-                # Group by participant, date, and variable
-                pivot_data = data.pivot_table(
-                    index=pivot_cols,
-                    columns='Variable' if 'Variable' in data.columns else 'Scale',
-                    values=value_col,
-                    aggfunc='mean'
-                ).reset_index()
-                
-                logger.info(f"Pivoted EMA data to have {len(pivot_data.columns)} columns")
-                return pivot_data
-            except Exception as e:
-                logger.error(f"Error pivoting EMA data: {str(e)}")
-                return data
-        
-        return data
-    
-    def _normalize_participant_id(self, participant_id):
-        """
-        Normalize participant IDs to handle different formats.
-        Extracts the numeric portion from prefixed IDs like 'Surreal_123' or 'SURREAL123'.
-        
-        Args:
-            participant_id: Participant ID in any format
-            
-        Returns:
-            Normalized ID as string
-        """
-        if participant_id is None:
-            return ""
-        
-        # Convert to string if not already
-        id_str = str(participant_id).strip()
-        
-        # Extract numeric portion from prefixed IDs
-        if 'surreal' in id_str.lower():
-            # Extract all digits
-            digits = ''.join(c for c in id_str if c.isdigit())
-            if digits:
-                # Remove leading zeros
-                return str(int(digits))
-            else:
-                return id_str
-        else:
-            # For already numeric IDs, ensure consistent format
-            try:
-                # If it's purely numeric, remove leading zeros
-                if id_str.isdigit():
-                    return str(int(id_str))
-                else:
-                    return id_str
-            except:
-                return id_str
-
-    def merge_data(self, frag_data: pd.DataFrame, ema_data: pd.DataFrame) -> pd.DataFrame:
-        """
-        Merge fragmentation and EMA data based on participant ID and date.
-        
-        Args:
-            frag_data: DataFrame with fragmentation metrics
-            ema_data: DataFrame with EMA responses
-            
-        Returns:
-            Merged DataFrame
-        """
-        logger.info("Merging fragmentation and EMA data...")
-        
-        if frag_data.empty or ema_data.empty:
-            logger.error("Cannot merge: One or both datasets are empty")
-            return pd.DataFrame()
-        
-        # Handle different column naming conventions
-        frag_id_col = 'participant_id'
-        ema_id_col = 'Participant_ID' if 'Participant_ID' in ema_data.columns else 'participant_id'
-        
-        # Check if we have both ID columns in both datasets
-        if frag_id_col not in frag_data.columns:
-            logger.error(f"Column '{frag_id_col}' not found in fragmentation data")
-            return pd.DataFrame()
-        
-        if ema_id_col not in ema_data.columns:
-            logger.error(f"Column '{ema_id_col}' not found in EMA data")
-            return pd.DataFrame()
-        
-        # Make copies to avoid modifying originals
-        frag_data = frag_data.copy()
-        ema_data = ema_data.copy()
-        
-        # Create normalized participant ID columns for merging
-        logger.info("Normalizing participant IDs for better matching...")
-        frag_data['normalized_id'] = frag_data[frag_id_col].apply(self._normalize_participant_id)
-        ema_data['normalized_id'] = ema_data[ema_id_col].apply(self._normalize_participant_id)
-        
-        # Log original and normalized IDs for both datasets
-        logger.info("Sample participant ID normalization for fragmentation data:")
-        sample_frag_ids = list(zip(frag_data[frag_id_col].head(5), frag_data['normalized_id'].head(5)))
-        for orig, norm in sample_frag_ids:
-            logger.info(f"  Original: {orig} -> Normalized: {norm}")
-        
-        logger.info("Sample participant ID normalization for EMA data:")
-        sample_ema_ids = list(zip(ema_data[ema_id_col].head(5), ema_data['normalized_id'].head(5)))
-        for orig, norm in sample_ema_ids:
-            logger.info(f"  Original: {orig} -> Normalized: {norm}")
-        
-        # Check for participant ID overlap
-        frag_participants = set(frag_data['normalized_id'].unique())
-        ema_participants = set(ema_data['normalized_id'].unique())
-        common_participants = frag_participants.intersection(ema_participants)
-        
-        logger.info(f"Fragmentation data has {len(frag_participants)} unique participants")
-        logger.info(f"EMA data has {len(ema_participants)} unique participants")
-        logger.info(f"There are {len(common_participants)} participants in common after normalization")
-        
-        if len(common_participants) == 0:
-            logger.error("No common participants found between the datasets even after normalization")
-            # Print all unique IDs to help debugging
-            logger.info(f"All normalized fragmentation IDs: {sorted(list(frag_participants))}")
-            logger.info(f"All normalized EMA IDs: {sorted(list(ema_participants))}")
-            return pd.DataFrame()
-        
-        # Check if EMA data is daily-level or summary-level
-        # Look for date-related columns that might indicate daily data
-        ema_date_cols = [col for col in ema_data.columns if any(
-            term in col.lower() for term in ['date', 'day', 'response', 'time']
-        )]
-        
-        # Default to summary-level EMA data
-        has_daily_ema = False
-        ema_date_col = None
-        
-        # Check if any date column has valid, non-placeholder dates
-        for col in ema_date_cols:
-            if pd.api.types.is_datetime64_any_dtype(ema_data[col]) or 'date' in col.lower():
-                # Convert to datetime if not already
-                if not pd.api.types.is_datetime64_any_dtype(ema_data[col]):
-                    try:
-                        ema_data[col] = pd.to_datetime(ema_data[col], errors='coerce')
-                    except:
-                        continue
-                
-                # Check if this column has multiple dates per participant
-                date_counts_per_participant = ema_data.groupby('normalized_id')[col].nunique()
-                max_dates_per_participant = date_counts_per_participant.max()
-                
-                # Check if dates are not placeholders (1970-01-01)
-                if max_dates_per_participant > 1:
-                    # Convert dates to date objects for comparison
-                    dates = pd.to_datetime(ema_data[col]).dt.date
-                    # Check if all dates are not epoch/placeholder (1970-01-01)
-                    placeholder_date = pd.Timestamp('1970-01-01').date()
-                    non_placeholder_dates = dates[dates != placeholder_date]
-                    
-                    if len(non_placeholder_dates) > 0:
-                        has_daily_ema = True
-                        ema_date_col = col
-                        logger.info(f"Found valid daily date column: {col}")
-                        break
-        
-        # Log what we detected
-        if has_daily_ema:
-            logger.info(f"Detected daily-level EMA data using column: {ema_date_col}")
-        else:
-            logger.info("No valid daily date columns found - treating as summary-level EMA data")
-        
-        # Since we have common participants but no common dates, force participant_id-only merge
-        logger.info("Forcing participant ID-only merge since we have common participants")
-        
+    for file in normalized_files:
         try:
-            merged_df = pd.merge(
-                frag_data,
-                ema_data,
-                on='normalized_id',
-                how='inner'
-            )
+            # Extract participant ID
+            participant_id = file.stem.replace('normalized_participant_', '')
             
-            # Clean up - remove the temporary normalized ID column
-            if 'normalized_id' in merged_df.columns:
-                merged_df = merged_df.drop('normalized_id', axis=1)
+            logging.info(f"Processing EMA data for participant {participant_id}")
             
-            # If we have duplicate column names (except for the merged columns), rename them
-            duplicate_cols = [col for col in merged_df.columns if merged_df.columns.tolist().count(col) > 1]
-            if duplicate_cols:
-                rename_dict = {}
-                for col in duplicate_cols:
-                    if col not in ['normalized_id']:  # Skip already merged columns
-                        # Find all occurrences and rename them
-                        occurrences = [i for i, c in enumerate(merged_df.columns) if c == col]
-                        for i, pos in enumerate(occurrences[1:], 1):  # Skip first occurrence
-                            rename_dict[merged_df.columns[pos]] = f"{col}_ema_{i}"
+            # Load data
+            ema_data = pd.read_csv(file)
             
-            # Apply renaming
-            if rename_dict:
-                merged_df = merged_df.rename(columns=rename_dict)
+            # Skip if empty
+            if ema_data.empty:
+                logging.warning(f"Empty data for participant {participant_id}")
+                continue
+                
+            # Convert datetime column
+            if 'datetime' in ema_data.columns:
+                ema_data['datetime'] = pd.to_datetime(ema_data['datetime'])
+                ema_data['date'] = ema_data['datetime'].dt.date
+            else:
+                logging.warning(f"No datetime column found for participant {participant_id}")
+                continue
             
-            # Check if we have any data after merging
-            if merged_df.empty:
-                logger.error("No data after merging - this should not happen if we had common participants")
-                return pd.DataFrame()
+            # Filter only for STAI and CES-D scales
+            ema_data = ema_data[ema_data['Scale'].isin(['STAI-Y-A-6', 'CES-D-8'])].copy()
             
-            logger.info(f"Merged data has {len(merged_df)} rows and {len(merged_df.columns)} columns")
-            logger.info(f"Retained {len(merged_df)} of {len(frag_data.loc[frag_data['normalized_id'].isin(common_participants)])} fragmentation data points")
+            # Skip if no valid data after filtering
+            if ema_data.empty:
+                logging.warning(f"No STAI or CES-D data for participant {participant_id}")
+                continue
             
-            return merged_df
+            # Log the date range for this participant
+            date_range = ema_data['date'].unique()
+            logging.info(f"Participant {participant_id} has data for {len(date_range)} days: {date_range[0]} to {date_range[-1]}")
+            
+            # Create daily averages
+            daily_data = []
+            
+            # Calculate daily averages for each scale
+            for scale in ['STAI-Y-A-6', 'CES-D-8']:
+                scale_data = ema_data[ema_data['Scale'] == scale].copy()
+                
+                if not scale_data.empty:
+                    # Group by date and calculate mean z-scores
+                    daily_scale = scale_data.groupby('date').agg({
+                        'score_zstd': 'mean',
+                        'score_reversed': 'mean',
+                        'Participant_ID': 'first'  # Keep participant ID
+                    }).reset_index()
+                    
+                    # Rename columns to include scale
+                    daily_scale = daily_scale.rename(columns={
+                        'score_zstd': f'{scale}_zstd',
+                        'score_reversed': f'{scale}_raw'
+                    })
+                    
+                    daily_data.append(daily_scale)
+                    
+                    logging.info(f"Processed {len(scale_data)} {scale} responses, creating {len(daily_scale)} daily averages")
+            
+            # Merge daily averages for different scales
+            if daily_data:
+                participant_daily = daily_data[0]
+                for i in range(1, len(daily_data)):
+                    participant_daily = pd.merge(
+                        participant_daily, daily_data[i],
+                        on=['date', 'Participant_ID'],
+                        how='outer'
+                    )
+                
+                # Format date as string to match fragmentation data
+                participant_daily['date_str'] = participant_daily['date'].astype(str)
+                
+                # Add to all daily data
+                all_daily_ema.append(participant_daily)
+                
+                logging.info(f"Created {len(participant_daily)} daily records for participant {participant_id}")
+            else:
+                logging.warning(f"No daily data created for participant {participant_id}")
+                
         except Exception as e:
-            logger.error(f"Error during merge: {str(e)}")
-            # If there was an error, try a more basic merge approach
-            logger.info("Trying a basic merge approach...")
-            try:
-                # Simplify the datasets to just ID and a few key columns
-                frag_simple = frag_data[['normalized_id', frag_id_col]].drop_duplicates()
-                
-                # Find fragmentation columns
-                frag_metric_cols = [col for col in frag_data.columns if 'fragmentation' in col.lower()]
-                
-                if frag_metric_cols:
-                    # For each fragmentation metric, compute the mean per participant
-                    for col in frag_metric_cols:
-                        frag_simple[col] = frag_data.groupby('normalized_id')[col].mean().reindex(frag_simple['normalized_id']).values
-                
-                # Merge simplified dataframes
-                merged_simple = pd.merge(
-                    frag_simple,
-                    ema_data,
-                    on='normalized_id',
-                    how='inner'
-                )
-                
-                # Remove normalized_id
-                if 'normalized_id' in merged_simple.columns:
-                    merged_simple = merged_simple.drop('normalized_id', axis=1)
-                
-                logger.info(f"Basic merge approach returned {len(merged_simple)} rows")
-                return merged_simple
-                
-            except Exception as e2:
-                logger.error(f"Basic merge also failed: {str(e2)}")
-                return pd.DataFrame()
+            logging.error(f"Error processing {file.name}: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
     
-    def analyze_combined_data(self, data: pd.DataFrame) -> Dict:
-        """
-        Analyze the combined dataset with fragmentation and EMA metrics.
-        
-        Args:
-            data: DataFrame with combined fragmentation and EMA data
-            
-        Returns:
-            Dictionary with analysis results
-        """
-        if data.empty:
-            logger.error("No data to analyze")
-            return {}
-        
-        logger.info("Analyzing combined data...")
-        
-        results = {}
-        
-        # Identify fragmentation and EMA metrics columns
-        frag_cols = [col for col in data.columns if 'fragmentation' in col.lower()]
-        
-        # Potential EMA metric columns (adjust based on actual data)
-        ema_indicators = ['anxiety', 'stress', 'mood', 'STAI', 'CES', 'CALM', 'PEACE', 
-                           'SATISFACTION', 'HAPPY', 'ENJOYMENT', 'NERVOUS', 'WORRY']
-        
-        ema_cols = [col for col in data.columns if any(
-            indicator in col for indicator in ema_indicators
-        )]
-        
-        # Basic statistics for each group of metrics
-        for col_group, col_list in [('fragmentation', frag_cols), ('ema', ema_cols)]:
-            if col_list:
-                group_stats = data[col_list].describe()
-                results[f'{col_group}_stats'] = group_stats.to_dict()
-                logger.info(f"Calculated statistics for {len(col_list)} {col_group} metrics")
-        
-        # Calculate correlations between fragmentation and EMA metrics
-        if frag_cols and ema_cols:
-            correlations = data[frag_cols + ema_cols].corr()
-            # Extract just the cross-correlations (frag vs ema)
-            cross_corr = correlations.loc[frag_cols, ema_cols]
-            results['cross_correlations'] = cross_corr.to_dict()
-            
-            # Identify strongest correlations
-            flat_corr = []
-            for frag_col in frag_cols:
-                for ema_col in ema_cols:
-                    corr_val = correlations.loc[frag_col, ema_col]
-                    if not pd.isna(corr_val):
-                        flat_corr.append((frag_col, ema_col, corr_val))
-            
-            # Sort by absolute correlation value
-            flat_corr.sort(key=lambda x: abs(x[2]), reverse=True)
-            results['strongest_correlations'] = flat_corr[:5]  # Top 5
-            
-            logger.info(f"Calculated {len(flat_corr)} cross-correlations between metrics")
-            
-            # Log the strongest correlations
-            if flat_corr:
-                logger.info("Strongest correlations between fragmentation and EMA metrics:")
-                for frag, ema, corr in flat_corr[:5]:
-                    logger.info(f"  {frag} vs {ema}: {corr:.3f}")
-        
-        # Participant-level summaries
-        if 'participant_id' in data.columns:
-            participant_counts = data['participant_id'].value_counts()
-            results['participant_counts'] = participant_counts.to_dict()
-            
-            # Group by participant and calculate means
-            participant_means = data.groupby('participant_id')[frag_cols + ema_cols].mean()
-            results['participant_means'] = participant_means.to_dict()
-            
-            logger.info(f"Generated summaries for {len(participant_counts)} participants")
-        
-        return results
-    
-    def run_analysis(self):
-        """
-        Run the complete combined analysis workflow.
-        """
-        logger.info("Starting combined metrics analysis...")
-        
-        # 1. Load data
-        frag_data = self.load_fragmentation_data()
-        ema_data = self.load_ema_data()
-        
-        if frag_data.empty or ema_data.empty:
-            logger.error("Analysis cannot proceed due to missing data")
-            return None
-        
-        # 2. Merge data
-        combined_data = self.merge_data(frag_data, ema_data)
-        
-        if combined_data.empty:
-            logger.error("No data after merging")
-            return None
-        
-        # 3. Save the combined dataset
-        combined_file = self.output_dir / 'combined_fragmentation_ema.csv'
-        combined_data.to_csv(combined_file, index=False)
-        logger.info(f"Saved combined dataset to {combined_file}")
-        
-        # 4. Analyze the data
-        analysis_results = self.analyze_combined_data(combined_data)
-        
-        if analysis_results:
-            # Convert numpy types to Python native types for JSON serialization
-            serializable_results = {}
-            for k, v in analysis_results.items():
-                if isinstance(v, dict):
-                    serializable_results[k] = {
-                        k2: float(v2) if isinstance(v2, (np.float32, np.float64, np.int64)) else v2
-                        for k2, v2 in v.items()
-                    }
-                else:
-                    serializable_results[k] = float(v) if isinstance(v, (np.float32, np.float64, np.int64)) else v
-            
-            # Save analysis results
-            results_file = self.output_dir / 'analysis_results.json'
-            with open(results_file, 'w') as f:
-                json.dump(serializable_results, f, indent=4)
-            logger.info(f"Saved analysis results to {results_file}")
-        
-        logger.info("Analysis complete!")
-        return combined_data
+    # Combine all participants' daily data
+    if all_daily_ema:
+        combined_daily_ema = pd.concat(all_daily_ema, ignore_index=True)
+        return combined_daily_ema
+    else:
+        logging.warning("No valid daily EMA data found")
+        return None
 
-def main():
-    """Main function to run the analysis."""
-    # Import paths from central configuration
-    from config.paths import EMA_NORMALIZED_DIR  # Removed unused imports
+def load_fragmentation_data(fragmentation_file):
+    """Load fragmentation data."""
+    logging.info(f"Loading fragmentation data from: {fragmentation_file}")
     
-    # Define paths using centralized configuration - fix the path to match actual file location
-    fragmentation_dir = Path('/Volumes/Extreme SSD/SURREAL-DataBackup/HUJI_data-main/processed/fragmentation')
+    try:
+        frag_data = pd.read_csv(fragmentation_file)
+        logging.info(f"Loaded {len(frag_data)} fragmentation records")
+        
+        # Display sample rows to better understand the data
+        logging.info("Sample of fragmentation data (first 3 rows):")
+        for i, row in frag_data.head(3).iterrows():
+            logging.info(f"  Row {i}: participant_id='{row['participant_id']}', date='{row['date']}'")
+            
+        return frag_data
+    except Exception as e:
+        logging.error(f"Error loading fragmentation data: {str(e)}")
+        return None
+
+def standardize_participant_ids(df, id_column='participant_id'):
+    """
+    Standardize participant IDs to handle format variations.
+    This helps match IDs between different datasets.
+    """
+    if df is None or df.empty:
+        return df
     
-    ema_dir = EMA_NORMALIZED_DIR
+    def clean_id(participant_id):
+        # Convert to string
+        pid = str(participant_id).strip()
+        
+        # Handle NaN or empty values
+        if pid.lower() == 'nan' or pid == '':
+            return ''
+        
+        # Extract digits only if it contains digits, otherwise keep original
+        digits_only = ''.join(c for c in pid if c.isdigit())
+        if digits_only:
+            # If the ID is just a number, pad to at least 3 digits for consistent matching
+            if len(digits_only) <= 2 and digits_only.isdigit():
+                return digits_only.zfill(3)
+            return digits_only
+        else:
+            # Remove any non-alphanumeric characters
+            return ''.join(c for c in pid if c.isalnum())
     
-    # Create output directory with the new path
-    daily_output_dir = Path('/Users/noamgal/DSProjects/Fragmentation/SURREAL/processed/daily_ema_fragmentation')
-    daily_output_dir.mkdir(parents=True, exist_ok=True)
+    df[f'{id_column}_clean'] = df[id_column].apply(clean_id)
     
-    # Print debug information about directories
-    logger.info(f"Looking for fragmentation data in: {fragmentation_dir}")
-    logger.info(f"Directory exists: {fragmentation_dir.exists()}")
-    if fragmentation_dir.exists():
-        sample_files = list(fragmentation_dir.glob("*.csv"))[:3]
-        logger.info(f"Sample files found: {[f.name for f in sample_files]}")
+    # Log the ID mapping for debugging
+    id_mapping = df[[id_column, f'{id_column}_clean']].drop_duplicates()
+    logging.info(f"ID standardization mapping ({len(id_mapping)} IDs):")
+    for _, row in id_mapping.iterrows():
+        logging.info(f"  {row[id_column]} -> {row[f'{id_column}_clean']}")
+        
+    return df
+
+def merge_ema_and_fragmentation(ema_data, frag_data):
+    """
+    Merge EMA and fragmentation data based on participant ID and date.
+    """
+    if ema_data is None or frag_data is None:
+        logging.error("Cannot merge: one or both datasets are missing")
+        return None
     
-    # Check if directories exist
-    for name, directory in [('Fragmentation', fragmentation_dir), ('EMA', ema_dir)]:
-        if not directory.exists():
-            logger.error(f"{name} directory not found at: {directory}")
-            logger.error("Please check the path and try again.")
-            return
+    # Standardize participant IDs in both datasets
+    ema_data = standardize_participant_ids(ema_data, id_column='Participant_ID')
+    frag_data = standardize_participant_ids(frag_data, id_column='participant_id')
     
-    # Initialize and run the combiner
-    combiner = MetricsCombiner(
-        fragmentation_dir=fragmentation_dir,
-        ema_dir=ema_dir,
-        output_dir=daily_output_dir,
-        end_of_day_only=False,  # Changed to false to include all EMA responses, not just end-of-day
-        debug_mode=True       # Set to True for more detailed logging
+    logging.info(f"EMA data: {len(ema_data)} records")
+    logging.info(f"Fragmentation data: {len(frag_data)} records")
+    
+    # Log unique participants in each dataset before merging
+    ema_participants = ema_data['Participant_ID_clean'].unique()
+    frag_participants = frag_data['participant_id_clean'].unique()
+    
+    logging.info(f"Unique participants in EMA data: {len(ema_participants)}")
+    logging.info(f"Unique participants in fragmentation data: {len(frag_participants)}")
+    
+    # Find common participants
+    common_participants = set(ema_participants).intersection(set(frag_participants))
+    logging.info(f"Common participants between datasets: {len(common_participants)}")
+    logging.info(f"Common participant IDs: {sorted(list(common_participants))}")
+    
+    # Before merging, check potential matches
+    ema_dates = set(ema_data['date_str'])
+    frag_dates = set(frag_data['date'])
+    common_dates = ema_dates.intersection(frag_dates)
+    logging.info(f"Common dates between datasets: {len(common_dates)}")
+    
+    # Debug: show sample records from both datasets
+    if not ema_data.empty:
+        logging.info("Sample EMA record:")
+        sample_ema = ema_data.iloc[0]
+        logging.info(f"  Participant: {sample_ema['Participant_ID']} (clean: {sample_ema['Participant_ID_clean']})")
+        logging.info(f"  Date: {sample_ema['date']} (str: {sample_ema['date_str']})")
+    
+    if not frag_data.empty:
+        logging.info("Sample fragmentation record:")
+        sample_frag = frag_data.iloc[0]
+        logging.info(f"  Participant: {sample_frag['participant_id']} (clean: {sample_frag['participant_id_clean']})")
+        logging.info(f"  Date: {sample_frag['date']}")
+    
+    # Merge datasets
+    merged_data = pd.merge(
+        ema_data,
+        frag_data,
+        left_on=['Participant_ID_clean', 'date_str'],
+        right_on=['participant_id_clean', 'date'],
+        how='inner'
     )
     
-    # Run the analysis
-    combined_data = combiner.run_analysis()
+    logging.info(f"Merged data: {len(merged_data)} records")
     
-    # Save with consistent naming matching window_fragmentation.py
-    if combined_data is not None and not combined_data.empty:
-        # Save as daily_ema_fragmentation.csv to match naming convention
-        daily_file = daily_output_dir / 'daily_ema_fragmentation.csv'
-        combined_data.to_csv(daily_file, index=False)
-        logger.info(f"Saved daily EMA fragmentation data to {daily_file}")
+    if len(merged_data) == 0:
+        logging.warning("No matching records found when merging datasets. Trying alternative approaches...")
         
-        # Print summary
-        logger.info("\n" + "="*50)
-        logger.info("COMBINED METRICS ANALYSIS SUMMARY")
-        logger.info("="*50)
-        
-        # Summary statistics
-        logger.info(f"\nTotal data points: {len(combined_data)}")
-        
-        if 'participant_id' in combined_data.columns:
-            logger.info(f"Total participants: {combined_data['participant_id'].nunique()}")
-        
-        # Fragmentation metrics
-        frag_cols = [col for col in combined_data.columns if 'fragmentation' in col.lower()]
-        logger.info(f"\nFragmentation Metrics: {len(frag_cols)}")
-        for col in frag_cols:
-            valid_count = combined_data[col].notna().sum()
-            logger.info(f"  {col}: {valid_count} valid values ({valid_count/len(combined_data)*100:.1f}%)")
+        # Try a more lenient approach - try to find any direct ID matches
+        logging.info("Printing actual participant IDs to debug:")
+        for i, ema_id in enumerate(ema_participants[:5]):
+            logging.info(f"  EMA ID {i}: '{ema_id}'")
+        for i, frag_id in enumerate(frag_participants[:5]):
+            logging.info(f"  Frag ID {i}: '{frag_id}'")
             
-            if valid_count > 0:
-                logger.info(f"    Mean: {combined_data[col].mean():.4f}")
-                logger.info(f"    Std Dev: {combined_data[col].std():.4f}")
+        # Compare a limited set of IDs to see what's different
+        logging.info("Checking direct string matches between IDs:")
+        found_match = False
+        for ema_id in ema_participants:
+            for frag_id in frag_participants:
+                if ema_id == frag_id:
+                    logging.info(f"  Direct match: '{ema_id}' = '{frag_id}'")
+                    found_match = True
+                elif ema_id in frag_id or frag_id in ema_id:
+                    logging.info(f"  Partial match: '{ema_id}' contains or is contained in '{frag_id}'")
+                    found_match = True
         
-        # EMA metrics count
-        ema_indicators = ['anxiety', 'stress', 'mood', 'STAI', 'CES', 'CALM', 'PEACE', 
-                          'SATISFACTION', 'HAPPY', 'ENJOYMENT', 'NERVOUS', 'WORRY']
-        ema_cols = [col for col in combined_data.columns if any(
-            indicator in col for indicator in ema_indicators
-        )]
+        if not found_match:
+            logging.warning("Could not find any direct ID matches")
         
-        logger.info(f"\nEMA Metrics: {len(ema_cols)}")
+        # Try alternative matching strategy using just numeric part of ID
+        logging.info("Attempting more aggressive ID matching by extracting only numeric parts...")
         
-        # Output file locations (removed visualization reference)
-        logger.info("\nOutput Files:")
-        logger.info(f"  Combined data: {daily_file}")
-        logger.info(f"  Analysis results: {daily_output_dir / 'analysis_results.json'}")
+        # Create an alternative ID mapping function that's more aggressive
+        def extract_just_numbers(id_str):
+            return ''.join([c for c in str(id_str) if c.isdigit()])
         
-        logger.info("\nAnalysis complete!")
+        # Apply to both datasets
+        ema_data['alt_id'] = ema_data['Participant_ID'].apply(extract_just_numbers)
+        frag_data['alt_id'] = frag_data['participant_id'].apply(extract_just_numbers)
+        
+        # Find potential matches with this more aggressive approach
+        ema_alt_ids = set(ema_data['alt_id'])
+        frag_alt_ids = set(frag_data['alt_id'])
+        common_alt_ids = ema_alt_ids.intersection(frag_alt_ids)
+        
+        logging.info(f"Using numeric-only IDs - common participants: {len(common_alt_ids)}")
+        logging.info(f"Common numeric participant IDs: {sorted(list(common_alt_ids))}")
+        
+        # Try merging with alternative IDs
+        alt_merged_data = pd.merge(
+            ema_data,
+            frag_data,
+            left_on=['alt_id', 'date_str'],
+            right_on=['alt_id', 'date'],
+            how='inner'
+        )
+        
+        logging.info(f"Alternative merge produced {len(alt_merged_data)} records")
+        
+        if len(alt_merged_data) > 0:
+            logging.info("Using alternative ID matching approach successfully!")
+            merged_data = alt_merged_data
+        else:
+            logging.warning("No matches found with alternative ID approach either")
+            return None
+    
+    # Clean up redundant columns
+    columns_to_drop = [
+        'Participant_ID_clean', 'participant_id_clean', 
+        'alt_id_x', 'alt_id_y',
+        'date_y'  # Keep date_x which is from EMA data
+    ]
+    merged_data = merged_data.drop(columns=[col for col in columns_to_drop if col in merged_data.columns])
+    
+    # Rename columns for clarity
+    column_renames = {
+        'date_x': 'date',
+        'date_str': 'date_string',
+        'Participant_ID': 'participant_id_ema',
+        'participant_id': 'participant_id_frag'
+    }
+    merged_data = merged_data.rename(columns=column_renames)
+    
+    return merged_data
+
+def main():
+    # Define paths - adjust these to match your directory structure
+    # EMA data paths
+    ema_output_dir = Path("/Users/noamgal/DSProjects/Fragmentation/SURREAL/EMA-Processing/output/normalized")
+    
+    # Fragmentation data paths
+    fragmentation_file = Path("/Volumes/Extreme SSD/SURREAL-DataBackup/HUJI_data-main/processed/fragmentation/fragmentation_all_metrics.csv")
+    
+    # Output path
+    output_dir = Path("/Users/noamgal/DSProjects/Fragmentation/SURREAL/processed/daily_ema_fragmentation")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Verify input files exist
+    if not ema_output_dir.exists():
+        logging.error(f"EMA directory not found: {ema_output_dir}")
+        return
+    
+    if not fragmentation_file.exists():
+        logging.error(f"Fragmentation file not found: {fragmentation_file}")
+        return
+    
+    logging.info(f"EMA directory: {ema_output_dir}")
+    logging.info(f"Fragmentation file: {fragmentation_file}")
+    
+    # Load EMA daily averages
+    daily_ema = load_normalized_ema_data(ema_output_dir)
+    
+    # Load fragmentation data
+    frag_data = load_fragmentation_data(fragmentation_file)
+    
+    # If EMA data loading failed but we want to proceed just with fragmentation data
+    if daily_ema is None:
+        logging.warning("No EMA data found. Saving only fragmentation data...")
+        if frag_data is not None:
+            frag_output_file = output_dir / "fragmentation_only.csv"
+            frag_data.to_csv(frag_output_file, index=False)
+            logging.info(f"Fragmentation data saved to: {frag_output_file}")
+            return
+        else:
+            logging.error("No data available to save")
+            return
+    
+    # Merge datasets
+    combined_data = merge_ema_and_fragmentation(daily_ema, frag_data)
+    
+    if combined_data is not None and not combined_data.empty:
+        # Save combined data
+        output_file = output_dir / "ema_fragmentation_combined.csv"
+        combined_data.to_csv(output_file, index=False)
+        logging.info(f"Combined data saved to: {output_file}")
+        
+        # Create a summary with key columns
+        key_columns = [
+            'date', 'participant_id_ema',
+            'STAI-Y-A-6_zstd', 'STAI-Y-A-6_raw', 
+            'CES-D-8_zstd', 'CES-D-8_raw',
+            'digital_fragmentation_index', 'mobility_fragmentation_index', 'overlap_fragmentation_index',
+            'digital_episode_count', 'mobility_episode_count', 'overlap_episode_count',
+            'digital_total_duration', 'mobility_total_duration', 'overlap_total_duration'
+        ]
+        
+        # Some columns might not exist if data is missing
+        existing_columns = [col for col in key_columns if col in combined_data.columns]
+        summary_data = combined_data[existing_columns].copy()
+        
+        # Save summary data
+        summary_file = output_dir / "ema_fragmentation_summary.csv"
+        summary_data.to_csv(summary_file, index=False)
+        logging.info(f"Summary data saved to: {summary_file}")
+        
+        # Print basic stats
+        logging.info("\nCombined Dataset Summary:")
+        logging.info(f"Total records: {len(combined_data)}")
+        logging.info(f"Unique participants: {combined_data['participant_id_ema'].nunique()}")
+        logging.info(f"Date range: {combined_data['date'].min()} to {combined_data['date'].max()}")
+        
+        # Count records with different data types
+        has_stai = (~combined_data['STAI-Y-A-6_zstd'].isna()).sum() if 'STAI-Y-A-6_zstd' in combined_data.columns else 0
+        has_cesd = (~combined_data['CES-D-8_zstd'].isna()).sum() if 'CES-D-8_zstd' in combined_data.columns else 0
+        has_digital = (~combined_data['digital_fragmentation_index'].isna()).sum() if 'digital_fragmentation_index' in combined_data.columns else 0
+        has_mobility = (~combined_data['mobility_fragmentation_index'].isna()).sum() if 'mobility_fragmentation_index' in combined_data.columns else 0
+        has_overlap = (~combined_data['overlap_fragmentation_index'].isna()).sum() if 'overlap_fragmentation_index' in combined_data.columns else 0
+        
+        logging.info(f"Records with STAI data: {has_stai} ({has_stai/len(combined_data)*100:.1f}%)")
+        logging.info(f"Records with CES-D data: {has_cesd} ({has_cesd/len(combined_data)*100:.1f}%)")
+        logging.info(f"Records with digital fragmentation: {has_digital} ({has_digital/len(combined_data)*100:.1f}%)")
+        logging.info(f"Records with mobility fragmentation: {has_mobility} ({has_mobility/len(combined_data)*100:.1f}%)")
+        logging.info(f"Records with overlap fragmentation: {has_overlap} ({has_overlap/len(combined_data)*100:.1f}%)")
     else:
-        logger.error("Analysis failed - no results were generated.")
+        logging.warning("No combined data generated. Saving individual datasets...")
+        
+        # Save individual datasets
+        if daily_ema is not None:
+            ema_output_file = output_dir / "ema_daily_averages.csv"
+            daily_ema.to_csv(ema_output_file, index=False)
+            logging.info(f"EMA daily averages saved to: {ema_output_file}")
+        
+        if frag_data is not None:
+            frag_output_file = output_dir / "fragmentation_metrics.csv"
+            frag_data.to_csv(frag_output_file, index=False)
+            logging.info(f"Fragmentation data saved to: {frag_output_file}")
+        
+        logging.error("Failed to create combined dataset. Check logs for details.")
 
 if __name__ == "__main__":
-    main() 
+    main()
