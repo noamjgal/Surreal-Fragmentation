@@ -397,7 +397,7 @@ def main():
         return
     
     # Merge with daily EMA data
-    daily_ema_output_path = output_dir / 'ema_fragmentation_with_demographics.csv'
+    daily_ema_output_path = output_dir / 'ema_fragmentation_daily_demographics.csv'
     if Path(args.ema_data).exists():
         merged_ema = merge_demographics_with_data(args.ema_data, demographics, daily_ema_output_path)
         if not merged_ema.empty:
@@ -406,7 +406,7 @@ def main():
         logger.warning(f"Daily EMA data file not found: {args.ema_data}")
     
     # Merge with all EMA data (3 times daily)
-    all_ema_output_path = output_dir / 'ema_fragmentation_all_with_demographics.csv'
+    all_ema_output_path = output_dir / 'ema_fragmentation_window_demographics.csv'
     if Path(args.ema_all_data).exists():
         merged_all_ema = merge_demographics_with_data(args.ema_all_data, demographics, all_ema_output_path)
         if not merged_all_ema.empty:
