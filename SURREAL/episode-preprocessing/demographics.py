@@ -16,6 +16,7 @@ import logging
 import argparse
 from datetime import datetime
 import re
+from data_utils import DataCleaner
 
 def setup_logging(output_dir):
     """Set up logging configuration"""
@@ -88,10 +89,15 @@ def load_demographics(demographics_path):
     logger.info(f"Loading demographics from {demographics_path}")
     
     try:
-        # First, load the file to inspect columns
+        # Use DataCleaner
+        data_cleaner = DataCleaner(logger)
+        
+        # Load the Excel file
         demographics = pd.read_excel(demographics_path)
-        logger.info(f"Loaded demographics with shape: {demographics.shape}")
-        logger.info(f"Columns in demographics file: {demographics.columns.tolist()}")
+        logger.info(f"Loaded {len(demographics)} demographic records")
+        
+        # Standardize participant IDs
+        demographics = data_cleaner.standardize_dataframe_ids(demographics, 'Participant_ID')
         
         # If the first row is sample data, and the first column contains participant IDs
         # Extract first row for inspection
@@ -122,9 +128,8 @@ def load_demographics(demographics_path):
         # Log the updated columns
         logger.info(f"Updated columns: {demographics.columns.tolist()}")
         
-        # Process age data
-        if 'age' not in demographics.columns and 'DOB' in demographics.columns:
-            logger.info("Calculating age from DOB")
+        # Process age data using standardized numeric handling
+        if 'DOB' in demographics.columns:
             try:
                 # Parse DOB - handle various formats (Aug-97, 1997-08-15, etc.)
                 dob_series = demographics['DOB']
@@ -180,6 +185,11 @@ def load_demographics(demographics_path):
                 if 'calculated_age' in demographics.columns:
                     demographics = demographics.drop(columns=['calculated_age'])
                     
+                # Standardize age values
+                demographics = data_cleaner.standardize_missing_values(
+                    demographics, numeric_columns=['age']
+                )
+                
             except Exception as e:
                 logger.error(f"Error calculating age: {str(e)}")
                 import traceback
@@ -196,9 +206,6 @@ def load_demographics(demographics_path):
                 'F': 1, 'FEMALE': 1, 'WOMAN': 1, 'GIRL': 1
             })
             
-        # Add standardized ID column for matching
-        demographics['participant_id_clean'] = demographics['Participant_ID'].apply(clean_participant_id)
-        
         # Log examples of ID standardization
         id_samples = demographics[['Participant_ID', 'participant_id_clean']].head(10)
         logger.info(f"ID standardization examples:\n{id_samples}")
@@ -214,6 +221,14 @@ def load_demographics(demographics_path):
             gender_counts = demographics['Gender'].value_counts()
             logger.info(f"Gender distribution: {gender_counts.to_dict()}")
             
+        # Apply final data validation
+        validation_rules = {
+            'numeric_ranges': {
+                'age': (18, 100)  # typical age range
+            }
+        }
+        demographics = data_cleaner.validate_data(demographics, validation_rules)
+        
         return demographics
         
     except Exception as e:
@@ -238,6 +253,9 @@ def merge_demographics_with_data(data_path, demographics_df, output_path):
     logger.info(f"Merging demographics with data from {data_path}")
     
     try:
+        # Use the DataCleaner
+        data_cleaner = DataCleaner(logger)
+        
         # Load the data
         data = pd.read_csv(data_path)
         logger.info(f"Loaded data with shape: {data.shape}")
@@ -250,41 +268,18 @@ def merge_demographics_with_data(data_path, demographics_df, output_path):
                 id_sample.append((col, data[col].head(3).tolist()))
         logger.info(f"Participant ID columns and samples: {id_sample}")
         
-        # Identify the participant ID column in the data
-        id_columns = ['participant_id', 'participant_id_ema', 'participant_id_frag', 'Participant_ID', 'user', 'subject', 'id']
-        found_col = False
-        
-        for col in id_columns:
-            if col in data.columns:
-                id_col = col
-                logger.info(f"Using '{id_col}' as participant identifier")
-                found_col = True
-                break
-        
-        if not found_col:
-            # Try to find any column with 'participant' or 'id' in the name
-            for col in data.columns:
-                if 'participant' in col.lower() or 'id' in col.lower():
-                    id_col = col
-                    logger.info(f"Using '{id_col}' as participant identifier (based on name matching)")
-                    found_col = True
-                    break
-        
-        if not found_col:
-            logger.error(f"Could not identify participant ID column in data")
-            return data  # Return original data
-        
-        # Create standardized ID for matching
-        data['participant_id_clean'] = data[id_col].apply(clean_participant_id)
-        
-        # Log some examples of the ID cleaning for debugging
-        sample_ids = data[id_col].head(10).tolist()
-        cleaned_ids = data['participant_id_clean'].head(10).tolist()
-        logger.info(f"ID cleaning examples: {list(zip(sample_ids, cleaned_ids))}")
-        
-        # Log ID distributions before merging
-        logger.info(f"Data contains {data['participant_id_clean'].nunique()} unique participants")
-        logger.info(f"Demographics contains {demographics_df['participant_id_clean'].nunique()} unique participants")
+        # Standardize IDs in data if not already done
+        if 'participant_id_clean' not in data.columns:
+            # Find appropriate ID column
+            id_columns = ['participant_id', 'participant_id_ema', 'participant_id_frag', 
+                         'Participant_ID', 'user', 'subject', 'id']
+            id_col = next((col for col in id_columns if col in data.columns), None)
+            
+            if id_col:
+                data = data_cleaner.standardize_dataframe_ids(data, id_col)
+            else:
+                logger.error(f"Could not identify participant ID column in data")
+                return pd.DataFrame()
         
         # Find common participants
         data_participants = set(data['participant_id_clean'].unique())
@@ -292,37 +287,22 @@ def merge_demographics_with_data(data_path, demographics_df, output_path):
         common_participants = data_participants.intersection(demo_participants)
         
         logger.info(f"Found {len(common_participants)} common participants")
-        logger.info(f"Common participants: {sorted(list(common_participants))}")
-        logger.info(f"Participants in data but not demographics: {sorted(list(data_participants - demo_participants))}")
-        logger.info(f"Participants in demographics but not data: {sorted(list(demo_participants - data_participants))}")
+        logger.info(f"Participants in data but not demographics: {sorted(list(data_participants - demo_participants))[:5]}...")
         
-        # Merge data
-        merged_data = pd.merge(
-            data,
+        # Merge data with demographics
+        merged_data = data_cleaner.merge_datasets(
+            data, 
             demographics_df,
             on='participant_id_clean',
-            how='left',
-            suffixes=('', '_demo')
+            how='left'
         )
         
-        logger.info(f"Merged data shape: {merged_data.shape}")
-        
-        # Check how many participants got demographic data
-        has_demo = 0
-        demo_check_col = 'age'
-        if demo_check_col in merged_data.columns:
-            has_demo = merged_data[demo_check_col].notna().sum()
-            logger.info(f"Records with demographic data: {has_demo} of {len(merged_data)} ({has_demo/len(merged_data)*100:.1f}%)")
-        else:
-            logger.warning(f"Column '{demo_check_col}' not found in merged data. Cannot check demographic coverage.")
-            
-        # Drop duplicate ID columns and standardized ID
-        drop_cols = [col for col in merged_data.columns if col.endswith('_demo') or col == 'participant_id_clean']
-        merged_data = merged_data.drop(columns=drop_cols)
+        # Validate the merged data
+        merged_data = data_cleaner.validate_data(merged_data)
         
         # Save merged data
         merged_data.to_csv(output_path, index=False)
-        logger.info(f"Saved merged data to {output_path}")
+        logger.info(f"Saved merged data to {output_path} with {len(merged_data)} rows")
         
         return merged_data
         
@@ -359,7 +339,6 @@ def main():
     # Hardcode file paths relative to SURREAL folder
     demographics_path = os.path.join(surreal_path, 'data', 'raw', 'participant_info.xlsx')
     daily_ema_path = os.path.join(surreal_path, 'processed', 'daily_ema_fragmentation', 'ema_fragmentation_combined.csv')
-    all_ema_path = os.path.join(surreal_path, 'processed', 'ema_fragmentation', 'ema_fragmentation_all.csv')
     output_dir = os.path.join(surreal_path, 'processed', 'merged_data')
     
     # Still allow command-line overrides for flexibility
@@ -371,10 +350,6 @@ def main():
     parser.add_argument('--ema_data', type=str, 
                         default=daily_ema_path,
                         help='Path to daily EMA data CSV')
-    
-    parser.add_argument('--ema_all_data', type=str,
-                        default=all_ema_path,
-                        help='Path to all EMA data CSV (3 times daily)')
     
     parser.add_argument('--output_dir', type=str,
                         default=output_dir,
@@ -404,15 +379,6 @@ def main():
             logger.info("Successfully merged demographics with daily EMA data")
     else:
         logger.warning(f"Daily EMA data file not found: {args.ema_data}")
-    
-    # Merge with all EMA data (3 times daily)
-    all_ema_output_path = output_dir / 'ema_fragmentation_window_demographics.csv'
-    if Path(args.ema_all_data).exists():
-        merged_all_ema = merge_demographics_with_data(args.ema_all_data, demographics, all_ema_output_path)
-        if not merged_all_ema.empty:
-            logger.info("Successfully merged demographics with all EMA data (3 times daily)")
-    else:
-        logger.warning(f"All EMA data file not found: {args.ema_all_data}")
     
     logger.info("Demographic data merging completed")
 
