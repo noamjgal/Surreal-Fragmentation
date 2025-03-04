@@ -428,8 +428,7 @@ class MultilevelAnalysis:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             
             # Create directory for results if it doesn't exist
-            results_dir = self.output_dir / 'results'
-            results_dir.mkdir(exist_ok=True, parents=True)
+            results_dir = self.output_dir
             
             # Create a DataFrame from results
             results_df = pd.DataFrame(self.results)

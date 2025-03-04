@@ -490,7 +490,6 @@ class PopulationComparisonAnalysis:
         try:
             # Create results directory
             results_dir = self.output_dir
-            results_dir.mkdir(exist_ok=True, parents=True)
             
             # Generate timestamp
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
