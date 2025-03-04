@@ -17,6 +17,7 @@ from tqdm import tqdm
 import trackintel as ti
 import geopandas as gpd
 from shapely.geometry import Point
+from data_utils import DataCleaner
 
 # Suppress pandas FutureWarnings related to inplace operations
 import warnings
@@ -84,6 +85,12 @@ class EpisodeProcessor:
             return
             
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create DataCleaner instance
+        self.data_cleaner = DataCleaner(self.logger)
+        
+        # Standardize ID
+        self.participant_id_clean = self.data_cleaner.standardize_participant_id(participant_id)
         
     def _find_overlaps(self, digital_episodes: pd.DataFrame, 
                       movement_episodes: pd.DataFrame) -> pd.DataFrame:
@@ -607,6 +614,9 @@ class EpisodeProcessor:
                 output_file = self.output_dir / f"{date}_{ep_type}_episodes.csv"
                 episodes.to_csv(output_file, index=False)
                 self.logger.debug(f"Saved {ep_type} episodes to {output_file}")
+        
+        # Add standardized participant ID to stats
+        day_stats['participant_id_clean'] = self.participant_id_clean
         
         return day_stats
 
