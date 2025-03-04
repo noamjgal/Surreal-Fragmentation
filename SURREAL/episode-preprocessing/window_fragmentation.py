@@ -8,6 +8,7 @@ from typing import Dict, List, Tuple, Optional
 import json
 import re
 import sys
+from data_utils import DataCleaner
 
 # Get the current file's directory and add parent directory to path if needed
 current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
@@ -437,18 +438,19 @@ def process_ema_with_episodes(
     results = []
     
     try:
+        # Use DataCleaner to standardize data
+        data_cleaner = DataCleaner(logging.getLogger())
+        
         # Load EMA data
         ema_data = pd.read_csv(ema_file)
         
-        # Ensure datetime column is properly parsed
-        if 'datetime' in ema_data.columns:
-            ema_data['datetime'] = pd.to_datetime(ema_data['datetime'])
-        else:
-            logging.error(f"No datetime column found in {ema_file}")
-            return []
-        
-        # Extract participant ID
+        # Standardize participant ID
         participant_id = ema_file.stem.replace('normalized_participant_', '')
+        participant_id_clean = data_cleaner.standardize_participant_id(participant_id)
+        
+        # Standardize timestamps in EMA data
+        if 'datetime' in ema_data.columns:
+            ema_data = data_cleaner.standardize_timestamps(ema_data, ['datetime'])
         
         # Process each EMA response
         for _, row in ema_data.iterrows():
@@ -507,9 +509,10 @@ def process_ema_with_episodes(
                 participant_id
             )
             
-            # Create result entry
+            # Create result entry with standardized participant ID
             result = {
                 'participant_id': participant_id,
+                'participant_id_clean': participant_id_clean,
                 'ema_datetime': ema_datetime,
                 'window_hours': window_hours,
                 'window_start': window_start,
@@ -612,12 +615,17 @@ def process_ema_fragmentation(
     
     # Combine all results
     if all_results:
+        # Convert to DataFrame
         combined_results = pd.DataFrame(all_results)
         
-        # Save full results
-        output_file = output_dir / 'ema_fragmentation_all.csv'
+        # Apply data cleaning on final output
+        data_cleaner = DataCleaner(logging.getLogger())
+        combined_results = data_cleaner.standardize_missing_values(combined_results)
+        
+        # Save combined results
+        output_file = output_dir / "ema_fragmentation_all.csv"
         combined_results.to_csv(output_file, index=False)
-        logging.info(f"Saved {len(combined_results)} combined results to {output_file}")
+        logging.info(f"Saved {len(combined_results)} rows to {output_file}")
         
         # Generate summary statistics
         generate_summary_stats(combined_results, output_dir)
