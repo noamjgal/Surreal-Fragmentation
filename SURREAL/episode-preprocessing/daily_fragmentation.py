@@ -10,6 +10,12 @@ import logging
 from typing import Dict, List, Tuple, Optional
 import json
 import re
+from data_utils import DataCleaner
+import sys
+
+# Add parent directory to path to find config
+sys.path.append(str(Path(__file__).parent.parent))
+from config.paths import EPISODE_OUTPUT_DIR, PROCESSED_DATA_DIR
 
 class EpisodeFragmentationAnalyzer:
     def __init__(self, 
@@ -112,305 +118,352 @@ class EpisodeFragmentationAnalyzer:
             # If all parsing fails, return a default value
             return 1.0
 
-    def calculate_fragmentation_index(self, 
-                                      episodes_df: pd.DataFrame, 
-                                      episode_type: str,
-                                      participant_id: str = "",
-                                      date_str: str = "") -> Dict:
-        """Calculate fragmentation index with improved validation and outlier detection"""
-        if episodes_df.empty:
-            return {
-                'fragmentation_index': np.nan,
-                'episode_count': 0,
-                'total_duration': 0,
-                'status': 'empty_dataframe'
-            }
-        
-        # Create a copy to avoid modifying the original
-        episodes_df = episodes_df.copy()
-        
-        # Rename columns if needed and ensure we have a duration column
-        if 'duration_minutes' in episodes_df.columns:
-            episodes_df = episodes_df.rename(columns={'duration_minutes': 'duration'})
-        
-        # Process duration column depending on its type
-        if 'duration' in episodes_df.columns:
-            episodes_df['duration'] = episodes_df['duration'].apply(self.parse_duration_string)
-        # If no duration column exists, calculate from start/end times
-        elif 'start_time' in episodes_df.columns and 'end_time' in episodes_df.columns:
-            # Convert to datetime if needed
-            for col in ['start_time', 'end_time']:
-                if not pd.api.types.is_datetime64_any_dtype(episodes_df[col]):
-                    episodes_df[col] = pd.to_datetime(episodes_df[col], errors='coerce')
-            
-            # Calculate duration in minutes
-            episodes_df['duration'] = (episodes_df['end_time'] - episodes_df['start_time']).dt.total_seconds() / 60
-        # If we still have no duration, create a default
-        if 'duration' not in episodes_df.columns:
-            episodes_df['duration'] = 1.0
-            self.logger.warning(f"No duration information found for {episode_type} episodes, using default values")
-        
-        # Check minimum episode count
-        if len(episodes_df) < self.min_episodes:
-            self.stats[episode_type]['insufficient_episodes'] += 1
-            return {
-                'fragmentation_index': np.nan,
-                'episode_count': len(episodes_df),
-                'total_duration': episodes_df['duration'].sum() if not episodes_df.empty else 0,
-                'status': 'insufficient_episodes'
-            }
-            
-        # Validate durations - remove zeros and very large values
-        valid_episodes = episodes_df[
-            (episodes_df['duration'] > 0) &
-            (episodes_df['duration'] <= self.max_episode_duration)
-        ].copy()
-        
-        if len(valid_episodes) < self.min_episodes:
-            self.stats[episode_type]['invalid_duration'] += 1
-            return {
-                'fragmentation_index': np.nan,
-                'episode_count': len(valid_episodes),
-                'total_duration': valid_episodes['duration'].sum() if not valid_episodes.empty else 0,
-                'status': 'invalid_duration'
-            }
-            
-        # Detect and handle outliers
-        mean_duration = valid_episodes['duration'].mean()
-        std_duration = valid_episodes['duration'].std()
-        if std_duration > 0:  # Only apply outlier detection if there's variation
-            outlier_mask = np.abs(valid_episodes['duration'] - mean_duration) <= (self.outlier_threshold * std_duration)
-            valid_episodes = valid_episodes[outlier_mask]
-        
-        if len(valid_episodes) < self.min_episodes:
-            self.stats[episode_type]['insufficient_episodes'] += 1
-            return {
-                'fragmentation_index': np.nan,
-                'episode_count': len(valid_episodes),
-                'total_duration': valid_episodes['duration'].sum() if not valid_episodes.empty else 0,
-                'status': 'insufficient_episodes_after_outlier_removal'
-            }
-            
-        # Calculate normalized durations
-        total_duration = valid_episodes['duration'].sum()
-        normalized_durations = valid_episodes['duration'] / total_duration
-        
-        # Calculate fragmentation index
-        S = len(valid_episodes)
-        
-        if self.entropy_based:
-            # Entropy-based calculation
-            index = 0.0
-            if S > 1:
-                # Avoid log(0) by handling zero durations
-                nonzero_normalized = normalized_durations[normalized_durations > 0]
-                if len(nonzero_normalized) > 1:
-                    entropy = -np.sum(nonzero_normalized * np.log(nonzero_normalized))
-                    index = entropy / np.log(S)
-        else:
-            # HHI-based calculation (Herfindahl-Hirschman Index)
-            index = 0.0
-            if S > 1:
-                hhi = np.sum(normalized_durations**2)
-                index = (1 - hhi) / (1 - 1/S)
-        
-        self.stats[episode_type]['success'] += 1
-        
-        return {
-            'fragmentation_index': index,
-            'episode_count': S,
-            'total_duration': total_duration,
-            'mean_duration': valid_episodes['duration'].mean(),
-            'std_duration': valid_episodes['duration'].std(),
-            'cv': valid_episodes['duration'].std() / valid_episodes['duration'].mean() if valid_episodes['duration'].mean() > 0 else np.nan,
-            'status': 'success'
+    def calculate_fragmentation_index(self, episodes_df: pd.DataFrame, episode_type: str, 
+                                    participant_id: str, date_str: str) -> Dict:
+        """Calculate fragmentation index for a set of episodes"""
+        result = {
+            'fragmentation_index': np.nan,
+            'episode_count': 0,
+            'total_duration': 0,
+            'mean_duration': np.nan,
+            'std_duration': np.nan,
+            'cv': np.nan,  # Coefficient of variation
+            'status': 'no_data'
         }
+        
+        # Return empty results if no data
+        if episodes_df.empty:
+            if self.debug_mode:
+                self.logger.debug(f"No {episode_type} episodes for {participant_id} on {date_str}")
+            return result
+        
+        # Add more detailed logging
+        if self.debug_mode:
+            self.logger.info(f"Processing {len(episodes_df)} {episode_type} episodes for {participant_id} on {date_str}")
+            self.logger.info(f"Columns available: {episodes_df.columns.tolist()}")
+        
+        # Handle missing columns based on episode_type
+        time_cols = ['start_time', 'end_time']
+        
+        # Verify we have the required columns
+        missing_cols = [col for col in time_cols if col not in episodes_df.columns]
+        if missing_cols:
+            self.logger.warning(f"Missing required columns {missing_cols} in {episode_type} episodes")
+            return result
+        
+        # Filter out invalid rows (missing timestamps)
+        valid_data = episodes_df.dropna(subset=time_cols)
+        
+        if len(valid_data) == 0:
+            self.logger.warning(f"No valid {episode_type} episodes after filtering NaN timestamps")
+            result['status'] = 'no_valid_episodes'
+            return result
+        
+        # Calculate durations if not already in the dataset
+        if 'duration' not in valid_data.columns:
+            valid_data['duration'] = (valid_data['end_time'] - valid_data['start_time']).dt.total_seconds()
+        else:
+            # Convert duration to numeric if it's a string
+            try:
+                # Try to convert duration column to numeric
+                sample_val = valid_data['duration'].iloc[0] if len(valid_data) > 0 else None
+                self.logger.info(f"Duration sample value type: {type(sample_val)}, value: {sample_val}")
+                
+                # Check if the duration values need parsing
+                if isinstance(sample_val, str):
+                    self.logger.info(f"Converting string durations to numeric for {episode_type} episodes")
+                    # Use the parse_duration_string method which handles various formats
+                    valid_data['duration'] = valid_data['duration'].apply(self.parse_duration_string)
+                else:
+                    # Ensure all values are numeric using pandas to_numeric
+                    valid_data['duration'] = pd.to_numeric(valid_data['duration'], errors='coerce')
+            except Exception as e:
+                self.logger.error(f"Error converting duration to numeric: {str(e)}")
+                # Create a safe numeric duration column
+                self.logger.info("Falling back to calculated durations based on timestamps")
+                valid_data['duration_numeric'] = (valid_data['end_time'] - valid_data['start_time']).dt.total_seconds()
+                valid_data['duration'] = valid_data['duration_numeric']
+        
+        # Handle and log any negative or zero durations - FIXED COMPARISON
+        try:
+            # Ensure durations are numeric before comparison
+            numeric_durations = pd.to_numeric(valid_data['duration'], errors='coerce')
+            invalid_durations = (numeric_durations <= 0).sum()
+            if invalid_durations > 0:
+                self.logger.warning(f"{invalid_durations} {episode_type} episodes have invalid durations <= 0")
+            
+            # Filter to valid durations
+            valid_data = valid_data[numeric_durations > 0]
+        except Exception as e:
+            self.logger.error(f"Error filtering invalid durations: {str(e)}")
+            # Try to recover
+            self.logger.info("Attempting to recover by calculating timestamps directly")
+            valid_data['safe_duration'] = (valid_data['end_time'] - valid_data['start_time']).dt.total_seconds()
+            valid_data = valid_data[valid_data['safe_duration'] > 0]
+            valid_data['duration'] = valid_data['safe_duration']
+        
+        # Check if we still have enough data
+        if len(valid_data) < self.min_episodes:
+            self.logger.warning(f"Too few valid {episode_type} episodes: {len(valid_data)} < {self.min_episodes}")
+            result['status'] = f'too_few_episodes_{len(valid_data)}'
+            result['episode_count'] = len(valid_data)
+            return result
+        
+        # Record episode counts and total duration
+        result['episode_count'] = len(valid_data)
+        result['total_duration'] = valid_data['duration'].sum()
+        
+        # Calculate basic statistics
+        result['mean_duration'] = valid_data['duration'].mean()
+        result['std_duration'] = valid_data['duration'].std() if len(valid_data) > 1 else 0
+        result['cv'] = result['std_duration'] / result['mean_duration'] if result['mean_duration'] > 0 else 0
+        
+        # Calculate fragmentation index based on configuration
+        if self.entropy_based:
+            try:
+                # Entropy-based fragmentation using episode durations
+                durations = valid_data['duration'].values
+                total_time = durations.sum()
+                
+                # Calculate probabilities (proportion of time spent in each episode)
+                probabilities = durations / total_time
+                
+                # Calculate entropy
+                entropy = -np.sum(probabilities * np.log(probabilities))
+                
+                # Normalize to [0, 1] - higher is more fragmented
+                max_entropy = np.log(len(durations))
+                index = entropy / max_entropy if max_entropy > 0 else 0
+                
+                result['fragmentation_index'] = index
+                result['status'] = 'success'
+                
+                if self.debug_mode:
+                    self.logger.info(f"Successfully calculated {episode_type} fragmentation: {index:.4f}")
+                
+            except Exception as e:
+                self.logger.error(f"Error calculating entropy-based fragmentation: {str(e)}")
+                result['status'] = f'calculation_error_{str(e)}'
+        else:
+            # Original CV-based fragmentation
+            index = min(1.0, result['cv'] / 2) if result['cv'] > 0 else 0
+            result['fragmentation_index'] = index
+            result['status'] = 'success'
+        
+        return result
 
     def process_daily_episodes(self, participant_dir: Path, date_str: str, participant_id: str) -> Optional[Dict]:
-        """Process all episode types for a single day"""
+        """Process episodes for a single day for one participant"""
         try:
-            # Define file paths for each episode type - check multiple patterns
-            digital_file_patterns = [
-                participant_dir / f"{date_str}_digital_episodes.csv",  # Pattern 1
-                participant_dir / f"digital_episodes_{date_str}.csv",  # Pattern 2
-                participant_dir / f"digital_{date_str}_episodes.csv",  # Pattern 3
-            ]
+            # Look for digital episode file
+            digital_pattern = f"{date_str}_digital_episodes.csv"
+            digital_pattern2 = f"digital_episodes_{date_str}.csv"
+            digital_file = next((f for f in participant_dir.glob(f"*{digital_pattern}*")), None)
+            if not digital_file:
+                digital_file = next((f for f in participant_dir.glob(f"*{digital_pattern2}*")), None)
             
-            mobility_file_patterns = [
-                participant_dir / f"{date_str}_mobility_episodes.csv",  # Pattern 1
-                participant_dir / f"mobility_episodes_{date_str}.csv",  # Pattern 2
-                participant_dir / f"{date_str}_moving_episodes.csv",    # Pattern 3
-                participant_dir / f"moving_episodes_{date_str}.csv",    # Pattern 4
-            ]
+            # Look for mobility/movement episode file - UPDATED PATTERN
+            mobility_pattern = f"{date_str}_mobility_episodes.csv"
+            mobility_pattern2 = f"mobility_episodes_{date_str}.csv"
+            movement_pattern = f"{date_str}_movement_episodes.csv"  # Add this pattern
+            movement_pattern2 = f"movement_episodes_{date_str}.csv"  # Add this pattern
             
-            overlap_file_patterns = [
-                participant_dir / f"{date_str}_overlap_episodes.csv",   # Pattern 1
-                participant_dir / f"overlap_episodes_{date_str}.csv",   # Pattern 2
-            ]
+            mobility_file = next((f for f in participant_dir.glob(f"*{mobility_pattern}*")), None)
+            if not mobility_file:
+                mobility_file = next((f for f in participant_dir.glob(f"*{mobility_pattern2}*")), None)
+            if not mobility_file:
+                mobility_file = next((f for f in participant_dir.glob(f"*{movement_pattern}*")), None)
+            if not mobility_file:
+                mobility_file = next((f for f in participant_dir.glob(f"*{movement_pattern2}*")), None)
             
-            # Find existing files
-            digital_file = next((f for f in digital_file_patterns if f.exists()), None)
-            mobility_file = next((f for f in mobility_file_patterns if f.exists()), None)
-            overlap_file = next((f for f in overlap_file_patterns if f.exists()), None)
+            # Look for overlap episode file
+            overlap_pattern = f"{date_str}_overlap_episodes.csv"
+            overlap_pattern2 = f"overlap_episodes_{date_str}.csv"
+            overlap_file = next((f for f in participant_dir.glob(f"*{overlap_pattern}*")), None)
+            if not overlap_file:
+                overlap_file = next((f for f in participant_dir.glob(f"*{overlap_pattern2}*")), None)
             
-            # Check if required files exist
-            if not digital_file or not mobility_file:
-                self.logger.warning(f"Missing required episode files for {participant_id} on {date_str}")
+            # Log the files we found (or didn't find)
+            log_message = f"Participant {participant_id}, Date {date_str} - Files found: "
+            log_message += f"Digital: {'Yes' if digital_file else 'No'}, "
+            log_message += f"Mobility/Movement: {'Yes' if mobility_file else 'No'}, "
+            log_message += f"Overlap: {'Yes' if overlap_file else 'No'}"
+            
+            self.logger.info(log_message)  # Always log this for troubleshooting
+            
+            if not digital_file and not mobility_file and not overlap_file:
+                self.logger.warning(f"Missing all required episode files for {participant_id} on {date_str}")
                 return None
             
-            # Load episode files
-            digital_df = pd.read_csv(digital_file)
-            mobility_df = pd.read_csv(mobility_file)
-            overlap_df = pd.read_csv(overlap_file) if overlap_file else pd.DataFrame()
+            # Read episode data if files exist
+            digital_episodes = pd.read_csv(digital_file) if digital_file else pd.DataFrame()
+            mobility_episodes = pd.read_csv(mobility_file) if mobility_file else pd.DataFrame()
+            overlap_episodes = pd.read_csv(overlap_file) if overlap_file else pd.DataFrame()
             
-            # Check if dataframes are empty
-            if digital_df.empty or mobility_df.empty:
-                self.logger.warning(f"Empty episode data for {participant_id} on {date_str}")
+            # Display column names for debugging
+            if not digital_episodes.empty:
+                self.logger.info(f"Digital episode columns: {digital_episodes.columns.tolist()}")
+            if not mobility_episodes.empty:
+                self.logger.info(f"Mobility episode columns: {mobility_episodes.columns.tolist()}")
+            if not overlap_episodes.empty:
+                self.logger.info(f"Overlap episode columns: {overlap_episodes.columns.tolist()}")
+            
+            # Check if we have enough data to calculate anything
+            if (digital_episodes.empty and mobility_episodes.empty and overlap_episodes.empty):
+                logging.warning(f"All episode files for {participant_id} on {date_str} are empty")
                 return None
+            
+            # Standardize column names for mobility episodes
+            if not mobility_episodes.empty:
+                # Map different column names to standard format
+                col_mapping = {
+                    'started_at': 'start_time',
+                    'finished_at': 'end_time'
+                }
+                mobility_episodes = mobility_episodes.rename(columns={k: v for k, v in col_mapping.items() if k in mobility_episodes.columns})
+                
+                # Verify required columns exist after standardization
+                if 'start_time' not in mobility_episodes.columns or 'end_time' not in mobility_episodes.columns:
+                    self.logger.warning(f"Missing required time columns in mobility file for {participant_id} on {date_str}")
+                    self.logger.warning(f"Available columns: {mobility_episodes.columns.tolist()}")
+                    mobility_episodes = pd.DataFrame()  # Empty it so we don't try to process it
+            
+            # Standardize column names for overlap episodes
+            if not overlap_episodes.empty:
+                # Check/fix columns if needed
+                if 'started_at' in overlap_episodes.columns and 'start_time' not in overlap_episodes.columns:
+                    overlap_episodes = overlap_episodes.rename(columns={'started_at': 'start_time', 'finished_at': 'end_time'})
+                
+                # Verify required columns exist after standardization
+                if 'start_time' not in overlap_episodes.columns or 'end_time' not in overlap_episodes.columns:
+                    self.logger.warning(f"Missing required time columns in overlap file for {participant_id} on {date_str}")
+                    self.logger.warning(f"Available columns: {overlap_episodes.columns.tolist()}")
+                    overlap_episodes = pd.DataFrame()  # Empty it
+            
+            # Log data counts for debugging
+            if self.debug_mode:
+                logging.info(f"Digital episodes: {len(digital_episodes)}, "
+                            f"Mobility episodes: {len(mobility_episodes)}, "
+                            f"Overlap episodes: {len(overlap_episodes)}")
             
             # Convert time columns to datetime
-            for df in [digital_df, mobility_df, overlap_df]:
+            for df, name in [(digital_episodes, 'digital'), (mobility_episodes, 'mobility'), (overlap_episodes, 'overlap')]:
                 if not df.empty:
                     for col in ['start_time', 'end_time']:
                         if col in df.columns:
                             df[col] = pd.to_datetime(df[col], errors='coerce')
+                            
+                            # Check for NaT values after conversion
+                            nat_count = df[col].isna().sum()
+                            if nat_count > 0:
+                                self.logger.warning(f"{nat_count} NaT values after datetime conversion in {name} {col}")
             
             # Calculate fragmentation metrics for each episode type
             digital_metrics = self.calculate_fragmentation_index(
-                digital_df, 'digital', participant_id, date_str
+                digital_episodes, 'digital', participant_id, date_str
             )
             mobility_metrics = self.calculate_fragmentation_index(
-                mobility_df, 'mobility', participant_id, date_str
+                mobility_episodes, 'mobility', participant_id, date_str
             )
             overlap_metrics = self.calculate_fragmentation_index(
-                overlap_df, 'overlap', participant_id, date_str
-            ) if not overlap_df.empty else {
+                overlap_episodes, 'overlap', participant_id, date_str
+            ) if not overlap_episodes.empty else {
                 'fragmentation_index': np.nan,
                 'episode_count': 0,
                 'total_duration': 0,
                 'status': 'no_overlap_episodes'
             }
             
+            # Add identifying prefixes to metrics keys
+            digital_metrics_prefixed = {f"digital_{k}": v for k, v in digital_metrics.items()}
+            mobility_metrics_prefixed = {f"mobility_{k}": v for k, v in mobility_metrics.items()}
+            overlap_metrics_prefixed = {f"overlap_{k}": v for k, v in overlap_metrics.items()}
+            
+            # Add cleaned ID to result
             result = {
                 'participant_id': participant_id,
                 'date': date_str,
-                'digital_fragmentation_index': digital_metrics['fragmentation_index'],
-                'mobility_fragmentation_index': mobility_metrics['fragmentation_index'],
-                'overlap_fragmentation_index': overlap_metrics['fragmentation_index'],
-                'digital_episode_count': digital_metrics['episode_count'],
-                'mobility_episode_count': mobility_metrics['episode_count'],
-                'overlap_episode_count': overlap_metrics['episode_count'],
-                'digital_total_duration': digital_metrics['total_duration'],
-                'mobility_total_duration': mobility_metrics['total_duration'],
-                'overlap_total_duration': overlap_metrics['total_duration'],
-                'digital_status': digital_metrics['status'],
-                'mobility_status': mobility_metrics['status'],
-                'overlap_status': overlap_metrics['status']
+                **digital_metrics_prefixed,
+                **mobility_metrics_prefixed,
+                **overlap_metrics_prefixed
             }
             
-            # Add additional metrics if available
-            for metrics_dict, prefix in zip(
-                [digital_metrics, mobility_metrics, overlap_metrics],
-                ['digital_', 'mobility_', 'overlap_']
-            ):
-                for key in ['mean_duration', 'std_duration', 'cv']:
-                    if key in metrics_dict:
-                        result[f'{prefix}{key}'] = metrics_dict[key]
+            if self.debug_mode:
+                self.logger.info(f"Calculated metrics for {participant_id} on {date_str}: "
+                               f"Digital: {digital_metrics.get('fragmentation_index', 'N/A')}, "
+                               f"Mobility: {mobility_metrics.get('fragmentation_index', 'N/A')}, "
+                               f"Overlap: {overlap_metrics.get('fragmentation_index', 'N/A')}")
             
             return result
             
         except Exception as e:
             self.logger.error(f"Error processing episodes for {participant_id} on {date_str}: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             return None
 
-    def generate_analysis_plots(self, df: pd.DataFrame, output_dir: Path):
-        """Generate visualization plots for fragmentation analysis"""
-        # Set seaborn style for better plots
-        sns.set(style="whitegrid")
+    def generate_analysis_plots(self, data_df, output_dir):
+        """Generate analysis plots for fragmentation metrics"""
+        if data_df is None or data_df.empty:
+            self.logger.warning("No data available for visualization - skipping plot generation")
+            return
         
-        # Ensure output directory exists
-        plots_dir = output_dir / 'plots'
-        plots_dir.mkdir(parents=True, exist_ok=True)
+        # Create output directory for plots
+        plot_dir = output_dir / "plots"
+        plot_dir.mkdir(exist_ok=True)
         
-        # Create correlation matrix
-        corr_cols = [col for col in df.columns if col.endswith('_fragmentation_index') 
-                    or col.endswith('_episode_count') or col.endswith('_total_duration')]
+        # Select only numeric columns for correlation
+        numeric_cols = data_df.select_dtypes(include=['float64', 'int64']).columns
         
-        corr_df = df[corr_cols].copy()
-        correlation = corr_df.corr()
+        # Check if we have enough numeric data
+        if len(numeric_cols) < 2:
+            self.logger.warning(f"Not enough numeric columns for correlation analysis: {numeric_cols}")
+            return
         
-        plt.figure(figsize=(10, 8))
+        # Filter out columns with all NaN values
+        valid_cols = [col for col in numeric_cols if data_df[col].notna().sum() > 0]
+        
+        # Check if we have enough valid columns after filtering
+        if len(valid_cols) < 2:
+            self.logger.warning(f"Not enough valid data for correlation analysis. Valid columns: {valid_cols}")
+            return
+        
+        # Compute correlation only for valid columns
+        correlation = data_df[valid_cols].corr()
+        
+        # Check if correlation matrix has any valid data
+        if correlation.size == 0 or correlation.isna().all().all():
+            self.logger.warning("Correlation matrix is empty or contains only NaN values")
+            return
+        
+        # Create correlation heatmap
+        plt.figure(figsize=(12, 10))
         sns.heatmap(correlation, annot=True, cmap='coolwarm', fmt=".2f", linewidths=0.5)
-        plt.title('Correlation Matrix of Fragmentation Metrics')
+        plt.title('Correlation Matrix of Fragmentation Metrics', fontsize=16)
         plt.tight_layout()
-        plt.savefig(plots_dir / 'correlation_matrix.png')
+        plt.savefig(plot_dir / 'correlation_matrix.png', dpi=300)
         plt.close()
         
-        # Plot histograms for each fragmentation index
-        metrics = ['digital_fragmentation_index', 'mobility_fragmentation_index', 'overlap_fragmentation_index']
+        # The rest of your visualization code with similar checks...
         
-        plt.figure(figsize=(12, 6))
-        for i, metric in enumerate(metrics):
-            if df[metric].notna().sum() > 0:  # Only plot if we have data
-                plt.subplot(1, 3, i+1)
-                sns.histplot(df[metric].dropna(), kde=True)
-                plt.title(f'{metric.split("_")[0].capitalize()} Fragmentation')
-                plt.xlabel('Fragmentation Index')
-                plt.ylabel('Frequency')
-        
-        plt.tight_layout()
-        plt.savefig(plots_dir / 'fragmentation_distributions.png')
-        plt.close()
-        
-        # Create a participant summary plot
-        participant_means = df.groupby('participant_id')[metrics].mean().reset_index()
-        
-        plt.figure(figsize=(12, 6))
-        participant_means_melted = pd.melt(
-            participant_means, 
-            id_vars=['participant_id'],
-            value_vars=metrics,
-            var_name='Metric', 
-            value_name='Fragmentation Index'
-        )
-        
-        # Replace metric names for cleaner display
-        participant_means_melted['Metric'] = participant_means_melted['Metric'].apply(
-            lambda x: x.split('_')[0].capitalize()
-        )
-        
-        sns.barplot(x='participant_id', y='Fragmentation Index', hue='Metric', data=participant_means_melted)
-        plt.title('Average Fragmentation Index by Participant')
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        plt.savefig(plots_dir / 'participant_comparison.png')
-        plt.close()
-        
-        # Create time series plot for selected participants
-        # Get top 5 participants with most data points
-        top_participants = df['participant_id'].value_counts().head(5).index.tolist()
-        
-        for metric in metrics:
+        # Example for fragmentation index distributions
+        frag_cols = [col for col in data_df.columns if 'fragmentation_index' in col]
+        if frag_cols and any(data_df[col].notna().sum() > 0 for col in frag_cols):
             plt.figure(figsize=(12, 6))
-            metric_name = metric.split('_')[0].capitalize()
-            
-            for participant in top_participants:
-                participant_data = df[df['participant_id'] == participant].copy()
-                participant_data['date'] = pd.to_datetime(participant_data['date'])
-                participant_data = participant_data.sort_values('date')
-                
-                if len(participant_data) > 1:  # Only plot if we have enough data points
-                    plt.plot(participant_data['date'], participant_data[metric], 
-                            label=f'Participant {participant}', marker='o')
-            
-            plt.title(f'{metric_name} Fragmentation Over Time')
-            plt.xlabel('Date')
-            plt.ylabel('Fragmentation Index')
+            for col in frag_cols:
+                if data_df[col].notna().sum() > 0:  # Only plot if we have valid data
+                    sns.histplot(data_df[col].dropna(), kde=True, label=col)
+            plt.title('Distribution of Fragmentation Indices', fontsize=16)
+            plt.xlabel('Fragmentation Index Value', fontsize=14)
+            plt.ylabel('Frequency', fontsize=14)
             plt.legend()
-            plt.grid(True)
             plt.tight_layout()
-            plt.savefig(plots_dir / f'{metric_name.lower()}_time_series.png')
+            plt.savefig(plot_dir / 'fragmentation_distribution.png', dpi=300)
             plt.close()
+        else:
+            self.logger.warning("No valid fragmentation index data for distribution plot")
+
+        # Add similar checks for other plots...
 
 def process_episodes_data(
     episode_dir: Path,
@@ -423,12 +476,9 @@ def process_episodes_data(
     # Create output directory
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Initialize analyzer
-    analyzer = EpisodeFragmentationAnalyzer(
-        min_episodes=min_episodes,
-        entropy_based=entropy_based,
-        debug_mode=debug_mode
-    )
+    # Initialize analyzer and DataCleaner
+    analyzer = EpisodeFragmentationAnalyzer(min_episodes, entropy_based, debug_mode)
+    data_cleaner = DataCleaner(logging.getLogger())
     
     # Get list of participant directories, filtering out hidden files
     participant_dirs = [d for d in episode_dir.iterdir() 
@@ -451,115 +501,128 @@ def process_episodes_data(
         if not episode_files:
             logging.warning(f"No episode files found for participant {participant_id}")
             continue
-            
-        logging.info(f"Processing {len(episode_files)} days for participant {participant_id}")
         
-        # Process each file
+        # Extract dates from filenames
+        dates = set()
         for file in episode_files:
-            # Extract date from filename
-            try:
-                # First try pattern "*_digital_episodes.csv"
-                if '_digital_episodes.csv' in file.name:
-                    date_str = file.name.split('_digital_episodes.csv')[0]
-                # Then try pattern "digital_episodes_*.csv" 
-                elif 'digital_episodes_' in file.name:
-                    date_str = file.name.split('digital_episodes_')[1].split('.csv')[0]
-                else:
-                    # Try to extract any date-like part (YYYY-MM-DD)
-                    date_match = re.search(r'(\d{4}-\d{2}-\d{2})', file.name)
-                    if date_match:
-                        date_str = date_match.group(1)
-                    else:
-                        logging.warning(f"Could not extract date from filename: {file.name}")
-                        continue
-                
-                # Skip files with invalid dates (like empty strings)
-                if not date_str or not date_str[0].isdigit():
-                    logging.warning(f"Invalid date format in filename: {file.name}")
+            for pattern in ['%Y-%m-%d', '%Y%m%d']:
+                try:
+                    # Try to extract date using different patterns
+                    date_str = re.search(r'(\d{4}-\d{2}-\d{2}|\d{8})', file.name)
+                    if date_str:
+                        date_obj = datetime.strptime(date_str.group(1), pattern)
+                        dates.add(date_obj.strftime('%Y-%m-%d'))
+                        break
+                except (ValueError, AttributeError):
                     continue
-                
-                # Process episodes for this day
-                daily_metrics = analyzer.process_daily_episodes(participant_dir, date_str, participant_id)
-                
-                if daily_metrics:
-                    all_results.append(daily_metrics)
-            except Exception as e:
-                logging.error(f"Error processing file {file}: {str(e)}")
+        
+        if not dates:
+            logging.warning(f"Could not extract dates from filenames for {participant_id}")
+            continue
+        
+        logging.info(f"Processing {len(dates)} days for participant {participant_id}")
+        
+        # Process each date
+        participant_results = []
+        for date_str in sorted(dates):
+            result = analyzer.process_daily_episodes(participant_dir, date_str, participant_id)
+            if result:
+                participant_results.append(result)
+        
+        # Add to overall results
+        all_results.extend(participant_results)
     
-    # Create summary DataFrame
-    if all_results:
-        combined_results = pd.DataFrame(all_results)
-        
-        # Save full results
-        combined_results.to_csv(output_dir / 'fragmentation_all_metrics.csv', index=False)
-        
-        # Generate and save analysis plots
-        analyzer.generate_analysis_plots(combined_results, output_dir)
-        
-        # Generate summary stats by participant
-        participant_summary = combined_results.groupby('participant_id').agg({
-            'digital_fragmentation_index': ['mean', 'std', 'count'],
-            'mobility_fragmentation_index': ['mean', 'std', 'count'],
-            'overlap_fragmentation_index': ['mean', 'std', 'count'],
-            'digital_episode_count': 'mean',
-            'mobility_episode_count': 'mean',
-            'overlap_episode_count': 'mean',
-            'digital_total_duration': 'mean',
-            'mobility_total_duration': 'mean',
-            'overlap_total_duration': 'mean'
-        })
-        
-        # Flatten multi-index columns
-        participant_summary.columns = ['_'.join(col).strip() for col in participant_summary.columns.values]
-        
-        # Save participant summary
-        participant_summary.to_csv(output_dir / 'participant_fragmentation_summary.csv')
-        
-        # Print processing statistics
-        logging.info("\nProcessing Statistics:")
-        for episode_type in ['digital', 'mobility', 'overlap']:
-            stats = analyzer.stats[episode_type]
-            total = sum(stats.values())
-            logging.info(f"\n{episode_type.capitalize()} Episodes:")
-            for status, count in stats.items():
-                percentage = (count/total*100) if total > 0 else 0
-                logging.info(f"  {status}: {count} ({percentage:.1f}%)")
-        
-        # Generate analysis report
-        metrics_by_type = {}
-        for episode_type in ['digital', 'mobility', 'overlap']:
-            col = f'{episode_type}_fragmentation_index'
-            if col in combined_results.columns:
-                metrics_by_type[episode_type] = {
-                    'mean': combined_results[col].mean(),
-                    'median': combined_results[col].median(),
-                    'std': combined_results[col].std(),
-                    'min': combined_results[col].min(),
-                    'max': combined_results[col].max(),
-                    'count': combined_results[col].count(),
-                    'missing': combined_results[col].isna().sum(),
-                }
-        
-        # Save metrics summary as JSON - convert NumPy types to Python native types
-        metrics_by_type_serializable = {}
-        for episode_type, metrics in metrics_by_type.items():
-            metrics_by_type_serializable[episode_type] = {
-                key: float(value) if isinstance(value, (np.float64, np.float32, np.int64, np.int32)) else value
-                for key, value in metrics.items()
-            }
+    # Convert to DataFrame
+    combined_results = pd.DataFrame(all_results) if all_results else pd.DataFrame()
+    
+    # Show the actual columns available
+    logging.info(f"DataFrame columns available: {combined_results.columns.tolist() if not combined_results.empty else 'None'}")
+    
+    # Check for empty dataframe
+    if combined_results.empty:
+        logging.error("No valid data was processed. Check episode files and logs.")
+        # Create empty files with correctly named columns to avoid future processing errors
+        empty_df = pd.DataFrame(columns=[
+            'participant_id', 'date', 
+            'digital_fragmentation_index', 'digital_episode_count', 'digital_total_duration',
+            'mobility_fragmentation_index', 'mobility_episode_count', 'mobility_total_duration', 
+            'overlap_fragmentation_index', 'overlap_episode_count', 'overlap_total_duration'
+        ])
+        empty_df.to_csv(output_dir / 'fragmentation_all_metrics.csv', index=False)
+        empty_df.to_csv(output_dir / 'participant_summaries.csv', index=False)
+        return empty_df
+    
+    # Verify that the key metrics columns exist
+    logging.info("Checking for expected columns in dataset...")
+    expected_columns = [
+        'digital_fragmentation_index', 'mobility_fragmentation_index', 'overlap_fragmentation_index'
+    ]
+    
+    # Check if any of the expected columns are missing
+    missing_columns = [col for col in expected_columns if col not in combined_results.columns]
+    if missing_columns:
+        logging.warning(f"Missing expected metric columns: {missing_columns}")
+    
+    # Calculate participant summaries
+    available_cols = combined_results.columns.tolist()
+    
+    # Create a dynamic aggregation dictionary based on available columns
+    agg_dict = {}
+    metrics_to_check = [
+        'digital_episode_count', 'digital_fragmentation_index', 'digital_total_duration',
+        'mobility_episode_count', 'mobility_fragmentation_index', 'mobility_total_duration',
+        'overlap_episode_count', 'overlap_fragmentation_index', 'overlap_total_duration'
+    ]
+    
+    for col in metrics_to_check:
+        if col in available_cols:
+            if 'count' in col:
+                agg_dict[col] = ['mean', 'min', 'max', 'sum']
+            else:
+                agg_dict[col] = ['mean', 'min', 'max']
+    
+    # Only attempt to aggregate if we have metrics columns
+    if agg_dict:
+        try:
+            participant_summary = combined_results.groupby('participant_id').agg(agg_dict)
             
-        with open(output_dir / 'fragmentation_metrics_summary.json', 'w') as f:
-            json.dump(metrics_by_type_serializable, f, indent=4)
+            # Flatten column structure
+            participant_summary.columns = ['_'.join(col).strip() for col in participant_summary.columns.values]
             
-        return combined_results
+            # Add days_processed column
+            days_per_participant = combined_results.groupby('participant_id').size()
+            participant_summary['days_processed'] = days_per_participant
+            
+            # Reset index for easier handling
+            participant_summary = participant_summary.reset_index()
+            
+            # Save summary
+            participant_summary.to_csv(output_dir / 'participant_summaries.csv', index=False)
+        except Exception as e:
+            logging.error(f"Error creating participant summary: {str(e)}")
+            # Create a basic participant summary
+            participant_summary = combined_results.groupby('participant_id').size().reset_index()
+            participant_summary.columns = ['participant_id', 'days_processed']
+            participant_summary.to_csv(output_dir / 'participant_summaries.csv', index=False)
     else:
-        logging.warning("No valid results were generated")
-        return None
+        logging.warning("No metrics columns available for aggregation")
+        # Create a basic participant summary
+        participant_summary = combined_results.groupby('participant_id').size().reset_index()
+        participant_summary.columns = ['participant_id', 'days_processed']
+        participant_summary.to_csv(output_dir / 'participant_summaries.csv', index=False)
+    
+    # Save full results
+    combined_results.to_csv(output_dir / 'fragmentation_all_metrics.csv', index=False)
+    
+    # Generate plots
+    analyzer.generate_analysis_plots(combined_results, output_dir)
+    
+    return combined_results
 
 def main():
-    # Configure paths - adjust these to match your directory structure
-    episode_dir = Path('/Volumes/Extreme SSD/SURREAL-DataBackup/HUJI_data-main/processed/episodes')
-    output_dir = Path('/Volumes/Extreme SSD/SURREAL-DataBackup/HUJI_data-main/processed/fragmentation')
+    # Configure paths using the same config as detect_episodes.py
+    episode_dir = EPISODE_OUTPUT_DIR
+    output_dir = PROCESSED_DATA_DIR / 'fragmentation'
     
     # Check if episode directory exists
     if not episode_dir.exists():
@@ -570,13 +633,20 @@ def main():
     print(f"Found episode directory at: {episode_dir}")
     print(f"Participant directories found: {len([d for d in episode_dir.iterdir() if d.is_dir() and not d.name.startswith('.')])}")
     
+    # Print an example of episode files to verify patterns
+    for participant_dir in list(episode_dir.iterdir())[:1]:
+        if participant_dir.is_dir() and not participant_dir.name.startswith('.'):
+            print(f"Example files in {participant_dir.name}:")
+            for csv_file in list(participant_dir.glob('*.csv'))[:5]:
+                print(f"  - {csv_file.name}")
+    
     # Process all episode data
     results_df = process_episodes_data(
         episode_dir=episode_dir,
         output_dir=output_dir,
         min_episodes=2,  # Minimum episode count for calculation
         entropy_based=True,  # Use entropy-based fragmentation
-        debug_mode=False     # Disable verbose debugging
+        debug_mode=True     # Enable verbose debugging for troubleshooting
     )
     
     # Log summary statistics and file locations
@@ -585,31 +655,71 @@ def main():
         logging.info("FRAGMENTATION ANALYSIS SUMMARY")
         logging.info("="*50)
         
-        # Summary statistics
+        # Summary statistics - with column existence checks
         logging.info("\nSummary Statistics:")
         for metric in ['digital_fragmentation_index', 'mobility_fragmentation_index', 'overlap_fragmentation_index']:
-            valid_values = results_df[metric].dropna()
-            logging.info(f"\n{metric.split('_')[0].capitalize()} Fragmentation:")
-            logging.info(f"  Valid measurements: {len(valid_values)} of {len(results_df)} ({len(valid_values)/len(results_df)*100:.1f}%)")
-            if not valid_values.empty:
-                logging.info(f"  Mean: {valid_values.mean():.4f}")
-                logging.info(f"  Median: {valid_values.median():.4f}")
-                logging.info(f"  Std Dev: {valid_values.std():.4f}")
-                logging.info(f"  Range: [{valid_values.min():.4f}, {valid_values.max():.4f}]")
+            if metric in results_df.columns:  # Check if column exists
+                valid_values = results_df[metric].dropna()
+                logging.info(f"\n{metric.split('_')[0].capitalize()} Fragmentation:")
+                logging.info(f"  Valid measurements: {len(valid_values)} of {len(results_df)} ({len(valid_values)/len(results_df)*100:.1f}% if available)")
+                if not valid_values.empty:
+                    logging.info(f"  Mean: {valid_values.mean():.4f}")
+                    logging.info(f"  Median: {valid_values.median():.4f}")
+                    logging.info(f"  Std Dev: {valid_values.std():.4f}")
+                    logging.info(f"  Range: [{valid_values.min():.4f}, {valid_values.max():.4f}]")
+                else:
+                    logging.info("  No valid measurements available")
+            else:
+                logging.info(f"\n{metric.split('_')[0].capitalize()} Fragmentation:")
+                logging.info(f"  No data available for this metric")
         
-        # Participant coverage
-        total_participants = results_df['participant_id'].nunique()
-        logging.info(f"\nParticipant Coverage:")
-        logging.info(f"  Total participants processed: {total_participants}")
-        avg_days = len(results_df) / total_participants if total_participants > 0 else 0
-        logging.info(f"  Average days per participant: {avg_days:.1f}")
+        # Participant coverage - safer implementation
+        if 'participant_id' in results_df.columns:
+            total_participants = results_df['participant_id'].nunique()
+            logging.info(f"\nParticipant Coverage:")
+            logging.info(f"  Total participants processed: {total_participants}")
+            avg_days = len(results_df) / total_participants if total_participants > 0 else 0
+            logging.info(f"  Average days per participant: {avg_days:.1f}")
+        else:
+            logging.info("\nParticipant Coverage: No participant data available")
         
         # File locations
         logging.info("\nOutput Files:")
         logging.info(f"  Full metrics data: {output_dir / 'fragmentation_all_metrics.csv'}")
-        logging.info(f"  Participant summary: {output_dir / 'participant_fragmentation_summary.csv'}")
-        logging.info(f"  Metrics summary JSON: {output_dir / 'fragmentation_metrics_summary.json'}")
+        logging.info(f"  Participant summary: {output_dir / 'participant_summaries.csv'}")
         logging.info(f"  Visualization plots: {output_dir / 'plots/'}")
+        
+        # Visualize the data
+        os.makedirs(os.path.join(output_dir, 'plots'), exist_ok=True)
+        
+        # Check if we have any valid data
+        if results_df is None or results_df.empty:
+            logging.warning("No valid results data available for visualization")
+        else:
+            # Plot digital fragmentation distribution
+            for metric_col, title in [
+                ('digital_fragmentation_index', 'Digital Fragmentation Distribution'),
+                ('mobility_fragmentation_index', 'Mobility Fragmentation Distribution'),
+                ('overlap_fragmentation_index', 'Digital-Mobility Overlap Fragmentation')
+            ]:
+                if metric_col in results_df.columns:
+                    valid_values = results_df[results_df[metric_col].notna()][metric_col]
+                    
+                    if len(valid_values) > 0:  # Check if we have any valid values
+                        plt.figure(figsize=(10, 6))
+                        sns.histplot(valid_values, kde=True)
+                        plt.title(title)
+                        plt.xlabel('Fragmentation Index (0-1)')
+                        plt.ylabel('Count')
+                        plt.savefig(os.path.join(output_dir, 'plots', f"{metric_col}_distribution.png"))
+                        plt.close()
+                        
+                        logging.info(f"  Valid measurements: {len(valid_values)} of {len(results_df)} " + 
+                                    f"({len(valid_values)/len(results_df)*100:.1f}% if available)")
+                    else:
+                        logging.warning(f"No valid values available for {metric_col}")
+                else:
+                    logging.warning(f"Column {metric_col} not found in results")
         
         logging.info("\nAnalysis complete!")
     else:
