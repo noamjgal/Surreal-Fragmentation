@@ -167,36 +167,114 @@ def load_app_data(file_path):
         traceback.print_exc()
         return None
 
-def process_participant(participant_id, qstarz_file, app_file):
+def load_app_gps_data(file_path):
+    """Load and preprocess smartphone GPS data, returning a Trackintel Positionfixes object"""
+    logging.info(f"Loading smartphone GPS data from {file_path}")
+    
+    try:
+        # Load the raw data
+        df = pd.read_csv(file_path)
+        
+        # Strip whitespace from column names
+        df.columns = df.columns.str.strip()
+        
+        # Expected column structure from sample
+        # serial, id, date, time, long, lat, accuracy, provider
+        
+        # Check required columns are present
+        required_cols = ['date', 'time', 'long', 'lat']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        
+        if missing_cols:
+            raise ValueError(f"Required columns {missing_cols} not found in {file_path}")
+        
+        # Extract participant ID from filename
+        participant_id = os.path.basename(file_path).split('-')[0]
+        
+        # Combine date and time into a timestamp
+        df['tracked_at'] = pd.to_datetime(df['date'] + ' ' + df['time'], errors='coerce')
+        
+        # Create positionfixes dataframe
+        positionfixes = pd.DataFrame({
+            'user_id': participant_id,
+            'tracked_at': df['tracked_at'],
+            'latitude': df['lat'],
+            'longitude': df['long'],
+            'elevation': np.nan,
+            'accuracy': df.get('accuracy', np.nan),  # Use accuracy if available
+        })
+        
+        # Make sure tracked_at is timezone aware (required by trackintel)
+        positionfixes['tracked_at'] = positionfixes['tracked_at'].dt.tz_localize('UTC', ambiguous='raise')
+        
+        # Convert to GeoDataFrame and set as trackintel Positionfixes
+        geometry = [Point(lon, lat) for lon, lat in zip(positionfixes['longitude'], positionfixes['latitude'])]
+        gdf = gpd.GeoDataFrame(positionfixes, geometry=geometry, crs="EPSG:4326")
+        
+        # Drop rows with missing or invalid GPS coordinates
+        gdf = gdf.dropna(subset=['latitude', 'longitude'])
+        gdf = gdf[(gdf['latitude'] != 0) & (gdf['longitude'] != 0)]
+        
+        # Set as trackintel Positionfixes
+        pfs = ti.Positionfixes(gdf)
+        
+        logging.info(f"Successfully loaded {len(pfs)} smartphone GPS points for participant {participant_id}")
+        return pfs
+        
+    except Exception as e:
+        logging.error(f"Error loading smartphone GPS data: {str(e)}")
+        traceback.print_exc()
+        return None
+
+def process_participant(participant_id, qstarz_file=None, app_file=None, app_gps_file=None):
     """Process data for a single participant"""
     logging.info(f"Processing data for participant {participant_id}")
     
     try:
-        # Load Qstarz data as Trackintel Positionfixes
-        positionfixes = load_qstarz_data(qstarz_file)
+        # Load Qstarz data as Trackintel Positionfixes if available
+        positionfixes = None
+        data_source = None
         
+        if qstarz_file is not None:
+            positionfixes = load_qstarz_data(qstarz_file)
+            if positionfixes is not None and not positionfixes.empty:
+                data_source = "qstarz"
+                logging.info(f"Using Qstarz data for participant {participant_id}")
+        
+        # If Qstarz data is missing or invalid, try smartphone GPS data
+        if (positionfixes is None or positionfixes.empty) and app_gps_file is not None:
+            positionfixes = load_app_gps_data(app_gps_file)
+            if positionfixes is not None and not positionfixes.empty:
+                data_source = "smartphone"
+                logging.info(f"Using smartphone GPS data for participant {participant_id}")
+        
+        # Check if we have valid GPS data from either source
         if positionfixes is None or positionfixes.empty:
-            logging.error(f"No valid positionfixes for participant {participant_id}")
+            logging.error(f"No valid GPS data for participant {participant_id}")
             return False
             
         # Load app data
-        app_df = load_app_data(app_file)
-        
-        if app_df is None or app_df.empty:
-            logging.error(f"No valid app data for participant {participant_id}")
+        if app_file is not None:
+            app_df = load_app_data(app_file)
+            if app_df is None or app_df.empty:
+                logging.error(f"No valid app data for participant {participant_id}")
+                return False
+        else:
+            logging.error(f"No app data file provided for participant {participant_id}")
             return False
             
         # Save preprocessed files for episode detection
-        qstarz_csv_path = GPS_PREP_DIR / f'{participant_id}_qstarz_prep.csv'
+        qstarz_csv_path = GPS_PREP_DIR / f'{participant_id}_gps_prep.csv'
         app_csv_path = GPS_PREP_DIR / f'{participant_id}_app_prep.csv'
         
-        # Save positionfixes
+        # Save positionfixes with data source metadata
+        positionfixes['data_source'] = data_source
         positionfixes.to_csv(qstarz_csv_path)
         
         # Save app data
         app_df.to_csv(app_csv_path, index=False)
         
-        logging.info(f"Saved preprocessed data for participant {participant_id}")
+        logging.info(f"Saved preprocessed data for participant {participant_id} (GPS source: {data_source})")
         quality_report['successful_participants'].append(participant_id)
         
         # Generate optional staypoints for visualization
@@ -272,8 +350,9 @@ def main():
     logging.info(f"Found {len(qstarz_files)} Qstarz files")
     logging.debug(f"Qstarz participant IDs: {sorted(qstarz_files.keys())}")
     
-    # Get app files
+    # Get app files and smartphone GPS files
     app_files = {}
+    app_gps_files = {}
     missing_app_folders = []
     missing_app_files = []
     
@@ -294,40 +373,60 @@ def main():
         # Look for app files with consistent naming
         app_file = next(app_folder.glob(f'{participant_id}-apps.csv'), None)
         
+        # Look for smartphone GPS files
+        app_gps_file = next(app_folder.glob(f'{participant_id}-gps.csv'), None)
+        
         # Skip hidden files (those starting with ._)
         if app_file and not app_file.name.startswith('._'):
             app_files[participant_id] = app_file
         else:
             logging.warning(f"No app file found for participant {participant_id} (folder: {full_participant_id})")
             missing_app_files.append(full_participant_id)
+        
+        # Store GPS file if it exists
+        if app_gps_file and not app_gps_file.name.startswith('._'):
+            app_gps_files[participant_id] = app_gps_file
+            logging.info(f"Found smartphone GPS data for participant {participant_id}")
     
     logging.info(f"Found {len(app_files)} app files")
-    logging.debug(f"App file participant IDs: {sorted(app_files.keys())}")
+    logging.info(f"Found {len(app_gps_files)} smartphone GPS files")
     
-    # Find common participants
-    common_participants = set(qstarz_files.keys()) & set(app_files.keys())
-    logging.info(f"Common participants: {sorted(common_participants)}")
+    # Find participants with data (now looking for either Qstarz OR smartphone GPS)
+    participants_with_gps = set(qstarz_files.keys()) | set(app_gps_files.keys())
+    participants_with_app = set(app_files.keys())
     
-    missing_qstarz = set(app_files.keys()) - set(qstarz_files.keys())
-    missing_apps = set(qstarz_files.keys()) - set(app_files.keys())
+    # Participants with both types of data needed
+    processable_participants = participants_with_gps & participants_with_app
     
-    logging.info(f"Found {len(common_participants)} participants with both Qstarz and app data")
-    logging.info(f"Missing Qstarz data for {len(missing_qstarz)} participants: {missing_qstarz}")
+    logging.info(f"Participants with some form of GPS data: {len(participants_with_gps)}")
+    logging.info(f"Participants with app data: {len(participants_with_app)}")
+    logging.info(f"Processable participants: {len(processable_participants)}")
+    
+    # Track what's missing
+    missing_all_gps = set(app_files.keys()) - participants_with_gps
+    missing_apps = participants_with_gps - set(app_files.keys())
+    
+    logging.info(f"Missing all GPS data for {len(missing_all_gps)} participants: {missing_all_gps}")
     logging.info(f"Missing app data for {len(missing_apps)} participants: {missing_apps}")
     
     # Update quality report with missing file information
     quality_report['missing_files'].extend([f"Missing app folder: {folder}" for folder in missing_app_folders])
     quality_report['missing_files'].extend([f"Missing app file: {folder}" for folder in missing_app_files])
-    quality_report['missing_files'].extend([f"Missing Qstarz data: Participant {p_id}" for p_id in missing_qstarz])
+    quality_report['missing_files'].extend([f"Missing all GPS data: Participant {p_id}" for p_id in missing_all_gps])
     quality_report['missing_files'].extend([f"Missing app data: Participant {p_id}" for p_id in missing_apps])
     
     # Process each participant
     successful = 0
-    for participant_id in common_participants:
-        if process_participant(participant_id, qstarz_files[participant_id], app_files[participant_id]):
+    for participant_id in processable_participants:
+        # Get the available data files
+        qstarz_file = qstarz_files.get(participant_id)
+        app_file = app_files.get(participant_id)
+        app_gps_file = app_gps_files.get(participant_id)
+        
+        if process_participant(participant_id, qstarz_file, app_file, app_gps_file):
             successful += 1
     
-    logging.info(f"Successfully processed {successful}/{len(common_participants)} participants")
+    logging.info(f"Successfully processed {successful}/{len(processable_participants)} participants")
     
     # Generate quality report
     generate_quality_report()
@@ -336,3 +435,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
