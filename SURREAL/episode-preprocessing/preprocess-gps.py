@@ -341,7 +341,7 @@ def main():
     
     # Get Qstarz files with consistent ID format (keeping original format with leading zeros)
     qstarz_files = {}
-    for f in QSTARZ_DATA_DIR.glob('*.csv'):
+    for f in QSTARZ_DATA_DIR.glob('*_Qstarz_processed.csv'):
         if not f.stem.startswith('._'):
             # Extract ID and maintain original format (with leading zeros if present)
             participant_id = f.stem.split('_')[0]
@@ -435,4 +435,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
