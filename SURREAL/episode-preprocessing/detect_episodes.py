@@ -56,13 +56,17 @@ sys.path.append(str(Path(__file__).parent.parent))
 from config.paths import GPS_PREP_DIR, EPISODE_OUTPUT_DIR, PROCESSED_DATA_DIR
 
 # Trackintel configuration parameters
-STAYPOINT_DISTANCE_THRESHOLD = 50  # meters - distance threshold for staypoint detection
-STAYPOINT_TIME_THRESHOLD = 2.0  # minutes - time threshold for staypoint detection
-STAYPOINT_GAP_THRESHOLD = 1.0  # minutes - max gap between consecutive positionfixes
-LOCATION_EPSILON = 100  # meters - distance threshold for clustering staypoints into locations
-LOCATION_MIN_SAMPLES = 1  # minimum number of staypoints to form a significant location- does not really matter for this research
-TRIP_GAP_THRESHOLD = 1 # minutes - maximum gap between consecutive staypoints
+STAYPOINT_DISTANCE_THRESHOLD = 100  # meters - distance threshold for staypoint detection (increased from 50)
+STAYPOINT_TIME_THRESHOLD = 5.0  # minutes - time threshold for staypoint detection (increased from 2.0)
+STAYPOINT_GAP_THRESHOLD = 5.0  # minutes - max gap between consecutive positionfixes (increased from 1.0)
+LOCATION_EPSILON = 150  # meters - distance threshold for clustering staypoints into locations (increased from 100)
+LOCATION_MIN_SAMPLES = 1  # minimum number of staypoints to form a significant location
+TRIP_GAP_THRESHOLD = 5  # minutes - maximum gap between consecutive staypoints (increased from 1)
 DIGITAL_USE_COL = 'action'  # column name for screen events
+
+# New parameters for fallback detection
+MIN_MOVEMENT_SPEED = 50  # meters per minute (approx. 3 km/h) for fallback detection
+MAX_REASONABLE_SPEED = 2500  # meters per minute (approx. 150 km/h) for filtering
 
 def ensure_tz_naive(datetime_series: pd.Series) -> pd.Series:
     """Convert a datetime series to timezone-naive if it has a timezone"""
@@ -138,6 +142,47 @@ class EpisodeProcessor:
             return pd.DataFrame(overlap_episodes)
         return pd.DataFrame()
 
+    def _filter_gps_data(self, gps_df, datetime_col, lat_col, lon_col):
+        """Filter GPS data to remove outliers and improve quality"""
+        self.logger.debug(f"Filtering GPS data - original points: {len(gps_df)}")
+        
+        if len(gps_df) <= 1:
+            return gps_df
+            
+        # Sort by timestamp
+        gps_df = gps_df.sort_values(datetime_col)
+        
+        # Remove duplicate timestamps
+        gps_df = gps_df.drop_duplicates(subset=[datetime_col])
+        
+        # Calculate speeds between consecutive points
+        gps_df['prev_lat'] = gps_df[lat_col].shift(1)
+        gps_df['prev_lon'] = gps_df[lon_col].shift(1)
+        gps_df['time_diff'] = (gps_df[datetime_col].diff()).dt.total_seconds() / 60  # minutes
+        
+        # Only calculate speed where we have valid time differences
+        mask = (gps_df['time_diff'] > 0)
+        if mask.any():
+            # Calculate rough distance in meters (using approximate conversion - 1 degree ~ 111km at equator)
+            gps_df.loc[mask, 'distance'] = np.sqrt(
+                ((gps_df.loc[mask, lat_col] - gps_df.loc[mask, 'prev_lat']) * 111000)**2 + 
+                ((gps_df.loc[mask, lon_col] - gps_df.loc[mask, 'prev_lon']) * 
+                 111000 * np.cos(np.radians(gps_df.loc[mask, lat_col])))**2
+            )
+            
+            # Calculate speed in meters per minute
+            gps_df.loc[mask, 'speed'] = gps_df.loc[mask, 'distance'] / gps_df.loc[mask, 'time_diff']
+            
+            # Filter out unreasonable speeds
+            gps_df = gps_df[(gps_df['speed'].isna()) | (gps_df['speed'] <= MAX_REASONABLE_SPEED)]
+        
+        # Remove temporary columns
+        gps_df = gps_df.drop(columns=['prev_lat', 'prev_lon', 'time_diff', 'distance', 'speed'], 
+                           errors='ignore')
+        
+        self.logger.debug(f"Filtered GPS data - remaining points: {len(gps_df)}")
+        return gps_df
+
     def load_gps_data(self) -> Optional[ti.Positionfixes]:
         """Load GPS data with validation"""
         gps_path = GPS_PREP_DIR / f'{self.participant_id}_gps_prep.csv'
@@ -203,6 +248,9 @@ class EpisodeProcessor:
                 else:
                     raise ValueError(f"Could not find latitude/longitude columns in {gps_path}")
             
+            # Additional data quality filtering
+            gps_df = self._filter_gps_data(gps_df, datetime_col, lat_col, lon_col)
+            
             # Convert to trackintel's positionfixes format
             positionfixes = pd.DataFrame({
                 'user_id': self.participant_id,
@@ -228,10 +276,45 @@ class EpisodeProcessor:
             positionfixes = ti.Positionfixes(positionfixes)
             
             self.logger.debug(f"Loaded {len(positionfixes)} GPS points")
+            
+            # Debug GPS data quality
+            self._debug_gps_quality(positionfixes)
+            
             return positionfixes
         except Exception as e:
             self.logger.error(f"Failed to load GPS data: {str(e)}")
             raise
+
+    def _debug_gps_quality(self, positionfixes):
+        """Generate statistics about GPS data quality"""
+        if len(positionfixes) <= 1:
+            self.logger.warning(f"Insufficient GPS data for quality assessment: only {len(positionfixes)} points")
+            return
+            
+        # Calculate time gaps between consecutive points
+        pfs_df = positionfixes.copy()
+        pfs_df = pfs_df.sort_values('tracked_at')
+        pfs_df['time_diff'] = pfs_df['tracked_at'].diff().dt.total_seconds()
+        
+        # Calculate basic statistics
+        stats = {
+            'total_points': len(pfs_df),
+            'unique_days': len(pfs_df['tracked_at'].dt.date.unique()),
+            'median_time_gap_seconds': pfs_df['time_diff'].median(),
+            'mean_time_gap_seconds': pfs_df['time_diff'].mean(),
+            'max_time_gap_seconds': pfs_df['time_diff'].max(),
+            'points_with_large_gaps': sum(pfs_df['time_diff'] > 300),  # > 5 min
+            'percent_large_gaps': round(sum(pfs_df['time_diff'] > 300) / max(1, len(pfs_df) - 1) * 100, 1)
+        }
+        
+        self.logger.info(f"GPS quality stats for {self.participant_id}: {stats}")
+        
+        # Warn if the data quality might cause issues with trackintel
+        if stats['median_time_gap_seconds'] > STAYPOINT_GAP_THRESHOLD * 60:
+            self.logger.warning(f"Median GPS time gap ({stats['median_time_gap_seconds']} sec) exceeds the staypoint gap threshold ({STAYPOINT_GAP_THRESHOLD*60} sec)")
+            
+        if stats['percent_large_gaps'] > 25:
+            self.logger.warning(f"High percentage of large gaps in GPS data: {stats['percent_large_gaps']}%")
 
     def load_app_data(self) -> pd.DataFrame:
         """Load app data with validation"""
@@ -334,11 +417,118 @@ class EpisodeProcessor:
                 
         return episodes_by_day
     
+    def _fallback_mobility_detection(self, positionfixes) -> Dict[datetime.date, pd.DataFrame]:
+        """Detect mobility based on speed and distance thresholds when standard detection fails"""
+        self.logger.info("Using fallback mobility detection method based on speed")
+        
+        episodes_by_day = {}
+        
+        if positionfixes.empty or len(positionfixes) <= 1:
+            self.logger.warning("Insufficient GPS points for fallback mobility detection")
+            return episodes_by_day
+            
+        # Convert to pandas DataFrame for easier manipulation
+        pfs = positionfixes.copy()
+        
+        # Ensure we're working with a DataFrame, not GeoDataFrame
+        if isinstance(pfs, gpd.GeoDataFrame):
+            pfs = pd.DataFrame(pfs.drop(columns='geometry'))
+        
+        # Sort by timestamp
+        pfs = pfs.sort_values('tracked_at')
+        
+        # Add date column
+        pfs['date'] = pfs['tracked_at'].dt.date
+        
+        # Calculate time differences and distances
+        pfs['prev_lat'] = pfs['latitude'].shift(1)
+        pfs['prev_lon'] = pfs['longitude'].shift(1)
+        pfs['prev_time'] = pfs['tracked_at'].shift(1)
+        pfs['time_diff'] = (pfs['tracked_at'] - pfs['prev_time']).dt.total_seconds() / 60  # minutes
+        
+        # Only calculate where we have consecutive points
+        mask = (pfs['time_diff'] > 0) & (pfs['time_diff'] < 30)  # Ignore gaps > 30 minutes
+        
+        if mask.any():
+            # Calculate approximate distance in meters
+            pfs.loc[mask, 'distance'] = np.sqrt(
+                ((pfs.loc[mask, 'latitude'] - pfs.loc[mask, 'prev_lat']) * 111000)**2 + 
+                ((pfs.loc[mask, 'longitude'] - pfs.loc[mask, 'prev_lon']) * 
+                 111000 * np.cos(np.radians(pfs.loc[mask, 'latitude'])))**2
+            )
+            
+            # Calculate speed in meters per minute
+            pfs.loc[mask, 'speed'] = pfs.loc[mask, 'distance'] / pfs.loc[mask, 'time_diff']
+            
+            # Mark points as moving if speed exceeds threshold
+            pfs['moving'] = (pfs['speed'] > MIN_MOVEMENT_SPEED)
+            
+            # Group consecutive moving points into trips
+            pfs['trip_start'] = pfs['moving'] & ~pfs['moving'].shift(1, fill_value=False)
+            pfs['trip_end'] = ~pfs['moving'] & pfs['moving'].shift(1, fill_value=False)
+            
+            trip_starts = pfs[pfs['trip_start']].copy()
+            trip_ends = pfs[pfs['trip_end']].copy()
+            
+            # Create trips where we have both start and end
+            if not trip_starts.empty and not trip_ends.empty:
+                trips = []
+                
+                for _, start_row in trip_starts.iterrows():
+                    # Find the next end after this start
+                    end_candidates = trip_ends[trip_ends['tracked_at'] > start_row['tracked_at']]
+                    
+                    if not end_candidates.empty:
+                        end_row = end_candidates.iloc[0]
+                        
+                        # Only create trip if it's at least 3 minutes long
+                        duration = (end_row['tracked_at'] - start_row['tracked_at']).total_seconds() / 60
+                        if duration >= 3:
+                            trips.append({
+                                'started_at': start_row['tracked_at'],
+                                'finished_at': end_row['tracked_at'],
+                                'latitude': start_row['latitude'],
+                                'longitude': start_row['longitude'],
+                                'date': start_row['date'],
+                                'duration': duration
+                            })
+                
+                # Group trips by day
+                for trip in trips:
+                    date = trip['date']
+                    if date not in episodes_by_day:
+                        episodes_by_day[date] = pd.DataFrame()
+                    
+                    new_trip = pd.DataFrame([{
+                        'started_at': trip['started_at'],
+                        'finished_at': trip['finished_at'],
+                        'latitude': trip['latitude'],
+                        'longitude': trip['longitude'],
+                        'duration': pd.Timedelta(minutes=trip['duration']),
+                        'state': 'mobility'
+                    }])
+                    
+                    episodes_by_day[date] = pd.concat([episodes_by_day[date], new_trip], ignore_index=True)
+        
+        # If we have any days with trips, log the results
+        if episodes_by_day:
+            total_trips = sum(len(df) for df in episodes_by_day.values())
+            self.logger.info(f"Fallback method detected {total_trips} mobility episodes across {len(episodes_by_day)} days")
+        else:
+            self.logger.warning("Fallback method did not detect any mobility episodes")
+            
+        return episodes_by_day
+
     def process_mobility_episodes(self, positionfixes: ti.Positionfixes) -> Dict[datetime.date, pd.DataFrame]:
         """
         Process mobility episodes using the Trackintel library
         """
         try:
+            # Skip if we have too few points
+            if positionfixes.empty or len(positionfixes) <= 5:
+                self.logger.warning(f"Insufficient GPS points ({len(positionfixes) if not positionfixes.empty else 0}) for mobility detection")
+                return {}
+                
             # Generate staypoints from positionfixes
             self.logger.debug("Generating staypoints from positionfixes")
             pfs, staypoints = positionfixes.generate_staypoints(
@@ -349,15 +539,20 @@ class EpisodeProcessor:
             )
             
             # Debug info
-            if not staypoints.empty:
+            if staypoints.empty:
+                self.logger.warning("No staypoints generated with trackintel - falling back to alternative method")
+                return self._fallback_mobility_detection(positionfixes)
+            else:
                 self.logger.debug(f"Generated {len(staypoints)} staypoints")
                 
+            # Debug info
+            if not staypoints.empty:
+                self.logger.debug(f"Staypoints dtype: {staypoints['started_at'].dtype}")
+                
                 # Print column info
-                if 'started_at' in staypoints.columns:
-                    self.logger.debug(f"started_at dtype: {staypoints['started_at'].dtype}")
-                    if len(staypoints) > 0:
-                        self.logger.debug(f"started_at first value: {staypoints['started_at'].iloc[0]}")
-                        self.logger.debug(f"started_at type: {type(staypoints['started_at'].iloc[0])}")
+                if len(staypoints) > 0:
+                    self.logger.debug(f"Staypoints first value: {staypoints['started_at'].iloc[0]}")
+                    self.logger.debug(f"Staypoints type: {type(staypoints['started_at'].iloc[0])}")
                 
                 # More robust conversion of started_at and finished_at
                 # Instead of conditional conversion, we'll force conversion to ensure consistency
@@ -491,9 +686,14 @@ class EpisodeProcessor:
                 return {}
                 
         except Exception as e:
-            self.logger.error(f"Error processing mobility episodes: {str(e)}")
-            traceback.print_exc()
-            return {}
+            self.logger.error(f"Error processing mobility episodes with trackintel: {str(e)}")
+            self.logger.info("Attempting fallback mobility detection method")
+            try:
+                return self._fallback_mobility_detection(positionfixes)
+            except Exception as fallback_error:
+                self.logger.error(f"Fallback method also failed: {str(fallback_error)}")
+                traceback.print_exc()
+                return {}
 
     def create_daily_timeline(self, digital_episodes: pd.DataFrame, 
                           mobility_episodes: pd.DataFrame,
