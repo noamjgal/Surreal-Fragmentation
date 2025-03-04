@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import logging
 from datetime import datetime
+from data_utils import DataCleaner  # Import the new DataCleaner class
 
 # Setup logging
 logging.basicConfig(
@@ -177,49 +178,33 @@ def merge_ema_and_fragmentation(ema_data, frag_data):
         logging.error("Cannot merge: one or both datasets are missing")
         return None
     
+    # Use the new DataCleaner class
+    data_cleaner = DataCleaner(logging.getLogger())
+    
     # Standardize participant IDs in both datasets
-    ema_data = standardize_participant_ids(ema_data, id_column='Participant_ID')
-    frag_data = standardize_participant_ids(frag_data, id_column='participant_id')
+    ema_data = data_cleaner.standardize_dataframe_ids(ema_data, id_column='Participant_ID')
+    frag_data = data_cleaner.standardize_dataframe_ids(frag_data, id_column='participant_id')
     
-    logging.info(f"EMA data: {len(ema_data)} records")
-    logging.info(f"Fragmentation data: {len(frag_data)} records")
+    # Log participant ID distributions for debugging
+    ema_participants = sorted(ema_data['participant_id_clean'].unique())
+    frag_participants = sorted(frag_data['participant_id_clean'].unique())
     
-    # Log unique participants in each dataset before merging
-    ema_participants = ema_data['Participant_ID_clean'].unique()
-    frag_participants = frag_data['participant_id_clean'].unique()
+    logging.info(f"EMA data contains {len(ema_participants)} unique participants")
+    logging.info(f"Fragmentation data contains {len(frag_participants)} unique participants")
     
-    logging.info(f"Unique participants in EMA data: {len(ema_participants)}")
-    logging.info(f"Unique participants in fragmentation data: {len(frag_participants)}")
+    # Ensure date formats match between datasets
+    if 'datetime' in ema_data.columns:
+        ema_data = data_cleaner.standardize_timestamps(ema_data, ['datetime'])
     
-    # Find common participants
-    common_participants = set(ema_participants).intersection(set(frag_participants))
-    logging.info(f"Common participants between datasets: {len(common_participants)}")
-    logging.info(f"Common participant IDs: {sorted(list(common_participants))}")
+    # Create date string for joining if needed
+    if 'date_str' not in ema_data.columns and 'date' in ema_data.columns:
+        ema_data['date_str'] = ema_data['date'].astype(str)
     
-    # Before merging, check potential matches
-    ema_dates = set(ema_data['date_str'])
-    frag_dates = set(frag_data['date'])
-    common_dates = ema_dates.intersection(frag_dates)
-    logging.info(f"Common dates between datasets: {len(common_dates)}")
-    
-    # Debug: show sample records from both datasets
-    if not ema_data.empty:
-        logging.info("Sample EMA record:")
-        sample_ema = ema_data.iloc[0]
-        logging.info(f"  Participant: {sample_ema['Participant_ID']} (clean: {sample_ema['Participant_ID_clean']})")
-        logging.info(f"  Date: {sample_ema['date']} (str: {sample_ema['date_str']})")
-    
-    if not frag_data.empty:
-        logging.info("Sample fragmentation record:")
-        sample_frag = frag_data.iloc[0]
-        logging.info(f"  Participant: {sample_frag['participant_id']} (clean: {sample_frag['participant_id_clean']})")
-        logging.info(f"  Date: {sample_frag['date']}")
-    
-    # Merge datasets
-    merged_data = pd.merge(
-        ema_data,
+    # Merge the datasets using clean IDs and dates
+    merged_data = data_cleaner.merge_datasets(
+        ema_data, 
         frag_data,
-        left_on=['Participant_ID_clean', 'date_str'],
+        left_on=['participant_id_clean', 'date_str'],
         right_on=['participant_id_clean', 'date'],
         how='inner'
     )
@@ -229,53 +214,20 @@ def merge_ema_and_fragmentation(ema_data, frag_data):
     if len(merged_data) == 0:
         logging.warning("No matching records found when merging datasets. Trying alternative approaches...")
         
-        # Try a more lenient approach - try to find any direct ID matches
+        # Try a more lenient approach - print sample IDs for debugging
         logging.info("Printing actual participant IDs to debug:")
         for i, ema_id in enumerate(ema_participants[:5]):
             logging.info(f"  EMA ID {i}: '{ema_id}'")
         for i, frag_id in enumerate(frag_participants[:5]):
             logging.info(f"  Frag ID {i}: '{frag_id}'")
-            
-        # Compare a limited set of IDs to see what's different
-        logging.info("Checking direct string matches between IDs:")
-        found_match = False
-        for ema_id in ema_participants:
-            for frag_id in frag_participants:
-                if ema_id == frag_id:
-                    logging.info(f"  Direct match: '{ema_id}' = '{frag_id}'")
-                    found_match = True
-                elif ema_id in frag_id or frag_id in ema_id:
-                    logging.info(f"  Partial match: '{ema_id}' contains or is contained in '{frag_id}'")
-                    found_match = True
         
-        if not found_match:
-            logging.warning("Could not find any direct ID matches")
-        
-        # Try alternative matching strategy using just numeric part of ID
-        logging.info("Attempting more aggressive ID matching by extracting only numeric parts...")
-        
-        # Create an alternative ID mapping function that's more aggressive
-        def extract_just_numbers(id_str):
-            return ''.join([c for c in str(id_str) if c.isdigit()])
-        
-        # Apply to both datasets
-        ema_data['alt_id'] = ema_data['Participant_ID'].apply(extract_just_numbers)
-        frag_data['alt_id'] = frag_data['participant_id'].apply(extract_just_numbers)
-        
-        # Find potential matches with this more aggressive approach
-        ema_alt_ids = set(ema_data['alt_id'])
-        frag_alt_ids = set(frag_data['alt_id'])
-        common_alt_ids = ema_alt_ids.intersection(frag_alt_ids)
-        
-        logging.info(f"Using numeric-only IDs - common participants: {len(common_alt_ids)}")
-        logging.info(f"Common numeric participant IDs: {sorted(list(common_alt_ids))}")
-        
-        # Try merging with alternative IDs
-        alt_merged_data = pd.merge(
+        # Try direct ID match with date string conversion
+        frag_data['date_str'] = frag_data['date'].astype(str)
+        alt_merged_data = data_cleaner.merge_datasets(
             ema_data,
             frag_data,
-            left_on=['alt_id', 'date_str'],
-            right_on=['alt_id', 'date'],
+            left_on=['participant_id_clean', 'date_str'],
+            right_on=['participant_id_clean', 'date_str'],
             how='inner'
         )
         
@@ -290,20 +242,41 @@ def merge_ema_and_fragmentation(ema_data, frag_data):
     
     # Clean up redundant columns
     columns_to_drop = [
-        'Participant_ID_clean', 'participant_id_clean', 
-        'alt_id_x', 'alt_id_y',
-        'date_y'  # Keep date_x which is from EMA data
+        'participant_id_clean', 
+        'date_str' if 'date_str' in merged_data.columns else None
     ]
-    merged_data = merged_data.drop(columns=[col for col in columns_to_drop if col in merged_data.columns])
+    
+    columns_to_drop = [col for col in columns_to_drop if col is not None and col in merged_data.columns]
+    merged_data = merged_data.drop(columns=columns_to_drop)
     
     # Rename columns for clarity
     column_renames = {
-        'date_x': 'date',
-        'date_str': 'date_string',
-        'Participant_ID': 'participant_id_ema',
-        'participant_id': 'participant_id_frag'
+        'date_x': 'date' if 'date_x' in merged_data.columns else None,
+        'Participant_ID': 'participant_id_ema' if 'Participant_ID' in merged_data.columns else None,
+        'participant_id': 'participant_id_frag' if 'participant_id' in merged_data.columns else None
     }
-    merged_data = merged_data.rename(columns=column_renames)
+    
+    # Remove None values from the rename dict
+    column_renames = {k: v for k, v in column_renames.items() if v is not None and k in merged_data.columns}
+    if column_renames:
+        merged_data = merged_data.rename(columns=column_renames)
+    
+    # Validate the merged data
+    validation_rules = {
+        'numeric_ranges': {
+            'STAI-Y-A-6_zstd': (-5, 5) if 'STAI-Y-A-6_zstd' in merged_data.columns else None,
+            'CES-D-8_zstd': (-5, 5) if 'CES-D-8_zstd' in merged_data.columns else None,
+            'digital_fragmentation_index': (0, 1) if 'digital_fragmentation_index' in merged_data.columns else None,
+            'mobility_fragmentation_index': (0, 1) if 'mobility_fragmentation_index' in merged_data.columns else None,
+            'overlap_fragmentation_index': (0, 1) if 'overlap_fragmentation_index' in merged_data.columns else None
+        }
+    }
+    
+    # Remove None values from validation rules
+    validation_rules['numeric_ranges'] = {k: v for k, v in validation_rules['numeric_ranges'].items() 
+                                        if v is not None}
+    
+    merged_data = data_cleaner.validate_data(merged_data, validation_rules)
     
     return merged_data
 
