@@ -140,7 +140,7 @@ class EpisodeProcessor:
 
     def load_gps_data(self) -> Optional[ti.Positionfixes]:
         """Load GPS data with validation"""
-        gps_path = GPS_PREP_DIR / f'{self.participant_id}_qstarz_prep.csv'
+        gps_path = GPS_PREP_DIR / f'{self.participant_id}_gps_prep.csv'
         self.logger.debug(f"Loading GPS data from {gps_path}")
         
         try:
@@ -662,14 +662,14 @@ class EpisodeProcessor:
 
 def main():
     # Find valid participants
-    qstarz_files = {f.stem.replace('_qstarz_prep', ''): f 
-                    for f in GPS_PREP_DIR.glob('*_qstarz_prep.csv')
+    gps_files = {f.stem.replace('_gps_prep', ''): f 
+                    for f in GPS_PREP_DIR.glob('*_gps_prep.csv')
                     if not f.stem.startswith('._')}  # Filter out macOS hidden files
     app_files = {f.stem.replace('_app_prep', ''): f 
                  for f in GPS_PREP_DIR.glob('*_app_prep.csv')
                  if not f.stem.startswith('._')}  # Filter out macOS hidden files
     
-    common_ids = set(qstarz_files.keys()) & set(app_files.keys())
+    common_ids = set(gps_files.keys()) & set(app_files.keys())
     # Filter out macOS hidden files (like '._005')
     common_ids = {pid for pid in common_ids if not pid.startswith('._')}
     logging.info(f"Found {len(common_ids)} participants with complete data")
