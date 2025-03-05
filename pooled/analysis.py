@@ -31,7 +31,9 @@ class PooledSTAIAnalysis:
         self.surreal_path = Path('pooled/data/ema_fragmentation_daily_demographics.csv')
         self.tlv_path = Path('pooled/data/combined_metrics.csv')
         
-        self.output_dir = Path(output_dir) if output_dir else Path('./results')
+        # Set output directory relative to script location
+        script_dir = Path(__file__).parent
+        self.output_dir = script_dir / "results"
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.debug = debug
         
@@ -107,6 +109,7 @@ class PooledSTAIAnalysis:
         
         self.logger.info(f"SURREAL data: {self.surreal_path}")
         self.logger.info(f"TLV data: {self.tlv_path}")
+        self.logger.info(f"Output directory: {self.output_dir}")
 
     def load_surreal_data(self):
         """Load SURREAL data and extract relevant variables."""
