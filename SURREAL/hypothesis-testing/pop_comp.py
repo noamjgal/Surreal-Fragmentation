@@ -163,7 +163,8 @@ class PopulationComparisonAnalysis:
         # Add episode counts and durations
         episode_patterns = ['episode_count', 'total_duration']
         for pattern in episode_patterns:
-            for prefix in ['digital_', 'mobility_', 'moving_', 'overlap_']:
+            for prefix in ['frag_digital_', 'frag_mobility_', 'frag_moving_', 'frag_overlap_', 
+                           'digital_', 'mobility_', 'moving_', 'overlap_']:
                 col_name = f"{prefix}{pattern}"
                 if col_name in df.columns:
                     self.fragmentation_metrics.append(col_name)

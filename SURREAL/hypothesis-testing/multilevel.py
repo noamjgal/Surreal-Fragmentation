@@ -159,17 +159,20 @@ class MultilevelAnalysis:
         # Define groups of columns to check (at least one from each group must exist)
         column_groups = {
             'emotion': {
-                'stai': ['STAI_Y_A_6_zstd', 'STAI_Y_A_6_raw'],  # Using underscore version
-                'cesd': ['CES_D_8_zstd', 'CES_D_8_raw']  # Using underscore version
+                'stai': ['ema_STAI_Y_A_6_zstd', 'ema_STAI_Y_A_6_raw', 'STAI_Y_A_6_zstd', 'STAI_Y_A_6_raw'],
+                'cesd': ['ema_CES_D_8_zstd', 'ema_CES_D_8_raw', 'CES_D_8_zstd', 'CES_D_8_raw']
             },
             'fragmentation': {
-                'raw': ['digital_fragmentation_index', 'mobility_fragmentation_index', 
+                'raw': ['frag_digital_fragmentation_index', 'frag_mobility_fragmentation_index', 
+                       'frag_overlap_fragmentation_index', 'digital_fragmentation_index', 'mobility_fragmentation_index', 
                        'overlap_fragmentation_index'],
                 'zscore': []  # Will be filled with *_zscore columns
             },
-            'episodes': ['digital_episode_count', 'mobility_episode_count', 'overlap_episode_count'],
-            'duration': ['digital_total_duration', 'mobility_total_duration', 'overlap_total_duration'],
-            'demographics': ['Gender', 'age', 'City.center', 'gender_code']
+            'episodes': ['frag_digital_episode_count', 'frag_mobility_episode_count', 'frag_overlap_episode_count',
+                        'digital_episode_count', 'mobility_episode_count', 'overlap_episode_count'],
+            'duration': ['frag_digital_total_duration', 'frag_mobility_total_duration', 'frag_overlap_total_duration',
+                        'digital_total_duration', 'mobility_total_duration', 'overlap_total_duration'],
+            'demographics': ['Gender', 'gender', 'age', 'City.center', 'gender_code']
         }
         
         # Find available columns that match each category
