@@ -6,6 +6,12 @@ import logging
 from datetime import datetime
 from data_utils import DataCleaner  # Import the new DataCleaner class
 
+import sys
+
+# Add parent directory to path to find config
+sys.path.append(str(Path(__file__).parent.parent))
+from config.paths import PROCESSED_DATA_DIR
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -281,15 +287,14 @@ def merge_ema_and_fragmentation(ema_data, frag_data):
     return merged_data
 
 def main():
-    # Define paths - adjust these to match your directory structure
-    # EMA data paths
+    # Use config-based paths instead of hardcoded ones
     ema_output_dir = Path("/Users/noamgal/DSProjects/Fragmentation/SURREAL/EMA-Processing/output/normalized")
     
-    # Fragmentation data paths
-    fragmentation_file = Path("/Volumes/Extreme SSD/SURREAL-DataBackup/HUJI_data-main/processed/fragmentation/fragmentation_all_metrics.csv")
+    # Fragmentation data from the daily_fragmentation.py output
+    fragmentation_file = PROCESSED_DATA_DIR / "fragmentation" / "fragmentation_all_metrics.csv"
     
     # Output path
-    output_dir = Path("/Users/noamgal/DSProjects/Fragmentation/SURREAL/processed/daily_ema_fragmentation")
+    output_dir = PROCESSED_DATA_DIR / "daily_ema_fragmentation"
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Verify input files exist
@@ -299,6 +304,7 @@ def main():
     
     if not fragmentation_file.exists():
         logging.error(f"Fragmentation file not found: {fragmentation_file}")
+        logging.error("Please run daily_fragmentation.py first to generate this file")
         return
     
     logging.info(f"EMA directory: {ema_output_dir}")
