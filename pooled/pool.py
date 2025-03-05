@@ -33,7 +33,7 @@ class PooledSTAIAnalysis:
         
         # Set output directory relative to script location
         script_dir = Path(__file__).parent
-        self.output_dir = script_dir / "results"
+        self.output_dir = script_dir / "processed" 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.debug = debug
         
