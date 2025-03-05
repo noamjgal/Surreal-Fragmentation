@@ -261,6 +261,19 @@ def merge_demographics_with_data(data_path, demographics_df, output_path):
         logger.info(f"Loaded data with shape: {data.shape}")
         logger.info(f"Columns in data: {data.columns.tolist()}")
         
+        # Log sample date values from both datasets for debugging
+        date_columns_data = [col for col in data.columns if 'date' in col.lower()]
+        if date_columns_data:
+            logger.info(f"Date columns in data: {date_columns_data}")
+            for col in date_columns_data[:2]:  # Show first 2 date columns
+                logger.info(f"Sample dates from data['{col}']: {data[col].head(5).tolist()}")
+        
+        date_columns_demo = [col for col in demographics_df.columns if 'date' in col.lower()]
+        if date_columns_demo:
+            logger.info(f"Date columns in demographics: {date_columns_demo}")
+            for col in date_columns_demo[:2]:  # Show first 2 date columns
+                logger.info(f"Sample dates from demographics['{col}']: {demographics_df[col].head(5).tolist()}")
+        
         # Show a sample of participant IDs from the data
         id_sample = []
         for col in data.columns:
@@ -272,7 +285,7 @@ def merge_demographics_with_data(data_path, demographics_df, output_path):
         if 'participant_id_clean' not in data.columns:
             # Find appropriate ID column
             id_columns = ['participant_id', 'participant_id_ema', 'participant_id_frag', 
-                         'Participant_ID', 'user', 'subject', 'id']
+                          'Participant_ID', 'user', 'subject', 'id']
             id_col = next((col for col in id_columns if col in data.columns), None)
             
             if id_col:
@@ -287,7 +300,121 @@ def merge_demographics_with_data(data_path, demographics_df, output_path):
         common_participants = data_participants.intersection(demo_participants)
         
         logger.info(f"Found {len(common_participants)} common participants")
-        logger.info(f"Participants in data but not demographics: {sorted(list(data_participants - demo_participants))[:5]}...")
+        logger.info(f"Participants in data but not demographics: {sorted(list(data_participants - demo_participants))}")
+        logger.info(f"Participants in demographics but not data: {sorted(list(demo_participants - data_participants))}")
+        
+        # MISSING VALUES REPORT - Demographics Dataset
+        logger.info("\n" + "="*50)
+        logger.info("DEMOGRAPHICS DATASET MISSING VALUES REPORT:")
+        missing_demo = demographics_df.isna().sum()
+        total_demo = len(demographics_df)
+        missing_demo_pct = (missing_demo / total_demo * 100).round(1)
+        
+        # Create detailed report of missing values
+        missing_report = []
+        for col in demographics_df.columns:
+            missing_count = demographics_df[col].isna().sum()
+            missing_pct = (missing_count / total_demo * 100).round(1)
+            if missing_count > 0:
+                missing_report.append(f"{col}: {missing_count} missing ({missing_pct}%)")
+            
+        logger.info(f"Demographics total rows: {total_demo}")
+        logger.info(f"Demographics missing value summary:")
+        for report_line in missing_report:
+            logger.info(f"  - {report_line}")
+            
+        # Log participants with missing key demographic variables
+        key_demographics = ['age', 'gender', 'education', 'race', 'ethnicity']
+        key_demographics = [col for col in key_demographics if col in demographics_df.columns]
+        
+        if key_demographics:
+            missing_key_participants = {}
+            for col in key_demographics:
+                missing_participants = demographics_df[demographics_df[col].isna()]['participant_id_clean'].tolist()
+                if missing_participants:
+                    missing_key_participants[col] = missing_participants
+            
+            if missing_key_participants:
+                logger.info("\nParticipants missing key demographic variables:")
+                for col, participants in missing_key_participants.items():
+                    logger.info(f"  - {col}: {len(participants)} participants missing this value")
+                    logger.info(f"    IDs: {participants}")
+        
+        # Check if there are date columns to standardize for merging
+        # This is the key addition from combine_metrics.py - handle date format inconsistencies
+        date_pairs = []
+        for date_col_data in date_columns_data:
+            for date_col_demo in date_columns_demo:
+                date_pairs.append((date_col_data, date_col_demo))
+        
+        # If there are potential date column pairs to match on
+        if date_pairs and 'date' in data.columns:
+            logger.info("Attempting to standardize date formats for better matching...")
+            
+            # Track date matches
+            date_match_stats = {
+                'total': 0,
+                'direct_match': 0,
+                'alt_format_match': 0,
+                'day_offset_match': 0,
+                'unmatched': 0
+            }
+            
+            # Try to handle possible date format mismatches by creating standardized date columns
+            def try_alternative_date_formats(date_str):
+                if pd.isna(date_str):
+                    return {
+                        'std_date': None,
+                        'alt_date': None,
+                        'next_day': None,
+                        'prev_day': None
+                    }
+                
+                try:
+                    # Parse original date
+                    orig_date = pd.to_datetime(date_str)
+                    
+                    # Create alternative format by swapping day and month
+                    alt_date = pd.Timestamp(year=orig_date.year, month=orig_date.day, day=orig_date.month)
+                    
+                    # Create day offsets for timezone handling
+                    next_day = orig_date + pd.Timedelta(days=1)
+                    prev_day = orig_date - pd.Timedelta(days=1)
+                    
+                    return {
+                        'std_date': orig_date.strftime('%Y-%m-%d'),
+                        'alt_date': alt_date.strftime('%Y-%m-%d'),
+                        'next_day': next_day.strftime('%Y-%m-%d'),
+                        'prev_day': prev_day.strftime('%Y-%m-%d')
+                    }
+                except:
+                    return {
+                        'std_date': None,
+                        'alt_date': None,
+                        'next_day': None,
+                        'prev_day': None
+                    }
+            
+            # Apply date format standardization to both datasets where needed
+            for date_col in date_columns_data:
+                if date_col in data.columns:
+                    logger.info(f"Standardizing dates in data['{date_col}']")
+                    date_formats = data[date_col].apply(try_alternative_date_formats)
+                    data[f'{date_col}_std'] = date_formats.apply(lambda x: x['std_date'])
+                    data[f'{date_col}_alt'] = date_formats.apply(lambda x: x['alt_date'])
+            
+            for date_col in date_columns_demo:
+                if date_col in demographics_df.columns:
+                    logger.info(f"Standardizing dates in demographics['{date_col}']")
+                    date_formats = demographics_df[date_col].apply(try_alternative_date_formats)
+                    demographics_df[f'{date_col}_std'] = date_formats.apply(lambda x: x['std_date'])
+                    demographics_df[f'{date_col}_alt'] = date_formats.apply(lambda x: x['alt_date'])
+        
+        # Record original data completeness
+        original_completeness = {}
+        for col in data.columns:
+            if col not in ['participant_id', 'participant_id_clean', 'date']:
+                original_completeness[col] = data[col].notna().mean() * 100
         
         # Merge data with demographics
         merged_data = data_cleaner.merge_datasets(
@@ -296,6 +423,76 @@ def merge_demographics_with_data(data_path, demographics_df, output_path):
             on='participant_id_clean',
             how='left'
         )
+        
+        # MISSING VALUES REPORT - Merged Dataset
+        logger.info("\n" + "="*50)
+        logger.info("MERGED DATASET MISSING VALUES REPORT:")
+        
+        # Identify demographic columns in merged data
+        demographic_cols = [col for col in merged_data.columns if col in demographics_df.columns 
+                          and col not in ['participant_id_clean']]
+        
+        # Count rows missing any demographic information
+        rows_missing_any_demographics = merged_data[demographic_cols].isna().any(axis=1).sum()
+        rows_missing_all_demographics = merged_data[demographic_cols].isna().all(axis=1).sum()
+        
+        logger.info(f"Total records in merged data: {len(merged_data)}")
+        logger.info(f"Records missing ANY demographic information: {rows_missing_any_demographics} ({rows_missing_any_demographics/len(merged_data)*100:.1f}%)")
+        logger.info(f"Records missing ALL demographic information: {rows_missing_all_demographics} ({rows_missing_all_demographics/len(merged_data)*100:.1f}%)")
+        
+        # Log missing values by column in merged data
+        logger.info("\nMissing values by column in merged data:")
+        for col in demographic_cols:
+            missing_count = merged_data[col].isna().sum()
+            if missing_count > 0:
+                logger.info(f"  - {col}: {missing_count} missing ({missing_count/len(merged_data)*100:.1f}%)")
+                
+        # Track demographic completeness by participant
+        participant_completeness = {}
+        for participant in merged_data['participant_id_clean'].unique():
+            participant_data = merged_data[merged_data['participant_id_clean'] == participant]
+            completeness = {}
+            for col in demographic_cols:
+                if col in participant_data.columns:
+                    completeness[col] = participant_data[col].notna().mean() * 100
+            participant_completeness[participant] = completeness
+            
+        # Find participants with partial demographic information
+        participants_with_partial_demographics = []
+        for participant, completeness in participant_completeness.items():
+            if completeness and 0 < sum(completeness.values()) < len(completeness) * 100:
+                participants_with_partial_demographics.append({
+                    'participant': participant,
+                    'completeness': completeness
+                })
+                
+        if participants_with_partial_demographics:
+            logger.info("\nParticipants with partial demographic information:")
+            for participant_info in participants_with_partial_demographics:
+                logger.info(f"  - {participant_info['participant']}:")
+                for col, pct in participant_info['completeness'].items():
+                    if pct < 100:
+                        logger.info(f"      {col}: {pct:.1f}% complete")
+        
+        # Compare column completeness before and after merging
+        logger.info("\nData completeness comparison (before vs. after merging):")
+        for col in original_completeness:
+            if col in merged_data.columns:
+                before = original_completeness[col]
+                after = merged_data[col].notna().mean() * 100
+                diff = after - before
+                logger.info(f"  - {col}: {before:.1f}% → {after:.1f}% ({diff:+.1f}%)")
+                
+        # Log merge statistics
+        merge_stats = {
+            'total_rows': len(data),
+            'merged_rows': len(merged_data),
+            'with_demographics': merged_data['age'].notna().sum() if 'age' in merged_data.columns else 0,
+            'participants_in_data': len(data_participants),
+            'participants_in_demographics': len(demo_participants),
+            'common_participants': len(common_participants)
+        }
+        logger.info(f"\nMerge statistics: {merge_stats}")
         
         # Validate the merged data
         merged_data = data_cleaner.validate_data(merged_data)
@@ -338,7 +535,7 @@ def main():
     
     # Hardcode file paths relative to SURREAL folder
     demographics_path = os.path.join(surreal_path, 'data', 'raw', 'participant_info.xlsx')
-    daily_ema_path = os.path.join(surreal_path, 'processed', 'daily_ema_fragmentation', 'ema_fragmentation_combined.csv')
+    data_path = "/Volumes/Extreme SSD/SURREAL-DataBackup/HUJI_data-main/processed/daily_ema_fragmentation/combined_metrics.csv"
     output_dir = os.path.join(surreal_path, 'processed', 'merged_data')
     
     # Still allow command-line overrides for flexibility
@@ -348,7 +545,7 @@ def main():
                         help='Path to demographics Excel file')
     
     parser.add_argument('--ema_data', type=str, 
-                        default=daily_ema_path,
+                        default=data_path,
                         help='Path to daily EMA data CSV')
     
     parser.add_argument('--output_dir', type=str,
