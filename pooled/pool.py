@@ -44,16 +44,16 @@ class PooledSTAIAnalysis:
         self.variable_mappings = {
             'surreal': {
                 'id': 'participant_id_clean',
-                'anxiety': 'STAI-Y-A-6_zstd',
-                'anxiety_raw': 'STAI-Y-A-6_raw',
-                'depression': 'CES-D-8_zstd',
-                'depression_raw': 'CES-D-8_raw',
+                'anxiety': 'ema_STAI-Y-A-6_zstd',
+                'anxiety_raw': 'ema_STAI-Y-A-6_raw',
+                'depression': 'ema_CES-D-8_zstd',
+                'depression_raw': 'ema_CES-D-8_raw',
                 'gender': 'Gender',
                 'location': 'City.center',  # Yes = city center, No = suburb
                 'fragmentation': {
-                    'digital': 'digital_fragmentation_index',
-                    'mobility': 'mobility_fragmentation_index',
-                    'overlap': 'overlap_fragmentation_index'
+                    'digital': 'frag_digital_fragmentation_index',
+                    'mobility': 'frag_mobility_fragmentation_index',
+                    'overlap': 'frag_overlap_fragmentation_index'
                 }
             },
             'tlv': {

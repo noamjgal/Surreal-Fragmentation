@@ -16,3 +16,10 @@ SURREAL/EMA-Processing/data
 *.joblib
 *.joblib
 SURREAL/data/
+*.txt
+*.log
+*.csv
+*.json
+*.pkl
+*.h5
+*.joblib
