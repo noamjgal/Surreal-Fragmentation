@@ -8,7 +8,7 @@ import numpy as np
 import os
 import glob
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import sys
 import logging
@@ -16,11 +16,14 @@ import warnings
 import geopandas as gpd
 from shapely.geometry import Point
 import trackintel as ti
+import re
+import pytz
 
-# Configure logging
+# Configure logging with more details
 LOG_DIR = Path(__file__).parent.parent / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+# Create separate logs for errors and successes
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -30,6 +33,14 @@ logging.basicConfig(
     ]
 )
 
+# Create a separate error log that will contain only errors
+error_logger = logging.getLogger('error_logger')
+error_logger.setLevel(logging.ERROR)
+error_handler = logging.FileHandler(LOG_DIR / 'preprocessing_errors.log')
+error_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+error_logger.addHandler(error_handler)
+error_logger.propagate = False
+
 # Add parent directory to path to find config
 sys.path.append(str(Path(__file__).parent.parent))
 from config.paths import RAW_DATA_DIR, PROCESSED_DATA_DIR, MAP_OUTPUT_DIR, GPS_PREP_DIR
@@ -37,6 +48,10 @@ from config.paths import RAW_DATA_DIR, PROCESSED_DATA_DIR, MAP_OUTPUT_DIR, GPS_P
 # Ensure output directories exist
 GPS_PREP_DIR.mkdir(parents=True, exist_ok=True)
 MAP_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Create directory for problematic files
+PROBLEM_FILES_DIR = GPS_PREP_DIR / "problem_files"
+PROBLEM_FILES_DIR.mkdir(parents=True, exist_ok=True)
 
 # Initialize quality report metrics
 quality_report = {
@@ -46,22 +61,88 @@ quality_report = {
     'encoding_issues': [],
     'date_errors': [],
     'failed_processing': [],
-    'successful_participants': []
+    'successful_participants': [],
+    'timezone_issues': []
 }
+
+def is_macos_hidden_file(file_path):
+    """Check if the file is a macOS hidden file (._)"""
+    return os.path.basename(file_path).startswith('._')
+
+def detect_timezone_offset(df, utc_col, local_col):
+    """Detect timezone offset between UTC and local time columns"""
+    if utc_col not in df.columns or local_col not in df.columns:
+        return None
+    
+    # Convert to datetime if not already
+    utc_time = pd.to_datetime(df[utc_col].iloc[0]) if not pd.api.types.is_datetime64_dtype(df[utc_col]) else df[utc_col].iloc[0]
+    local_time = pd.to_datetime(df[local_col].iloc[0]) if not pd.api.types.is_datetime64_dtype(df[local_col]) else df[local_col].iloc[0]
+    
+    # Calculate offset in hours
+    offset_seconds = (local_time - utc_time).total_seconds()
+    offset_hours = offset_seconds / 3600
+    
+    # Round to nearest hour to handle DST transitions
+    offset_hours = round(offset_hours)
+    
+    return offset_hours
+
+def ensure_tz_aware(datetime_series, timezone='UTC'):
+    """Ensure a datetime series has timezone info"""
+    if datetime_series.empty:
+        return datetime_series
+        
+    # Convert to datetime if not already
+    if not pd.api.types.is_datetime64_dtype(datetime_series):
+        datetime_series = pd.to_datetime(datetime_series, errors='coerce')
+        
+    # Add timezone if missing
+    if hasattr(datetime_series.iloc[0], 'tz') and datetime_series.iloc[0].tz is None:
+        return datetime_series.dt.tz_localize(timezone)
+    return datetime_series
+
+def fix_smartphone_time_format(time_str):
+    """Fix smartphone time format with missing leading zeros"""
+    if not isinstance(time_str, str):
+        return time_str
+        
+    # Match patterns like "20:24:3" and add leading zeros
+    time_parts = time_str.split(':')
+    if len(time_parts) == 3:
+        hour, minute, second = time_parts
+        # Add leading zeros if needed
+        if len(second) == 1:
+            time_str = f"{hour}:{minute}:0{second}"
+    
+    return time_str
 
 def load_qstarz_data(file_path):
     """Load and preprocess Qstarz GPS data, returning a Trackintel Positionfixes object"""
+    if is_macos_hidden_file(file_path):
+        logging.info(f"Skipping macOS hidden file: {file_path}")
+        return None
+    
     logging.info(f"Loading Qstarz data from {file_path}")
     
     try:
-        # Load the raw data
-        df = pd.read_csv(file_path)
+        # Try different encodings
+        for encoding in ['utf-8', 'latin-1', 'utf-16', 'ISO-8859-1']:
+            try:
+                # Load the raw data
+                df = pd.read_csv(file_path, encoding=encoding)
+                break
+            except UnicodeDecodeError:
+                if encoding == 'ISO-8859-1':  # Last encoding in the list
+                    raise
+                continue
         
         # Strip whitespace from column names
         df.columns = df.columns.str.strip()
         
         # Check for different possible column names
-        datetime_col = next((col for col in df.columns if 'DATE TIME' in col), None)
+        datetime_col = next((col for col in df.columns if 'UTC DATE TIME' in col), 
+                           next((col for col in df.columns if 'DATE TIME' in col), None))
+        local_datetime_col = next((col for col in df.columns if 'LOCAL DATE TIME' in col), None)
         latitude_col = next((col for col in df.columns if 'LATITUDE' in col), None)
         longitude_col = next((col for col in df.columns if 'LONGITUDE' in col), None)
         
@@ -72,8 +153,16 @@ def load_qstarz_data(file_path):
         participant_id = os.path.basename(file_path).split('_')[0]
         
         # Parse timestamp
-        df[datetime_col] = pd.to_datetime(df[datetime_col])
+        df[datetime_col] = pd.to_datetime(df[datetime_col], errors='coerce')
         
+        # Detect timezone offset if local time is available
+        tz_offset = None
+        if local_datetime_col is not None:
+            df[local_datetime_col] = pd.to_datetime(df[local_datetime_col], errors='coerce')
+            tz_offset = detect_timezone_offset(df, datetime_col, local_datetime_col)
+            if tz_offset is not None:
+                logging.info(f"Detected timezone offset for {participant_id}: UTC+{tz_offset}")
+                
         # Create positionfixes dataframe
         positionfixes = pd.DataFrame({
             'user_id': participant_id,
@@ -84,8 +173,12 @@ def load_qstarz_data(file_path):
             'accuracy': np.nan,   # Optional
         })
         
+        # Store the timezone offset for later use
+        if tz_offset is not None:
+            positionfixes['tz_offset'] = tz_offset
+        
         # Make sure tracked_at is timezone aware (required by trackintel)
-        positionfixes['tracked_at'] = positionfixes['tracked_at'].dt.tz_localize('UTC', ambiguous='raise')
+        positionfixes['tracked_at'] = ensure_tz_aware(positionfixes['tracked_at'])
         
         # Convert to GeoDataFrame and set as trackintel Positionfixes
         geometry = [Point(lon, lat) for lon, lat in zip(positionfixes['longitude'], positionfixes['latitude'])]
@@ -102,30 +195,57 @@ def load_qstarz_data(file_path):
         return pfs
         
     except Exception as e:
-        logging.error(f"Error loading Qstarz data: {str(e)}")
-        traceback.print_exc()
+        error_logger.error(f"Error loading Qstarz data from {file_path}: {str(e)}")
+        error_logger.error(traceback.format_exc())
+        
+        # Save a copy of the problematic file for later inspection
+        try:
+            problem_file = PROBLEM_FILES_DIR / f"{os.path.basename(file_path)}_problem.txt"
+            with open(file_path, 'rb') as src, open(problem_file, 'wb') as dst:
+                dst.write(src.read(2000))  # Copy first 2000 bytes for inspection
+        except:
+            pass
+            
         return None
 
 def load_app_data(file_path):
     """Load and preprocess app usage data"""
+    if is_macos_hidden_file(file_path):
+        logging.info(f"Skipping macOS hidden file: {file_path}")
+        return None
+        
     logging.info(f"Loading app data from {file_path}")
     
     try:
         # Try different encodings and delimiters
-        encodings = ['utf-8', 'latin-1', 'utf-16']
+        encodings = ['utf-8', 'latin-1', 'utf-16', 'ISO-8859-1']
+        app_df = None
+        
         for encoding in encodings:
             try:
-                # First try with semicolon delimiter
+                # Try semicolon first since it's common in European data
                 app_df = pd.read_csv(file_path, encoding=encoding, delimiter=';')
                 
-                # Fallback to comma if only 1 column found
-                if len(app_df.columns) == 1:
+                # If only one column, try comma
+                if len(app_df.columns) == 1 and ',' in app_df.iloc[0, 0]:
                     app_df = pd.read_csv(file_path, encoding=encoding, delimiter=',')
+                    
+                # If still only one column, try tab
+                if len(app_df.columns) == 1 and '\t' in app_df.iloc[0, 0]:
+                    app_df = pd.read_csv(file_path, encoding=encoding, delimiter='\t')
+                    
                 break
             except UnicodeDecodeError:
                 if encoding == encodings[-1]:  # Last encoding failed
                     raise
                 continue
+            except Exception as e:
+                if encoding == encodings[-1]:  # Last encoding failed
+                    raise
+                continue
+        
+        if app_df is None:
+            raise ValueError(f"Failed to read file with any encoding")
         
         # Clean up column names
         app_df.columns = app_df.columns.str.replace(';', '').str.strip()
@@ -135,19 +255,44 @@ def load_app_data(file_path):
         time_candidates = ['time', 'timestamp', 'datetime']
         
         date_col = next((col for col in app_df.columns if col.lower() in date_candidates), None)
-        time_col = next((col for col in app_df.columns if col.lower() in time_candidates and col.lower() != date_col.lower()), None)
+        time_col = next((col for col in app_df.columns if col.lower() in time_candidates and (col.lower() != date_col.lower() if date_col else True)), None)
         
-        if not date_col or not time_col:
-            raise ValueError(f"Could not identify date and time columns. Found columns: {app_df.columns.tolist()}")
-        
-        # Convert date and time to timestamp
-        app_df['timestamp'] = pd.to_datetime(app_df[date_col] + ' ' + app_df[time_col], errors='coerce')
+        if not date_col:
+            raise ValueError(f"Could not identify date column. Found columns: {app_df.columns.tolist()}")
+            
+        # Check if we have separate date and time or combined timestamp
+        if time_col:
+            # Fix time format with missing leading zeros
+            app_df[time_col] = app_df[time_col].astype(str).apply(fix_smartphone_time_format)
+            
+            # Try different date-time combination approaches
+            try:
+                app_df['timestamp'] = pd.to_datetime(app_df[date_col] + ' ' + app_df[time_col], errors='coerce')
+            except:
+                # Try different date formats
+                try:
+                    # Try with European date format (day first)
+                    app_df['date_parsed'] = pd.to_datetime(app_df[date_col], dayfirst=True, errors='coerce')
+                    app_df['timestamp'] = pd.to_datetime(
+                        app_df['date_parsed'].dt.strftime('%Y-%m-%d') + ' ' + app_df[time_col], 
+                        errors='coerce'
+                    )
+                except:
+                    # Try US format as last resort
+                    app_df['date_parsed'] = pd.to_datetime(app_df[date_col], dayfirst=False, errors='coerce')
+                    app_df['timestamp'] = pd.to_datetime(
+                        app_df['date_parsed'].dt.strftime('%Y-%m-%d') + ' ' + app_df[time_col], 
+                        errors='coerce'
+                    )
+        else:
+            # Single datetime column
+            app_df['timestamp'] = pd.to_datetime(app_df[date_col], errors='coerce')
         
         # Drop rows with invalid timestamps
         app_df = app_df.dropna(subset=['timestamp'])
         
         # Make sure there's an action column (for screen events)
-        action_candidates = ['action', 'event', 'screen']
+        action_candidates = ['action', 'event', 'screen', 'status']
         action_col = next((col for col in app_df.columns if any(cand in col.lower() for cand in action_candidates)), None)
         
         if action_col:
@@ -166,17 +311,43 @@ def load_app_data(file_path):
         return app_df
         
     except Exception as e:
-        logging.error(f"Error loading app data: {str(e)}")
-        traceback.print_exc()
+        error_logger.error(f"Error loading app data from {file_path}: {str(e)}")
+        error_logger.error(traceback.format_exc())
+        
+        # Save a copy of the problematic file for later inspection
+        try:
+            problem_file = PROBLEM_FILES_DIR / f"{os.path.basename(file_path)}_problem.txt"
+            with open(file_path, 'rb') as src, open(problem_file, 'wb') as dst:
+                dst.write(src.read(2000))  # Copy first 2000 bytes for inspection
+        except:
+            pass
+            
         return None
 
 def load_app_gps_data(file_path):
     """Load and preprocess smartphone GPS data, returning a Trackintel Positionfixes object"""
+    if is_macos_hidden_file(file_path):
+        logging.info(f"Skipping macOS hidden file: {file_path}")
+        return None
+        
     logging.info(f"Loading smartphone GPS data from {file_path}")
     
     try:
-        # Load the raw data
-        df = pd.read_csv(file_path)
+        # Try different encodings
+        encodings = ['utf-8', 'latin-1', 'utf-16', 'ISO-8859-1']
+        df = None
+        
+        for encoding in encodings:
+            try:
+                df = pd.read_csv(file_path, encoding=encoding)
+                break
+            except UnicodeDecodeError:
+                if encoding == encodings[-1]:  # Last encoding failed
+                    raise
+                continue
+        
+        if df is None:
+            raise ValueError(f"Failed to read file with any encoding")
         
         # Strip whitespace from column names
         df.columns = df.columns.str.strip()
@@ -186,16 +357,54 @@ def load_app_gps_data(file_path):
         
         # Check required columns are present
         required_cols = ['date', 'time', 'long', 'lat']
+        found_cols = [col for col in required_cols if col in df.columns]
         missing_cols = [col for col in required_cols if col not in df.columns]
         
         if missing_cols:
-            raise ValueError(f"Required columns {missing_cols} not found in {file_path}")
+            # Try alternative column names
+            alt_mappings = {
+                'date': ['datetime', 'timestamp'],
+                'time': ['timestamp'],
+                'long': ['lon', 'longitude'],
+                'lat': ['latitude']
+            }
+            
+            for missing_col in missing_cols[:]:  # Use copy to modify original list
+                for alt in alt_mappings.get(missing_col, []):
+                    if alt in df.columns:
+                        # Rename to expected column name
+                        df[missing_col] = df[alt]
+                        found_cols.append(missing_col)
+                        missing_cols.remove(missing_col)
+                        break
+            
+            if missing_cols:
+                raise ValueError(f"Required columns {missing_cols} not found in {file_path}. Available columns: {df.columns.tolist()}")
         
         # Extract participant ID from filename
         participant_id = os.path.basename(file_path).split('-')[0]
         
+        # Fix time format with missing leading zeros
+        df['time'] = df['time'].astype(str).apply(fix_smartphone_time_format)
+        
         # Combine date and time into a timestamp
-        df['tracked_at'] = pd.to_datetime(df['date'] + ' ' + df['time'], errors='coerce')
+        try:
+            df['tracked_at'] = pd.to_datetime(df['date'] + ' ' + df['time'], errors='coerce')
+        except:
+            # Try European date format
+            try:
+                df['date_parsed'] = pd.to_datetime(df['date'], dayfirst=True, errors='coerce')
+                df['tracked_at'] = pd.to_datetime(
+                    df['date_parsed'].dt.strftime('%Y-%m-%d') + ' ' + df['time'], 
+                    errors='coerce'
+                )
+            except:
+                # Try US format
+                df['date_parsed'] = pd.to_datetime(df['date'], dayfirst=False, errors='coerce')
+                df['tracked_at'] = pd.to_datetime(
+                    df['date_parsed'].dt.strftime('%Y-%m-%d') + ' ' + df['time'], 
+                    errors='coerce'
+                )
         
         # Create positionfixes dataframe
         positionfixes = pd.DataFrame({
@@ -208,7 +417,7 @@ def load_app_gps_data(file_path):
         })
         
         # Make sure tracked_at is timezone aware (required by trackintel)
-        positionfixes['tracked_at'] = positionfixes['tracked_at'].dt.tz_localize('UTC', ambiguous='raise')
+        positionfixes['tracked_at'] = ensure_tz_aware(positionfixes['tracked_at'])
         
         # Convert to GeoDataFrame and set as trackintel Positionfixes
         geometry = [Point(lon, lat) for lon, lat in zip(positionfixes['longitude'], positionfixes['latitude'])]
@@ -225,8 +434,17 @@ def load_app_gps_data(file_path):
         return pfs
         
     except Exception as e:
-        logging.error(f"Error loading smartphone GPS data: {str(e)}")
-        traceback.print_exc()
+        error_logger.error(f"Error loading smartphone GPS data from {file_path}: {str(e)}")
+        error_logger.error(traceback.format_exc())
+        
+        # Save a copy of the problematic file for later inspection
+        try:
+            problem_file = PROBLEM_FILES_DIR / f"{os.path.basename(file_path)}_problem.txt"
+            with open(file_path, 'rb') as src, open(problem_file, 'wb') as dst:
+                dst.write(src.read(2000))  # Copy first 2000 bytes for inspection
+        except:
+            pass
+            
         return None
 
 def process_participant(participant_id, qstarz_file=None, app_file=None, app_gps_file=None):
@@ -238,14 +456,14 @@ def process_participant(participant_id, qstarz_file=None, app_file=None, app_gps
         positionfixes = None
         data_source = None
         
-        if qstarz_file is not None:
+        if qstarz_file is not None and not is_macos_hidden_file(qstarz_file):
             positionfixes = load_qstarz_data(qstarz_file)
             if positionfixes is not None and not positionfixes.empty:
                 data_source = "qstarz"
                 logging.info(f"Using Qstarz data for participant {participant_id}")
         
         # If Qstarz data is missing or invalid, try smartphone GPS data
-        if (positionfixes is None or positionfixes.empty) and app_gps_file is not None:
+        if (positionfixes is None or positionfixes.empty) and app_gps_file is not None and not is_macos_hidden_file(app_gps_file):
             positionfixes = load_app_gps_data(app_gps_file)
             if positionfixes is not None and not positionfixes.empty:
                 data_source = "smartphone"
@@ -254,27 +472,44 @@ def process_participant(participant_id, qstarz_file=None, app_file=None, app_gps
         # Check if we have valid GPS data from either source
         if positionfixes is None or positionfixes.empty:
             logging.error(f"No valid GPS data for participant {participant_id}")
+            quality_report['failed_processing'].append(f"{participant_id}: No valid GPS data")
             return False
             
         # Load app data
-        if app_file is not None:
+        if app_file is not None and not is_macos_hidden_file(app_file):
             app_df = load_app_data(app_file)
             if app_df is None or app_df.empty:
                 logging.error(f"No valid app data for participant {participant_id}")
+                quality_report['failed_processing'].append(f"{participant_id}: No valid app data")
                 return False
         else:
             logging.error(f"No app data file provided for participant {participant_id}")
+            quality_report['failed_processing'].append(f"{participant_id}: No app data file")
             return False
             
         # Save preprocessed files for episode detection
         qstarz_csv_path = GPS_PREP_DIR / f'{participant_id}_gps_prep.csv'
         app_csv_path = GPS_PREP_DIR / f'{participant_id}_app_prep.csv'
         
+        # Extract any timezone offset information
+        tz_offset = None
+        if 'tz_offset' in positionfixes.columns:
+            tz_offset = positionfixes['tz_offset'].iloc[0]
+            # Drop the column before saving
+            positionfixes = positionfixes.drop(columns=['tz_offset'])
+        
         # Save positionfixes with data source metadata
         positionfixes['data_source'] = data_source
-        positionfixes.to_csv(qstarz_csv_path)
         
-        # Save app data
+        # Also save timezone information separately
+        if tz_offset is not None:
+            tz_info_path = GPS_PREP_DIR / f'{participant_id}_timezone.txt'
+            with open(tz_info_path, 'w') as f:
+                f.write(f"UTC{'+' if tz_offset >= 0 else ''}{tz_offset}")
+            logging.info(f"Saved timezone information for participant {participant_id}: UTC{'+' if tz_offset >= 0 else ''}{tz_offset}")
+        
+        # Save preprocessed data
+        positionfixes.to_csv(qstarz_csv_path)
         app_df.to_csv(app_csv_path, index=False)
         
         logging.info(f"Saved preprocessed data for participant {participant_id} (GPS source: {data_source})")
@@ -299,9 +534,9 @@ def process_participant(participant_id, qstarz_file=None, app_file=None, app_gps
         return True
         
     except Exception as e:
-        logging.error(f"Error processing participant {participant_id}: {str(e)}")
-        traceback.print_exc()
-        quality_report['failed_processing'].append(participant_id)
+        error_logger.error(f"Error processing participant {participant_id}: {str(e)}")
+        error_logger.error(traceback.format_exc())
+        quality_report['failed_processing'].append(f"{participant_id}: {str(e)}")
         return False
 
 def generate_quality_report():
@@ -321,6 +556,10 @@ def generate_quality_report():
         f.write("\nDate Parsing Errors:\n")
         for error in quality_report['date_errors']:
             f.write(f"- File: {error['file']}\n  Error: {error['error']}\n")
+            
+        f.write("\nTimezone Issues:\n")
+        for issue in quality_report['timezone_issues']:
+            f.write(f"- {issue}\n")
             
         f.write("\nMissing Files:\n")
         for files in quality_report['missing_files']:
@@ -345,7 +584,7 @@ def main():
     # Get Qstarz files with consistent ID format (keeping original format with leading zeros)
     qstarz_files = {}
     for f in QSTARZ_DATA_DIR.glob('*_Qstarz_processed.csv'):
-        if not f.stem.startswith('._'):
+        if not is_macos_hidden_file(f):
             # Extract ID and maintain original format (with leading zeros if present)
             participant_id = f.stem.split('_')[0]
             qstarz_files[participant_id] = f
@@ -360,6 +599,9 @@ def main():
     missing_app_files = []
     
     for participant_folder in (RAW_DATA_DIR / "Participants").glob("Pilot_*"):
+        if is_macos_hidden_file(participant_folder):
+            continue
+            
         # Extract participant ID correctly - keep leading zeros to match Qstarz files
         full_participant_id = participant_folder.name
         # Extract the part after "Pilot_" but keep leading zeros
@@ -373,21 +615,27 @@ def main():
             missing_app_folders.append(full_participant_id)
             continue
             
-        # Look for app files with consistent naming
-        app_file = next(app_folder.glob(f'{participant_id}-apps.csv'), None)
+        # Look for app files with multiple possible patterns
+        app_file = next((f for f in app_folder.glob(f'{participant_id.lstrip("0")}-apps.csv') if not is_macos_hidden_file(f)), None)
+        if not app_file:
+            # Try alternative pattern
+            app_file = next((f for f in app_folder.glob(f'*-apps.csv') if not is_macos_hidden_file(f)), None)
         
-        # Look for smartphone GPS files
-        app_gps_file = next(app_folder.glob(f'{participant_id}-gps.csv'), None)
+        # Look for smartphone GPS files with similar flexibility
+        app_gps_file = next((f for f in app_folder.glob(f'{participant_id.lstrip("0")}-gps.csv') if not is_macos_hidden_file(f)), None)
+        if not app_gps_file:
+            # Try alternative pattern
+            app_gps_file = next((f for f in app_folder.glob(f'*-gps.csv') if not is_macos_hidden_file(f)), None)
         
-        # Skip hidden files (those starting with ._)
-        if app_file and not app_file.name.startswith('._'):
+        # Store found files
+        if app_file:
             app_files[participant_id] = app_file
         else:
             logging.warning(f"No app file found for participant {participant_id} (folder: {full_participant_id})")
             missing_app_files.append(full_participant_id)
         
         # Store GPS file if it exists
-        if app_gps_file and not app_gps_file.name.startswith('._'):
+        if app_gps_file:
             app_gps_files[participant_id] = app_gps_file
             logging.info(f"Found smartphone GPS data for participant {participant_id}")
     
@@ -421,6 +669,11 @@ def main():
     # Process each participant
     successful = 0
     for participant_id in processable_participants:
+        # Skip macOS hidden files
+        if participant_id.startswith('._'):
+            logging.info(f"Skipping macOS hidden file participant: {participant_id}")
+            continue
+            
         # Get the available data files
         qstarz_file = qstarz_files.get(participant_id)
         app_file = app_files.get(participant_id)
@@ -438,5 +691,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
