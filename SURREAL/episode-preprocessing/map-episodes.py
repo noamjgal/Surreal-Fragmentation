@@ -13,6 +13,10 @@ from typing import Dict, List, Tuple
 sys.path.append(str(Path(__file__).parent.parent))
 from config.paths import PROCESSED_DATA_DIR, EPISODE_OUTPUT_DIR, MAP_OUTPUT_DIR, GPS_PREP_DIR
 
+# Create logs directory
+LOG_DIR = Path(__file__).parent.parent / "logs"/"maps"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
 import folium
 from folium.plugins import FastMarkerCluster
 import pandas as pd
@@ -46,7 +50,7 @@ class EpisodeVisualizer:
             format=log_format,
             handlers=[
                 logging.StreamHandler(),
-                logging.FileHandler(f'episode_visualizer_{self.participant_id}.log')
+                logging.FileHandler(LOG_DIR / f'episode_visualizer_{self.participant_id}.log')
             ]
         )
         self.logger = logging.getLogger(f"EpisodeVisualizer_{self.participant_id}")
@@ -450,7 +454,7 @@ def main():
     """Main execution function with enhanced logging"""
     # Set up root logger
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_filename = f'episode_visualization_{timestamp}.log'
+    log_filename = LOG_DIR / f'episode_visualization_{timestamp}.log'
     
     logging.basicConfig(
         level=logging.INFO,

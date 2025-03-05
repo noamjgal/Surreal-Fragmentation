@@ -30,7 +30,10 @@ warnings.filterwarnings("ignore",
                         category=FutureWarning)
 
 # Setup logging - File logging remains detailed but console output is reduced
-file_handler = logging.FileHandler('episode_detection.log')
+LOG_DIR = Path(__file__).parent.parent / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+file_handler = logging.FileHandler(LOG_DIR / 'episode_detection.log')
 file_handler.setLevel(logging.INFO)
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 

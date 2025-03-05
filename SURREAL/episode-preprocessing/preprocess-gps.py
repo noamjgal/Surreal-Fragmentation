@@ -18,11 +18,14 @@ from shapely.geometry import Point
 import trackintel as ti
 
 # Configure logging
+LOG_DIR = Path(__file__).parent.parent / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('preprocessing.log'),
+        logging.FileHandler(LOG_DIR / 'preprocessing.log'),
         logging.StreamHandler()
     ]
 )
