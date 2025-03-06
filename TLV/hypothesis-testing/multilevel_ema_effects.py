@@ -40,29 +40,29 @@ class FragmentationAnalysis:
         self.fragmentation_metrics = {
             'raw': [
                 'digital_fragmentation_index',
-                'moving_fragmentation_index',
-                'digital_frag_during_mobility'
+                'mobility_fragmentation_index',
+                'overlap_fragmentation_index'
             ],
             'zscore': [
                 'digital_fragmentation_index_zscore',
-                'moving_fragmentation_index_zscore',
-                'digital_frag_during_mobility_zscore'
+                'mobility_fragmentation_index_zscore',
+                'overlap_fragmentation_index_zscore'
             ]
         }
         
         self.episode_metrics = [
             'digital_episode_count',
-            'moving_episode_count',
+            'mobility_episode_count',
             'digital_num_episodes',
-            'moving_num_episodes',
+            'mobility_num_episodes',
             'overlap_num_episodes'
         ]
         
         self.duration_metrics = [
             'digital_total_duration',
-            'moving_total_duration',
+            'mobility_total_duration',
             'digital_total_duration_minutes',
-            'moving_total_duration_minutes',
+            'mobility_total_duration_minutes',
             'overlap_total_duration_minutes'
         ]
         
@@ -99,8 +99,8 @@ class FragmentationAnalysis:
         control_steps = [
             [],  # Base model
             ['digital_total_duration'],  # Step 1
-            ['digital_total_duration', 'moving_total_duration'],  # Step 2
-            ['digital_total_duration', 'moving_total_duration', 'is_weekend']  # Step 3
+            ['digital_total_duration', 'mobility_total_duration'],  # Step 2
+            ['digital_total_duration', 'mobility_total_duration', 'is_weekend']  # Step 3
         ]
         
         # 1. Primary Analysis: Fragmentation Effects on Emotions

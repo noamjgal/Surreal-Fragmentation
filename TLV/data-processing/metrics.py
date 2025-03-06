@@ -24,7 +24,7 @@ class MetricsProcessor:
         # Data quality thresholds
         self.quality_thresholds = {
             'min_digital_episodes': 2,
-            'min_moving_episodes': 2,
+            'min_mobility_episodes': 2,
             'min_digital_duration': 30,  # minutes
             'min_coverage_hours': 6,
             'min_overlap_episodes': 1
@@ -57,7 +57,7 @@ class MetricsProcessor:
         # Create mask for valid data
         valid_data = (
             (df['digital_episode_count'] >= self.quality_thresholds['min_digital_episodes']) &
-            (df['moving_episode_count'] >= self.quality_thresholds['min_moving_episodes']) &
+            (df['mobility_episode_count'] >= self.quality_thresholds['min_mobility_episodes']) &
             (df['digital_total_duration'] >= self.quality_thresholds['min_digital_duration']) &
             (df['coverage_hours'] >= self.quality_thresholds['min_coverage_hours']) &
             (df['overlap_num_episodes'] >= self.quality_thresholds['min_overlap_episodes'])  # new condition
@@ -68,7 +68,7 @@ class MetricsProcessor:
         if excluded.any():
             self.logger.warning(f"\nExcluded {excluded.sum()} rows due to insufficient data quality:")
             self.logger.warning(f"Low digital episodes: {(df['digital_episode_count'] < self.quality_thresholds['min_digital_episodes']).sum()}")
-            self.logger.warning(f"Low moving episodes: {(df['moving_episode_count'] < self.quality_thresholds['min_moving_episodes']).sum()}")
+            self.logger.warning(f"Low mobility episodes: {(df['mobility_episode_count'] < self.quality_thresholds['min_mobility_episodes']).sum()}")
             self.logger.warning(f"Low digital duration: {(df['digital_total_duration'] < self.quality_thresholds['min_digital_duration']).sum()}")
             self.logger.warning(f"Low coverage hours: {(df['coverage_hours'] < self.quality_thresholds['min_coverage_hours']).sum()}")
             self.logger.warning(f"Low overlap episodes: {(df['overlap_num_episodes'] < self.quality_thresholds['min_overlap_episodes']).sum()}")  # new log
@@ -218,10 +218,10 @@ class MetricsProcessor:
             # Calculate z-scores for key metrics
             metric_cols = [
                 'digital_fragmentation_index',
-                'moving_fragmentation_index',
-                'digital_frag_during_mobility',
+                'mobility_fragmentation_index',
+                'overlap_fragmentation_index',
                 'digital_total_duration',
-                'moving_total_duration',
+                'mobility_total_duration',
                 'STAI6_score'
             ]
             

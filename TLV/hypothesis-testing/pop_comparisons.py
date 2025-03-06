@@ -17,10 +17,10 @@ class FragmentationGroupAnalysis:
         # Define main metrics as class attribute
         self.fragmentation_vars = [
             'digital_fragmentation_index',
-            'moving_fragmentation_index',
-            'digital_frag_during_mobility',
+            'mobility_fragmentation_index',
+            'overlap_fragmentation_index',
             'digital_total_duration',
-            'moving_total_duration'
+            'mobility_total_duration'
         ]
         
         # Define grouping variables as class attribute
