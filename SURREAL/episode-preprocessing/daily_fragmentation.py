@@ -19,7 +19,7 @@ from config.paths import EPISODE_OUTPUT_DIR, PROCESSED_DATA_DIR
 
 class EpisodeFragmentationAnalyzer:
     def __init__(self, 
-                 min_episodes: int = 2,
+                 min_episodes: int = 1,
                  max_episode_duration: float = 24 * 60,  # 24 hours in minutes
                  outlier_threshold: float = 3.0,  # Standard deviations for outlier detection
                  entropy_based: bool = True,
@@ -37,7 +37,7 @@ class EpisodeFragmentationAnalyzer:
         self.min_episodes = min_episodes
         self.max_episode_duration = max_episode_duration
         self.outlier_threshold = outlier_threshold
-        self.entropy_based = entropy_based
+        self.entropy_based = True  # Always use entropy-based, ignore parameter
         self.debug_mode = debug_mode
         self._setup_logging()
         
@@ -231,6 +231,35 @@ class EpisodeFragmentationAnalyzer:
             result['episode_count'] = len(valid_data)
             return result
         
+        # NEW CODE: Detect and remove outliers
+        try:
+            duration_values = pd.to_numeric(valid_data['duration'], errors='coerce')
+            mean_duration = duration_values.mean()
+            std_duration = duration_values.std()
+            
+            # Filter outliers based on standard deviation threshold
+            if len(valid_data) > 2:  # Need at least 3 points for meaningful outlier detection
+                outlier_mask = np.abs(duration_values - mean_duration) <= (self.outlier_threshold * std_duration)
+                valid_data = valid_data[outlier_mask]
+                
+                # Log outlier removal only in debug mode
+                if self.debug_mode:
+                    removed_count = (~outlier_mask).sum()
+                    if removed_count > 0:
+                        self.logger.debug(f"Removed {removed_count} outliers from {episode_type} episodes")
+            
+            # Check if we still have enough data after outlier removal
+            if len(valid_data) < self.min_episodes:
+                reason = f'insufficient_episodes_after_outlier_removal_{len(valid_data)}'
+                self.logger.warning(f"Too few valid {episode_type} episodes after outlier removal: {len(valid_data)}")
+                self.stats[episode_type]['insufficient_episodes'] += 1
+                self._update_failure_reason(episode_type, reason)
+                result['status'] = reason
+                result['episode_count'] = len(valid_data)
+                return result
+        except Exception as e:
+            self.logger.warning(f"Error during outlier detection: {str(e)}, proceeding without outlier removal")
+        
         # Record episode counts and total duration
         result['episode_count'] = len(valid_data)
         result['total_duration'] = valid_data['duration'].sum()
@@ -240,41 +269,34 @@ class EpisodeFragmentationAnalyzer:
         result['std_duration'] = valid_data['duration'].std() if len(valid_data) > 1 else 0
         result['cv'] = result['std_duration'] / result['mean_duration'] if result['mean_duration'] > 0 else 0
         
-        # Calculate fragmentation index based on configuration
-        if self.entropy_based:
-            try:
-                # Entropy-based fragmentation using episode durations
-                durations = valid_data['duration'].values
-                total_time = durations.sum()
-                
-                # Calculate probabilities (proportion of time spent in each episode)
-                probabilities = durations / total_time
-                
-                # Calculate entropy
-                entropy = -np.sum(probabilities * np.log(probabilities))
-                
-                # Normalize to [0, 1] - higher is more fragmented
-                max_entropy = np.log(len(durations))
-                index = entropy / max_entropy if max_entropy > 0 else 0
-                
-                result['fragmentation_index'] = index
-                result['status'] = 'success'
-                self.stats[episode_type]['success'] += 1
-                
-                if self.debug_mode:
-                    self.logger.debug(f"Successfully calculated {episode_type} fragmentation: {index:.4f}")
-                
-            except Exception as e:
-                reason = f'calculation_error_{str(e)}'
-                self.logger.error(f"Error calculating entropy-based fragmentation: {str(e)}")
-                self._update_failure_reason(episode_type, reason)
-                result['status'] = reason
-        else:
-            # Original CV-based fragmentation
-            index = min(1.0, result['cv'] / 2) if result['cv'] > 0 else 0
+        # ALWAYS use entropy-based fragmentation
+        try:
+            # Entropy-based fragmentation using episode durations
+            durations = valid_data['duration'].values
+            total_time = durations.sum()
+            
+            # Calculate probabilities (proportion of time spent in each episode)
+            probabilities = durations / total_time
+            
+            # Calculate entropy
+            entropy = -np.sum(probabilities * np.log(probabilities))
+            
+            # Normalize to [0, 1] - higher is more fragmented
+            max_entropy = np.log(len(durations))
+            index = entropy / max_entropy if max_entropy > 0 else 0
+            
             result['fragmentation_index'] = index
             result['status'] = 'success'
             self.stats[episode_type]['success'] += 1
+            
+            if self.debug_mode:
+                self.logger.debug(f"Successfully calculated {episode_type} fragmentation: {index:.4f}")
+            
+        except Exception as e:
+            reason = f'calculation_error_{str(e)}'
+            self.logger.error(f"Error calculating entropy-based fragmentation: {str(e)}")
+            self._update_failure_reason(episode_type, reason)
+            result['status'] = reason
         
         return result
 
@@ -529,7 +551,7 @@ class EpisodeFragmentationAnalyzer:
 def process_episodes_data(
     episode_dir: Path,
     output_dir: Path,
-    min_episodes: int = 2,
+    min_episodes: int = 1,
     entropy_based: bool = True,
     debug_mode: bool = False
 ):
@@ -540,7 +562,8 @@ def process_episodes_data(
     # Initialize analyzer and DataCleaner
     analyzer = EpisodeFragmentationAnalyzer(
         min_episodes=min_episodes, 
-        entropy_based=entropy_based, 
+        entropy_based=True,  # Force true
+        outlier_threshold=3.0,  # Add explicit outlier threshold  
         debug_mode=debug_mode
     )
     data_cleaner = DataCleaner(logging.getLogger())
@@ -705,8 +728,8 @@ def main():
     results_df = process_episodes_data(
         episode_dir=episode_dir,
         output_dir=output_dir,
-        min_episodes=2,  # Minimum episode count for calculation
-        entropy_based=True,  # Use entropy-based fragmentation
+        min_episodes=1,  # Changed from 2 to 1
+        entropy_based=True,  # Keep parameter but it's ignored
         debug_mode=False    # Disable verbose debugging for cleaner output
     )
     
