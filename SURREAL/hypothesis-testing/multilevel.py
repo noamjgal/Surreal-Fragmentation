@@ -75,10 +75,10 @@ class MultilevelAnalysis:
             safe_cols = []
             
             for col in df.columns:
-                # Check if column has special characters
-                if re.search(r'[-]', col):
+                # Check if column has special characters (periods, hyphens, spaces)
+                if re.search(r'[.\-\s]', col):
                     # Create safe name by replacing special chars with underscore
-                    safe_name = re.sub(r'[-]', '_', col)
+                    safe_name = re.sub(r'[.\-\s]', '_', col)
                     self.col_name_map[col] = safe_name
                     safe_cols.append(safe_name)
                 else:
@@ -130,15 +130,22 @@ class MultilevelAnalysis:
             
             # Calculate z-scores for fragmentation metrics if not already present
             for metric in self.fragmentation_metrics['raw']:
-                z_col = f"{metric}_zscore"
+                z_col = f"{metric}_zstd"
                 if z_col not in df.columns and metric in df.columns:
-                    df[z_col] = df.groupby('participant_id_clean')[metric].transform(
-                        lambda x: (x - x.mean()) / x.std() if len(x) > 1 and x.std() > 0 else 0
-                    )
+                    # Create a copy to avoid SettingWithCopyWarning
+                    group_means = df.groupby('participant_id_clean')[metric].transform('mean')
+                    group_stds = df.groupby('participant_id_clean')[metric].transform('std')
+                    
+                    # Avoid division by zero
+                    mask = (group_stds > 0)
+                    df.loc[mask, z_col] = (df.loc[mask, metric] - group_means[mask]) / group_stds[mask]
+                    # For groups with 0 std, set z-score to 0
+                    df.loc[~mask, z_col] = 0
+                    
                     self.logger.info(f"Created z-score column: {z_col}")
             
-            # Store the data for analysis
-            self.data = df
+            # Store the data for analysis - make a copy to avoid SettingWithCopyWarning
+            self.data = df.copy()
             
             self.logger.info(f"Data preprocessing complete. Final shape: {df.shape}")
             self.logger.info(f"Emotion metrics: {self.emotion_metrics}")
@@ -147,7 +154,7 @@ class MultilevelAnalysis:
             self.logger.info(f"Duration metrics: {self.duration_metrics}")
             self.logger.info(f"Demographic variables: {self.demographic_vars}")
             
-            return df
+            return self.data
             
         except Exception as e:
             self.logger.error(f"Error loading or preprocessing data: {str(e)}")
@@ -166,7 +173,7 @@ class MultilevelAnalysis:
                 'raw': ['frag_digital_fragmentation_index', 'frag_mobility_fragmentation_index', 
                        'frag_overlap_fragmentation_index', 'digital_fragmentation_index', 'mobility_fragmentation_index', 
                        'overlap_fragmentation_index'],
-                'zscore': []  # Will be filled with *_zscore columns
+                'zstd': []  # Will be filled with z-standardized columns
             },
             'episodes': ['frag_digital_episode_count', 'frag_mobility_episode_count', 'frag_overlap_episode_count',
                         'digital_episode_count', 'mobility_episode_count', 'overlap_episode_count'],
@@ -184,14 +191,14 @@ class MultilevelAnalysis:
                     self.logger.info(f"Found emotion metric: {col}")
         
         # Sort fragmentation metrics
-        self.fragmentation_metrics = {'raw': [], 'zscore': []}
+        self.fragmentation_metrics = {'raw': [], 'zstd': []}
         for col in column_groups['fragmentation']['raw']:
             if col in df.columns:
                 self.fragmentation_metrics['raw'].append(col)
-                # Add corresponding zscore column if it exists
-                z_col = f"{col}_zscore"
+                # Add corresponding z-standardized column if it exists
+                z_col = f"{col}_zstd"
                 if z_col in df.columns:
-                    self.fragmentation_metrics['zscore'].append(z_col)
+                    self.fragmentation_metrics['zstd'].append(z_col)
         
         # Find episode and duration metrics
         self.episode_metrics = [col for col in column_groups['episodes'] if col in df.columns]
@@ -279,7 +286,7 @@ class MultilevelAnalysis:
         Args:
             dv (str): Dependent variable name
             pred_raw (str): Predictor variable name
-            pred_z (str): Z-scored version of predictor (if available)
+            pred_z (str): Z-standardized version of predictor (if available)
             controls (list): List of control variables to include
             model_name (str): Name/identifier for this model
         
@@ -290,7 +297,7 @@ class MultilevelAnalysis:
         
         try:
             # Filter data to only include rows with both DV and predictor
-            current_data = self.data.dropna(subset=[dv, pred_raw])
+            current_data = self.data.dropna(subset=[dv, pred_raw]).copy()  # Create copy to avoid warnings
             
             if len(current_data) < 10:
                 self.logger.warning(f"Too few observations ({len(current_data)}) for {dv} ~ {pred_raw}")
@@ -319,23 +326,56 @@ class MultilevelAnalysis:
             self.logger.debug(f"Model formula: {formula}")
             
             # Create variables for model
-            current_data['within_pred'] = within_var
-            current_data['between_pred'] = between_var
+            current_data.loc[:, 'within_pred'] = within_var
+            current_data.loc[:, 'between_pred'] = between_var
             
-            # Build the mixed model
+            # Try different optimization methods if the model doesn't converge
             model = smf.mixedlm(
                 formula=formula,
                 data=current_data,
                 groups=current_data['participant_id_clean']
             )
             
-            # Fit the model
-            results = model.fit(reml=True, method=['lbfgs', 'nm', 'cg'])
+            # Try different methods for fitting the model
+            methods = ['lbfgs', 'cg', 'bfgs', 'powell', 'nm']
+            converged = False
+            results = None
             
-            # Check convergence
-            if not results.converged:
-                self.logger.warning(f"Model did not converge for {dv} ~ {pred_raw}")
-                
+            for method in methods:
+                try:
+                    results = model.fit(reml=True, method=method)
+                    if results.converged:
+                        self.logger.info(f"Model converged using {method} method")
+                        converged = True
+                        break
+                    self.logger.warning(f"Model did not converge with {method} method, trying another...")
+                except Exception as e:
+                    self.logger.warning(f"Error fitting model with {method} method: {str(e)}")
+            
+            # If the model still didn't converge, try with a simpler random effects structure
+            if not converged and results is not None:
+                self.logger.warning("Trying simpler random effects structure")
+                try:
+                    model = smf.mixedlm(
+                        formula=formula,
+                        data=current_data,
+                        groups=current_data['participant_id_clean'],
+                        re_formula="1"  # Only random intercept, no random slopes
+                    )
+                    results = model.fit(reml=True)
+                    if results.converged:
+                        self.logger.info("Model converged with simpler random effects structure")
+                        converged = True
+                except Exception as e:
+                    self.logger.warning(f"Error fitting simplified model: {str(e)}")
+            
+            # If no model converged, use the last results (with warning)
+            if not converged:
+                self.logger.warning(f"Model did not converge for {dv} ~ {pred_raw} with any method")
+                if results is None:
+                    self.logger.error("Failed to fit model")
+                    return None
+            
             # Get results
             result_dict = {
                 'dependent_var': dv,
@@ -395,10 +435,10 @@ class MultilevelAnalysis:
         person_means = grouped.transform('mean')
         
         # Calculate within-person deviation (person-centered)
-        within_var = data[var] - person_means
+        within_var = data[var].values - person_means.values
         
         # Between-person component is simply the person mean
-        between_var = person_means
+        between_var = person_means.values
         
         return within_var, between_var
     
