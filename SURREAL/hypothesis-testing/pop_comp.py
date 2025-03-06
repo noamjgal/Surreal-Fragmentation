@@ -181,19 +181,32 @@ class PopulationComparisonAnalysis:
                col in ['is_weekend']  # Add weekend as demographic
         ]
         
-        # Identify STAI variables
+        # Identify STAI variables - looking for z-standardized versions first
         self.emotion_vars['stai'] = [
             col for col in df.columns
             if 'stai' in col.lower() and 'zstd' in col.lower()
         ]
         
-        # Identify CESD variables
+        # Identify CESD variables - looking for z-standardized versions first
         self.emotion_vars['cesd'] = [
             col for col in df.columns
             if 'ces' in col.lower() and 'zstd' in col.lower()
         ]
         
         # If we don't find the z-standardized versions, look for raw versions
+        if not self.emotion_vars['stai']:
+            self.emotion_vars['stai'] = [
+                col for col in df.columns
+                if 'stai' in col.lower() and 'raw' in col.lower()
+            ]
+            
+        if not self.emotion_vars['cesd']:
+            self.emotion_vars['cesd'] = [
+                col for col in df.columns
+                if 'ces' in col.lower() and 'raw' in col.lower()
+            ]
+        
+        # As a fallback, look for any STAI/CESD variables without specifying standardization
         if not self.emotion_vars['stai']:
             self.emotion_vars['stai'] = [
                 col for col in df.columns
