@@ -29,7 +29,7 @@ class FragmentationAnalyzer:
         # Initialize statistics tracking
         self.stats = {
             'digital': {'success': 0, 'insufficient_episodes': 0, 'invalid_duration': 0},
-            'moving': {'success': 0, 'insufficient_episodes': 0, 'invalid_duration': 0}
+            'mobility': {'success': 0, 'insufficient_episodes': 0, 'invalid_duration': 0}
         }
         
     def _setup_logging(self):
@@ -48,7 +48,7 @@ class FragmentationAnalyzer:
         
         Args:
             episodes_df: DataFrame with episode data
-            episode_type: Type of episodes ('digital' or 'moving')
+            episode_type: Type of episodes ('digital' or 'mobility')
             
         Returns:
             Dictionary with fragmentation metrics and status
@@ -60,7 +60,6 @@ class FragmentationAnalyzer:
             self.stats[episode_type]['insufficient_episodes'] += 1
             return {
                 'fragmentation_index': np.nan,
-                'old_fragmentation_index': np.nan,
                 'episode_count': len(episodes_df),
                 'total_duration': episodes_df['duration'].sum() if not episodes_df.empty else 0,
                 'status': 'insufficient_episodes'
@@ -76,7 +75,6 @@ class FragmentationAnalyzer:
             self.stats[episode_type]['invalid_duration'] += 1
             return {
                 'fragmentation_index': np.nan,
-                'old_fragmentation_index': np.nan,
                 'episode_count': len(valid_episodes),
                 'total_duration': valid_episodes['duration'].sum(),
                 'status': 'invalid_duration'
@@ -92,7 +90,6 @@ class FragmentationAnalyzer:
             self.stats[episode_type]['insufficient_episodes'] += 1
             return {
                 'fragmentation_index': np.nan,
-                'old_fragmentation_index': np.nan,
                 'episode_count': len(valid_episodes),
                 'total_duration': valid_episodes['duration'].sum(),
                 'status': 'insufficient_episodes_after_outlier_removal'
@@ -102,26 +99,19 @@ class FragmentationAnalyzer:
         total_duration = valid_episodes['duration'].sum()
         normalized_durations = valid_episodes['duration'] / total_duration
         
-        # Calculate both indices
+        # Calculate entropy-based index only
         S = len(valid_episodes)
         
-        # Original HHI-based calculation
-        old_index = 0.0
-        if S > 1:
-            hhi = np.sum(normalized_durations**2)
-            old_index = (1 - hhi) / (1 - 1/S)
-        
-        # New entropy-based calculation
-        new_index = 0.0
+        # Entropy-based calculation
+        index = 0.0
         if S > 1:
             entropy = -np.sum(normalized_durations * np.log(normalized_durations))
-            new_index = entropy / np.log(S)
+            index = entropy / np.log(S)
         
         self.stats[episode_type]['success'] += 1
         
         return {
-            'fragmentation_index': new_index,
-            'old_fragmentation_index': old_index,
+            'fragmentation_index': index,
             'episode_count': S,
             'total_duration': total_duration,
             'mean_duration': valid_episodes['duration'].mean(),
@@ -132,28 +122,27 @@ class FragmentationAnalyzer:
 
     def calculate_digital_frag_during_mobility(self, 
                                              digital_df: pd.DataFrame, 
-                                             moving_df: pd.DataFrame) -> Dict:
+                                             mobility_df: pd.DataFrame) -> Dict:
         """
         Calculate fragmentation of digital use during mobility periods
         
         Args:
             digital_df: DataFrame with digital episodes
-            moving_df: DataFrame with mobility episodes
+            mobility_df: DataFrame with mobility episodes
             
         Returns:
             Dictionary with fragmentation metrics for digital use during mobility
         """
-        if digital_df.empty or moving_df.empty:
+        if digital_df.empty or mobility_df.empty:
             return {
                 'fragmentation_index': np.nan,
-                'old_fragmentation_index': np.nan,
                 'episode_count': 0,
                 'total_duration': 0,
                 'status': 'no_episodes'
             }
             
         # Convert times to datetime if needed
-        for df in [digital_df, moving_df]:
+        for df in [digital_df, mobility_df]:
             for col in ['start_time', 'end_time']:
                 if df[col].dtype != 'datetime64[ns]':
                     df[col] = pd.to_datetime(df[col])
@@ -161,7 +150,7 @@ class FragmentationAnalyzer:
         # Find overlapping episodes
         overlapping_episodes = []
         for _, digital in digital_df.iterrows():
-            for _, mobility in moving_df.iterrows():
+            for _, mobility in mobility_df.iterrows():
                 if (digital['start_time'] < mobility['end_time'] and 
                     digital['end_time'] > mobility['start_time']):
                     # Calculate overlap duration
@@ -179,7 +168,6 @@ class FragmentationAnalyzer:
         if not overlapping_episodes:
             return {
                 'fragmentation_index': np.nan,
-                'old_fragmentation_index': np.nan,
                 'episode_count': 0,
                 'total_duration': 0,
                 'status': 'no_overlapping_episodes'
@@ -190,59 +178,55 @@ class FragmentationAnalyzer:
 
     def process_episode_summary(self, 
                               digital_file_path: str, 
-                              moving_file_path: str,
+                              mobility_file_path: str,
                               print_sample: bool = False) -> Optional[Dict]:
         """Process episode data and calculate all fragmentation metrics"""
         try:
             digital_df = pd.read_csv(digital_file_path)
-            moving_df = pd.read_csv(moving_file_path)
+            mobility_df = pd.read_csv(mobility_file_path)
             
-            for df in [digital_df, moving_df]:
+            for df in [digital_df, mobility_df]:
                 df['start_time'] = pd.to_datetime(df['start_time'])
                 df['end_time'] = pd.to_datetime(df['end_time'])
             
             if print_sample:
                 self.logger.info(f"\nSample data from {os.path.basename(digital_file_path)}:")
                 self.logger.info(digital_df.head())
-                self.logger.info(f"\nSample data from {os.path.basename(moving_file_path)}:")
-                self.logger.info(moving_df.head())
+                self.logger.info(f"\nSample data from {os.path.basename(mobility_file_path)}:")
+                self.logger.info(mobility_df.head())
             
             participant_id, date = self._extract_info_from_filename(os.path.basename(digital_file_path))
             
             # Calculate various fragmentation metrics
             digital_metrics = self.calculate_fragmentation_index(digital_df, 'digital')
-            moving_metrics = self.calculate_fragmentation_index(moving_df, 'moving')
-            overlap_metrics = self.calculate_digital_frag_during_mobility(digital_df, moving_df)
+            mobility_metrics = self.calculate_fragmentation_index(mobility_df, 'mobility')
+            overlap_metrics = self.calculate_digital_frag_during_mobility(digital_df, mobility_df)
             
             result = {
                 'participant_id': participant_id,
                 'date': date,
                 'digital_fragmentation_index': digital_metrics['fragmentation_index'],
-                'moving_fragmentation_index': moving_metrics['fragmentation_index'],
-                'digital_frag_during_mobility': overlap_metrics['fragmentation_index'],
-                'digital_old_frag': digital_metrics['old_fragmentation_index'],
-                'moving_old_frag': moving_metrics['old_fragmentation_index'],
-                'digital_delta_frag': digital_metrics['fragmentation_index'] - digital_metrics['old_fragmentation_index'],
-                'moving_delta_frag': moving_metrics['fragmentation_index'] - moving_metrics['old_fragmentation_index'],
+                'mobility_fragmentation_index': mobility_metrics['fragmentation_index'],
+                'overlap_fragmentation_index': overlap_metrics['fragmentation_index'],
                 'digital_episode_count': digital_metrics['episode_count'],
-                'moving_episode_count': moving_metrics['episode_count'],
+                'mobility_episode_count': mobility_metrics['episode_count'],
                 'digital_total_duration': digital_metrics['total_duration'],
-                'moving_total_duration': moving_metrics['total_duration'],
+                'mobility_total_duration': mobility_metrics['total_duration'],
                 'digital_status': digital_metrics['status'],
-                'moving_status': moving_metrics['status'],
+                'mobility_status': mobility_metrics['status'],
                 'overlap_status': overlap_metrics['status']
             }
             
             # Add additional metrics if available
-            for metrics_type in [digital_metrics, moving_metrics]:
+            for metrics_type in [digital_metrics, mobility_metrics]:
                 if 'cv' in metrics_type:
-                    prefix = 'digital_' if metrics_type == digital_metrics else 'moving_'
+                    prefix = 'digital_' if metrics_type == digital_metrics else 'mobility_'
                     result[f'{prefix}cv'] = metrics_type['cv']
             
             return result
             
         except Exception as e:
-            self.logger.error(f"Error processing files {digital_file_path} and {moving_file_path}: {str(e)}")
+            self.logger.error(f"Error processing files {digital_file_path} and {mobility_file_path}: {str(e)}")
             return None
 
     def _extract_info_from_filename(self, filename: str) -> Tuple[str, datetime.date]:
@@ -261,8 +245,8 @@ class FragmentationAnalyzer:
 
     def generate_analysis_plots(self, df: pd.DataFrame, output_dir: Path):
         """Generate visualization plots for fragmentation analysis"""
-        metrics = ['digital_fragmentation_index', 'moving_fragmentation_index', 
-                  'digital_frag_during_mobility']
+        metrics = ['digital_fragmentation_index', 'mobility_fragmentation_index', 
+                  'overlap_fragmentation_index']
         
         for metric in metrics:
             plt.figure(figsize=(10, 6))
@@ -283,45 +267,6 @@ class FragmentationAnalyzer:
             plt.savefig(output_dir / f'{metric}_distribution.png')
             plt.close()
 
-        # Add comparison plot
-        plt.figure(figsize=(10, 5))
-        plt.scatter(df['digital_old_frag'], df['digital_fragmentation_index'], alpha=0.5)
-        plt.plot([0,1], [0,1], 'r--')
-        plt.xlabel('Original Fragmentation Index')
-        plt.ylabel('New Fragmentation Index')
-        plt.title('Digital Fragmentation Index Comparison')
-        plt.savefig(output_dir / 'formula_comparison_digital.png')
-        plt.close()
-
-        # Add quartile comparison plot
-        plt.figure(figsize=(12, 6))
-        
-        for idx, ep_type in enumerate(['digital', 'moving']):
-            plt.subplot(1, 2, idx+1)
-            
-            # Correct column names
-            old_col = f'{ep_type}_old_frag'
-            new_col = f'{ep_type}_fragmentation_index'
-            
-            # Plot distributions
-            plt.hist(df[old_col], bins=50, alpha=0.5, label='Old Index')
-            plt.hist(df[new_col], bins=50, alpha=0.5, label='New Index')
-            
-            # Add quartile markers
-            for col, color in [(old_col, '#1f77b4'), (new_col, '#ff7f0e')]:
-                q = df[col].quantile([0.25, 0.5, 0.75])
-                for q_val in q:
-                    plt.axvline(q_val, color=color, linestyle='--', alpha=0.6)
-            
-            plt.title(f'{ep_type.capitalize()} Fragmentation Comparison')
-            plt.xlabel('Fragmentation Index')
-            plt.ylabel('Frequency')
-            plt.legend()
-        
-        plt.tight_layout()
-        plt.savefig(output_dir / 'quartile_comparison.png')
-        plt.close()
-
 def main():
     # Configure paths
     input_dir = Path('/Users/noamgal/Downloads/Research-Projects/SURREAL/Amnon/episodes')
@@ -334,19 +279,20 @@ def main():
     # Process all episode files
     digital_files = sorted([f for f in os.listdir(input_dir) 
                           if f.startswith('digital_episodes_') and f.endswith('.csv')])
-    moving_files = sorted([f for f in os.listdir(input_dir) 
-                         if f.startswith('moving_episodes_') and f.endswith('.csv')])
+    mobility_files = sorted([f for f in os.listdir(input_dir) 
+                         if (f.startswith('mobility_episodes_') or f.startswith('moving_episodes_')) 
+                         and f.endswith('.csv')])
     
-    if len(digital_files) != len(moving_files):
-        logging.warning("Mismatch in number of digital and moving episode files")
+    if len(digital_files) != len(mobility_files):
+        logging.warning("Mismatch in number of digital and mobility episode files")
     
     all_results = []
-    for i, (digital_file, moving_file) in enumerate(tqdm(zip(digital_files, moving_files), 
+    for i, (digital_file, mobility_file) in enumerate(tqdm(zip(digital_files, mobility_files), 
                                                        desc="Processing episodes")):
         digital_path = input_dir / digital_file
-        moving_path = input_dir / moving_file
+        mobility_path = input_dir / mobility_file
         
-        results = analyzer.process_episode_summary(digital_path, moving_path, 
+        results = analyzer.process_episode_summary(digital_path, mobility_path, 
                                                  print_sample=(i==0))
         if results is not None:
             all_results.append(results)
@@ -355,61 +301,16 @@ def main():
     if all_results:
         combined_results = pd.DataFrame(all_results)
         
-        # Generate and save analysis files first
+        # Generate and save analysis files
         analyzer.generate_analysis_plots(combined_results, output_dir)
-        stats_comparison = pd.DataFrame()
-        for ep_type in ['digital', 'moving']:
-            old_stats = combined_results[f'{ep_type}_old_frag'].describe().rename(f'{ep_type}_old')
-            new_stats = combined_results[f'{ep_type}_fragmentation_index'].describe().rename(f'{ep_type}_new')
-            stats_comparison = pd.concat([old_stats, new_stats], axis=1)
-        
-        # Format statistics table
-        stats_comparison = stats_comparison.T.round(3)
-        stats_comparison['IQR'] = stats_comparison['75%'] - stats_comparison['25%']
-        
-        # Save and log statistics
-        stats_file = output_dir / 'metric_comparison_stats.csv'
-        stats_comparison.to_csv(stats_file)
-        
-        logging.info("\nDetailed Statistics Comparison:")
-        logging.info(stats_comparison.to_string())
-        
-        # Generate comparison report
-        comparison_stats = pd.DataFrame({
-            'Metric': ['Digital', 'Moving'],
-            'Old Mean': [
-                combined_results['digital_old_frag'].mean(),
-                combined_results['moving_old_frag'].mean()
-            ],
-            'New Mean': [
-                combined_results['digital_fragmentation_index'].mean(),
-                combined_results['moving_fragmentation_index'].mean()
-            ],
-            'Mean Δ': [
-                combined_results['digital_delta_frag'].mean(),
-                combined_results['moving_delta_frag'].mean()
-            ]
-        }).round(3)
-        
-        logging.info("\nMetric Comparison:")
-        logging.info(comparison_stats.to_string(index=False))
-        
-        # Remove old index values from final output
-        columns_to_drop = [
-            'digital_old_frag', 'moving_old_frag',
-            'digital_delta_frag', 'moving_delta_frag'
-        ]
-        final_output = combined_results.drop(columns=columns_to_drop)
         
         # Save cleaned results
-        final_output.to_csv(output_dir / 'fragmentation_summary.csv', index=False)
-        logging.info(f"\nSaved cleaned fragmentation summary to {output_dir}/fragmentation_summary.csv")
+        combined_results.to_csv(output_dir / 'fragmentation_summary.csv', index=False)
+        logging.info(f"\nSaved fragmentation summary to {output_dir}/fragmentation_summary.csv")
         
-        # Keep full comparison data in separate file
-        combined_results.to_csv(output_dir / 'legacy_comparison_archive.csv', index=False)
         # Print statistics
         logging.info("\nProcessing Statistics:")
-        for episode_type in ['digital', 'moving']:
+        for episode_type in ['digital', 'mobility']:
             stats = analyzer.stats[episode_type]
             total = sum(stats.values())
             logging.info(f"\n{episode_type.capitalize()} Episodes:")
