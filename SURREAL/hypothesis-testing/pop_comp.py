@@ -244,7 +244,6 @@ class SplitPopulationAnalysis:
         prioritized_demographics = [
             'gender_standardized',  # Use standardized version instead of 'Gender' and 'gender_code'
             'location_type',        # Use clearer version instead of 'City.center'
-            'dataset_source'        # Keep this as is
         ]
         
         for outcome_var in all_metrics:
