@@ -12,8 +12,6 @@ from pathlib import Path
 from scipy import stats
 import logging
 from datetime import datetime
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 class SplitPopulationAnalysis:
     def __init__(self, debug=False):
@@ -757,76 +755,11 @@ class SplitPopulationAnalysis:
                     top_corrs.to_excel(writer, sheet_name='Top Correlations', index=False)
             
             self.logger.info(f"Saved {len(corr_df)} correlation results to {corr_path}")
-            
-            # Generate and save correlation heatmap
-            self._create_correlation_heatmap(corr_df, timestamp)
         
         # Also create a summary file
         self._create_summary_file(timestamp)
         
         return True
-    
-    def _create_correlation_heatmap(self, corr_df, timestamp):
-        """Create heatmap of correlations between variables.
-        
-        Args:
-            corr_df (DataFrame): Correlation results dataframe
-            timestamp (str): Timestamp for file naming
-        """
-        if corr_df.empty:
-            self.logger.warning("Cannot create correlation heatmap: No correlation results")
-            return
-        
-        # Create a directory for plots if it doesn't exist
-        plot_dir = self.output_dir / 'plots'
-        plot_dir.mkdir(exist_ok=True, parents=True)
-
-        # Pivot the correlation data to create a matrix
-        try:
-            # Create pivot table with var1 as rows, var2 as columns, correlation as values
-            pivot_table = corr_df.pivot_table(
-                index='var1', 
-                columns='var2', 
-                values='correlation',
-                aggfunc='mean'  # If duplicates exist, take the mean
-            )
-            
-            # Fill NaN values with 0 to avoid visualization issues
-            corr_matrix = pivot_table.fillna(0)
-            
-            # Ensure all values are numeric
-            corr_matrix = corr_matrix.astype(float)
-            
-            # Create figure with larger size for readability
-            plt.figure(figsize=(20, 16))
-            
-            # Create heatmap
-            sns.heatmap(corr_matrix,
-                       annot=True,  # Show correlation values
-                       cmap='coolwarm',  # Blue-red color map
-                       vmin=-1, vmax=1,  # Correlation range
-                       fmt='.2f',  # Format as 2 decimal places
-                       linewidths=0.5,  # Add lines between cells
-                       annot_kws={"size": 14})  # Larger annotation font
-            
-            # Add title and adjust layout
-            plt.title('Correlation Matrix of Variables', fontsize=24)
-            plt.xticks(fontsize=14, rotation=45, ha='right')
-            plt.yticks(fontsize=14)
-            
-            # Save the figure
-            output_file = plot_dir / f'correlation_heatmap_{timestamp}.png'
-            plt.tight_layout()
-            plt.savefig(output_file, dpi=300)
-            plt.close()
-            
-            self.logger.info(f"Created correlation heatmap: {output_file}")
-            
-        except Exception as e:
-            self.logger.error(f"Error creating correlation heatmap: {str(e)}")
-            if self.debug:
-                import traceback
-                self.logger.error(traceback.format_exc())
     
     def _create_summary_file(self, timestamp):
         """Create a summary file with key findings"""
