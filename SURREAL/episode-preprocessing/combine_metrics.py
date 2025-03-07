@@ -598,22 +598,6 @@ def main():
                             matched = True
                             match_type = "alt_format2"
                             matching_date = alt_date_str2
-                        else:
-                            # Try adjusting by one day to account for timezone differences
-                            next_day = orig_date + pd.Timedelta(days=1)
-                            prev_day = orig_date - pd.Timedelta(days=1)
-                            
-                            next_day_str = next_day.strftime("%Y-%m-%d")
-                            prev_day_str = prev_day.strftime("%Y-%m-%d")
-                            
-                            if next_day_str in ema_dates_by_participant[participant]:
-                                matched = True
-                                match_type = "next_day"
-                                matching_date = next_day_str
-                            elif prev_day_str in ema_dates_by_participant[participant]:
-                                matched = True
-                                match_type = "prev_day"
-                                matching_date = prev_day_str
                     except Exception as e:
                         logging.debug(f"Error parsing date {date_str}: {e}")
                 
