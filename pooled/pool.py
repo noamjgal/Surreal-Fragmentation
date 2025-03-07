@@ -20,15 +20,24 @@ import warnings
 
 
 class PooledSTAIAnalysis:
-    def __init__(self, output_dir=None, debug=False):
+    def __init__(self, output_dir=None, debug=False, standardization_type='population'):
         """Initialize the pooled STAI analysis.
         
         Args:
             output_dir (str): Directory to save outputs
             debug (bool): Enable debug logging
+            standardization_type (str): Type of standardization to use ('participant' or 'population')
         """
-        # Hardcoded paths to data files
-        self.surreal_path = Path('pooled/data/ema_fragmentation_daily_demographics.csv')
+        # Set standardization type
+        self.standardization_type = standardization_type
+        
+        # Hardcoded paths to data files - will be adjusted based on standardization type
+        
+        if self.standardization_type == 'population':
+            self.surreal_path = Path('pooled/data/ema_fragmentation_demographics_population_norm.csv')
+        else:  # participant level
+            self.surreal_path = Path('pooled/data/ema_fragmentation_demographics_participant_norm.csv')
+            
         self.tlv_path = Path('pooled/data/combined_metrics.csv')
         
         # Set output directory relative to script location
@@ -92,7 +101,7 @@ class PooledSTAIAnalysis:
         log_dir.mkdir(parents=True, exist_ok=True)
         
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_file = log_dir / f'pooled_stai_analysis_{timestamp}.log'
+        log_file = log_dir / f'pooled_stai_analysis_{self.standardization_type}_{timestamp}.log'
         
         log_level = logging.DEBUG if self.debug else logging.INFO
         
@@ -105,7 +114,7 @@ class PooledSTAIAnalysis:
             ]
         )
         self.logger = logging.getLogger(__name__)
-        self.logger.info(f"Initializing pooled STAI analysis")
+        self.logger.info(f"Initializing pooled STAI analysis with {self.standardization_type} standardization")
         
         self.logger.info(f"SURREAL data: {self.surreal_path}")
         self.logger.info(f"TLV data: {self.tlv_path}")
@@ -212,10 +221,26 @@ class PooledSTAIAnalysis:
             anxiety_col = self.variable_mappings['tlv']['anxiety']
             df[self.variable_mappings['standardized']['anxiety_raw']] = df[anxiety_col]
             
-            # Z-standardize the anxiety score
-            df[self.variable_mappings['standardized']['anxiety']] = stats.zscore(
-                df[anxiety_col], nan_policy='omit'
-            )
+            # Z-standardize the anxiety score based on standardization type
+            if self.standardization_type == 'participant':
+                # Participant-level standardization (within each participant)
+                participant_groups = df.groupby('participant_id')[anxiety_col]
+                std_scores = []
+                
+                for participant_id, group in participant_groups:
+                    if len(group) > 1 and group.std() > 0:
+                        # Only standardize if we have >1 data point and std > 0
+                        std_scores.extend((group - group.mean()) / group.std())
+                    else:
+                        # If only one data point, set z-score to 0
+                        std_scores.extend([0] * len(group))
+                
+                df[self.variable_mappings['standardized']['anxiety']] = std_scores
+            else:
+                # Population-level standardization (across all participants)
+                df[self.variable_mappings['standardized']['anxiety']] = stats.zscore(
+                    df[anxiety_col], nan_policy='omit'
+                )
             
             # Extract happiness score if available and invert it for mood comparison
             # (higher happiness = lower depression, so we invert for consistency)
@@ -224,11 +249,26 @@ class PooledSTAIAnalysis:
                 # Store raw happiness score
                 df[self.variable_mappings['standardized']['mood_raw']] = df[happiness_col]
                 
-                # Z-standardize and invert happiness score to be comparable with depression
-                # Higher values = more negative mood
-                df[self.variable_mappings['standardized']['mood']] = -1 * stats.zscore(
-                    df[happiness_col], nan_policy='omit'
-                )
+                # Z-standardize and invert happiness score based on standardization type
+                if self.standardization_type == 'participant':
+                    # Participant-level standardization
+                    participant_groups = df.groupby('participant_id')[happiness_col]
+                    std_scores = []
+                    
+                    for participant_id, group in participant_groups:
+                        if len(group) > 1 and group.std() > 0:
+                            # Invert and standardize
+                            std_scores.extend(-1 * (group - group.mean()) / group.std())
+                        else:
+                            # If only one data point, set z-score to 0
+                            std_scores.extend([0] * len(group))
+                    
+                    df[self.variable_mappings['standardized']['mood']] = std_scores
+                else:
+                    # Population-level standardization
+                    df[self.variable_mappings['standardized']['mood']] = -1 * stats.zscore(
+                        df[happiness_col], nan_policy='omit'
+                    )
             
             # Extract gender and standardize
             if self.variable_mappings['tlv']['gender'] in df.columns:
@@ -438,7 +478,7 @@ class PooledSTAIAnalysis:
             self.logger.warning("No pooled data available to save")
             return
             
-        output_file = self.output_dir / 'pooled_stai_data.csv'
+        output_file = self.output_dir / f"pooled_stai_data_{self.standardization_type}.csv"
         self.pooled_data.to_csv(output_file, index=False)
         self.logger.info(f"Pooled data saved to {output_file}")
 
@@ -566,14 +606,6 @@ class PooledSTAIAnalysis:
             for col in frag_cols:
                 if self.pooled_data[col].notna().sum() > 10:
                     corr = self.pooled_data[[std_anxiety, col]].corr().iloc[0, 1]
-                    self.logger.info(f"  {std_anxiety} vs {col}: r = {corr:.3f}")
-                    
-                    # Check by dataset
-                    for dataset in self.pooled_data[std_dataset].unique():
-                        dataset_data = self.pooled_data[self.pooled_data[std_dataset] == dataset]
-                        if dataset_data[col].notna().sum() > 5:
-                            dataset_corr = dataset_data[[std_anxiety, col]].corr().iloc[0, 1]
-                            self.logger.info(f"    {dataset}: r = {dataset_corr:.3f}")
             
             # Check mood correlations if available
             if std_mood in self.pooled_data.columns:
@@ -730,7 +762,7 @@ class PooledSTAIAnalysis:
                 mood_std = ds_data[std_mood].std()
                 self.logger.info(f"  {dataset.upper()}: mean={mood_mean:.3f}, sd={mood_std:.3f}")
             
-            self.logger.info("\nOutput file: " + str(self.output_dir / "pooled_stai_data.csv"))
+            self.logger.info("\nOutput file: " + str(self.output_dir / f"pooled_stai_data_{self.standardization_type}.csv"))
             self.logger.info("="*50)
             
         except Exception as e:
@@ -738,45 +770,56 @@ class PooledSTAIAnalysis:
             if self.debug:
                 self.logger.exception("Detailed error:")
 
-    def run(self):
-        """Execute the full analysis pipeline."""
-        # Step 1: Merge datasets
-        self.merge_datasets()
+    def run_analysis(self):
+        """Run the main analysis and save outputs."""
+        # Merge datasets
+        pooled_data = self.merge_datasets()
         
-        # Step 2: Run quality checks
-        if hasattr(self, 'pooled_data') and self.pooled_data is not None:
-            self.run_quality_checks()
+        if pooled_data is None or pooled_data.empty:
+            self.logger.error("No pooled data available for analysis")
+            return None
             
-            # Step 3: Save pooled data
-            self.save_pooled_data()
-            
-            # Step 4: Print summary for reference
-            self.print_summary()
-            
-            return True
-        else:
-            self.logger.error("Failed to create pooled dataset, analysis halted")
-            return False
-
+        # Save the pooled data
+        output_file = self.output_dir / f"pooled_stai_data_{self.standardization_type}.csv"
+        pooled_data.to_csv(output_file, index=False)
+        self.logger.info(f"Saved pooled data to {output_file}")
+        
+        # Return the pooled data
+        return pooled_data
 
 def main():
-    """Main function to parse arguments and run the analysis."""
-    parser = argparse.ArgumentParser(description="Pooled STAI Analysis")
-    parser.add_argument("--output_dir", default="./results", help="Output directory for results")
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-    
+    """Main entry point for the script."""
+    parser = argparse.ArgumentParser(description='Pooled STAI Anxiety Analysis')
+    parser.add_argument('--output_dir', type=str, help='Output directory for results')
+    parser.add_argument('--debug', action='store_true', help='Enable debug logging')
     args = parser.parse_args()
     
-    # Initialize and run analysis
-    analysis = PooledSTAIAnalysis(
-        output_dir=args.output_dir,
-        debug=args.debug
-    )
+    # Run analysis for both standardization types
+    for std_type in ['participant', 'population']:
+        print(f"\n\n{'='*80}\nRunning {std_type}-level standardization analysis\n{'='*80}\n")
+        
+        analysis = PooledSTAIAnalysis(
+            output_dir=args.output_dir,
+            debug=args.debug,
+            standardization_type=std_type
+        )
+        
+        pooled_data = analysis.run_analysis()
+        
+        if pooled_data is not None:
+            print(f"Successfully created pooled dataset with {std_type}-level standardization")
+            print(f"Output saved to {analysis.output_dir}/pooled_stai_data_{std_type}.csv")
+        else:
+            print(f"Failed to create pooled dataset with {std_type}-level standardization")
     
-    success = analysis.run()
-    
-    return 0 if success else 1
-
+    print("\nAnalysis complete!")
 
 if __name__ == "__main__":
-    exit(main())
+    # Set pandas to show more columns
+    pd.set_option('display.max_columns', 100)
+    pd.set_option('display.width', 1000)
+    
+    # Ignore certain warnings
+    warnings.filterwarnings('ignore', category=pd.errors.SettingWithCopyWarning)
+    
+    main()
