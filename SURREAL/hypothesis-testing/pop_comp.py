@@ -12,6 +12,8 @@ from pathlib import Path
 from scipy import stats
 import logging
 from datetime import datetime
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 class SplitPopulationAnalysis:
     def __init__(self, debug=False):
@@ -186,42 +188,30 @@ class SplitPopulationAnalysis:
         return processed_df
     
     def run_analyses(self):
-        """Run t-tests and correlations separately."""
+        """Run t-tests and correlations separately, using appropriate datasets for each."""
         # Load both datasets
         population_df, participant_df = self.load_data()
         
-        if population_df is None and participant_df is None:
-            self.logger.error("Both datasets failed to load, cannot continue")
+        if population_df is None:
+            self.logger.error("Population dataset failed to load, cannot continue with t-tests")
             return False
         
-        # Preprocess data
+        if participant_df is None:
+            self.logger.error("Participant dataset failed to load, cannot continue with correlations")
+            return False
+        
+        # Preprocess both datasets
         population_df = self._preprocess_data(population_df)
         participant_df = self._preprocess_data(participant_df)
         
-        # Process population-normalized data
+        # Process population-normalized data for t-tests
         if population_df is not None:
-            self.logger.info("Running analyses on population-normalized data")
-            
-            # Run t-tests on population data
             self.logger.info("Running t-tests on population-normalized data")
             pop_ttests = self._run_ttests(population_df, "population")
             self.ttest_results.extend(pop_ttests)
-            
-            # Run correlations on population data
-            self.logger.info("Running correlations on population-normalized data")
-            pop_correlations = self._run_correlations(population_df, "population")
-            self.correlation_results.extend(pop_correlations)
         
-        # Process participant-normalized data
+        # Process participant-normalized data for correlations
         if participant_df is not None:
-            self.logger.info("Running analyses on participant-normalized data")
-            
-            # Run t-tests on participant data
-            self.logger.info("Running t-tests on participant-normalized data")
-            part_ttests = self._run_ttests(participant_df, "participant")
-            self.ttest_results.extend(part_ttests)
-            
-            # Run correlations on participant data
             self.logger.info("Running correlations on participant-normalized data")
             part_correlations = self._run_correlations(participant_df, "participant")
             self.correlation_results.extend(part_correlations)
@@ -251,12 +241,20 @@ class SplitPopulationAnalysis:
             self.mood_metrics
         )
         
+        # Use a prioritized and reduced set of demographic variables to avoid redundancy
+        # For each demographic concept, pick the best representation
+        prioritized_demographics = [
+            'gender_standardized',  # Use standardized version instead of 'Gender' and 'gender_code'
+            'location_type',        # Use clearer version instead of 'City.center'
+            'dataset_source'        # Keep this as is
+        ]
+        
         for outcome_var in all_metrics:
             if outcome_var not in df.columns:
                 self.logger.warning(f"Outcome variable {outcome_var} not found in dataset")
                 continue
-                
-            for demo_var in self.demographic_vars + ['age_group', 'location_type', 'gender_standardized', 'dataset_source']:
+            
+            for demo_var in prioritized_demographics:
                 if demo_var not in df.columns:
                     self.logger.warning(f"Demographic variable {demo_var} not found in dataset")
                     continue
@@ -289,51 +287,51 @@ class SplitPopulationAnalysis:
                         **self._extract_t_test_stats(result)
                     })
         
-        # 2. Median-split analyses for all continuous metric combinations
-        for metric1 in self.fragmentation_metrics + self.anxiety_metrics + self.mood_metrics:
-            for metric2 in self.fragmentation_metrics + self.anxiety_metrics + self.mood_metrics:
-                # Skip self-comparisons
-                if metric1 == metric2:
-                    continue
-                    
-                if metric1 not in df.columns or metric2 not in df.columns:
+        # 2. Median-split analyses for targeted combinations only
+        # Only compare fragmentation/episode/duration metrics with anxiety/mood metrics
+        behavioral_metrics = self.fragmentation_metrics + self.episode_metrics + self.duration_metrics
+        emotional_metrics = self.anxiety_metrics + self.mood_metrics
+        
+        # Only do splits in one direction to avoid duplication
+        # Use behavioral metrics as predictors, emotional metrics as outcomes
+        for predictor in behavioral_metrics:
+            for outcome in emotional_metrics:
+                if predictor == outcome or predictor not in df.columns or outcome not in df.columns:
                     continue
                 
                 # Create median-split group
                 temp_df = df.copy()
-                median_val = temp_df[metric2].median()
-                temp_df[f'{metric2}_group'] = temp_df[metric2].apply(
+                median_val = temp_df[predictor].median()
+                temp_df[f'{predictor}_group'] = temp_df[predictor].apply(
                     lambda x: 'high' if x > median_val else 'low' if pd.notna(x) else np.nan
                 )
                 
                 # Run t-test with median split
-                result = self._run_t_test_comparison(temp_df, metric1, f'{metric2}_group')
+                result = self._run_t_test_comparison(temp_df, outcome, f'{predictor}_group')
                 
                 if result:
                     # Determine categories
-                    if metric1 in self.anxiety_metrics:
+                    if outcome in self.anxiety_metrics:
                         dv_category = "anxiety"
-                    elif metric1 in self.mood_metrics:
+                    elif outcome in self.mood_metrics:
                         dv_category = "mood"
-                    elif metric1 in self.fragmentation_metrics:
-                        dv_category = "fragmentation"
                     else:
                         dv_category = "other"
                         
-                    if metric2 in self.anxiety_metrics:
-                        predictor_category = "anxiety"
-                    elif metric2 in self.mood_metrics:
-                        predictor_category = "mood"
-                    elif metric2 in self.fragmentation_metrics:
+                    if predictor in self.fragmentation_metrics:
                         predictor_category = "fragmentation"
+                    elif predictor in self.episode_metrics:
+                        predictor_category = "episode"
+                    elif predictor in self.duration_metrics:
+                        predictor_category = "duration"
                     else:
                         predictor_category = "other"
                     
                     results.append({
-                        'model_name': f"{normalization_type.capitalize()}: {metric1} ~ {metric2} (median split)",
-                        'dv': metric1,
+                        'model_name': f"{normalization_type.capitalize()}: {outcome} ~ {predictor} (median split)",
+                        'dv': outcome,
                         'dv_category': dv_category,
-                        'predictor': metric2,
+                        'predictor': predictor,
                         'predictor_category': predictor_category,
                         'normalization': normalization_type,
                         'test_type': 'median-split t-test',
@@ -354,61 +352,109 @@ class SplitPopulationAnalysis:
             list: Correlation results in tabular format
         """
         results = []
+        tested_pairs = set()  # Track which pairs we've already tested
         
-        # All correlation combinations
-        for var1 in self.fragmentation_metrics + self.episode_metrics + self.duration_metrics:
-            if var1 not in df.columns:
+        # 1. Correlations between fragmentation metrics and emotion metrics
+        for frag_var in self.fragmentation_metrics + self.episode_metrics + self.duration_metrics:
+            if frag_var not in df.columns:
                 continue
-                
-            for var2 in self.anxiety_metrics + self.mood_metrics:
-                if var2 not in df.columns:
+            
+            for emotion_var in self.anxiety_metrics + self.mood_metrics:
+                if emotion_var not in df.columns:
                     continue
                 
-                # Run the correlation for each combination
-                result = self._run_correlation_test(df, var1, var2)
+                # Create a unique pair identifier (alphabetically sorted)
+                pair_key = tuple(sorted([frag_var, emotion_var]))
+                
+                # Skip if we've already tested this pair
+                if pair_key in tested_pairs:
+                    continue
+                
+                # Mark pair as tested
+                tested_pairs.add(pair_key)
+                
+                # Run the correlation
+                result = self._run_correlation_test(df, frag_var, emotion_var)
                 
                 if result:
                     # Determine categories
-                    if var1 in self.fragmentation_metrics:
-                        var1_category = "fragmentation"
-                    elif var1 in self.episode_metrics:
-                        var1_category = "episode"
-                    elif var1 in self.duration_metrics:
-                        var1_category = "duration"
+                    if frag_var in self.fragmentation_metrics:
+                        frag_category = "fragmentation"
+                    elif frag_var in self.episode_metrics:
+                        frag_category = "episode"
+                    elif frag_var in self.duration_metrics:
+                        frag_category = "duration"
                     else:
-                        var1_category = "other"
+                        frag_category = "other"
                         
-                    if var2 in self.anxiety_metrics:
-                        var2_category = "anxiety"
-                    elif var2 in self.mood_metrics:
-                        var2_category = "mood"
+                    if emotion_var in self.anxiety_metrics:
+                        emotion_category = "anxiety"
+                    elif emotion_var in self.mood_metrics:
+                        emotion_category = "mood"
                     else:
-                        var2_category = "other"
+                        emotion_category = "other"
                     
                     results.append({
-                        'model_name': f"{normalization_type.capitalize()}: {var1} ~ {var2}",
-                        'var1': var1,
-                        'var1_category': var1_category,
-                        'var2': var2,
-                        'var2_category': var2_category,
+                        'model_name': f"{normalization_type.capitalize()}: {frag_var} ~ {emotion_var}",
+                        'var1': frag_var,
+                        'var1_category': frag_category,
+                        'var2': emotion_var,
+                        'var2_category': emotion_category,
                         'normalization': normalization_type,
                         'test_type': 'correlation',
                         'n': result.get('n', 0),
                         **self._extract_correlation_stats(result)
                     })
+        
+        # 2. Correlations between different types of fragmentation metrics (but not with their own components)
+        fragmentation_by_type = {
+            'digital': [var for var in self.fragmentation_metrics if 'digital' in var],
+            'mobility': [var for var in self.fragmentation_metrics if 'mobility' in var],
+            'overlap': [var for var in self.fragmentation_metrics if 'overlap' in var]
+        }
+        
+        # Only compare types in one direction to avoid duplication
+        # Sort the type keys to ensure consistent ordering
+        type_pairs = []
+        sorted_types = sorted(fragmentation_by_type.keys())
+        for i, type1 in enumerate(sorted_types):
+            for type2 in sorted_types[i+1:]:  # only compare with types that come later
+                type_pairs.append((type1, type2))
+        
+        # Process each type pair in only one direction
+        for type1, type2 in type_pairs:
+            vars1 = fragmentation_by_type[type1]
+            vars2 = fragmentation_by_type[type2]
+            
+            for var1 in vars1:
+                for var2 in vars2:
+                    if var1 not in df.columns or var2 not in df.columns:
+                        continue
                     
-                    # Also add reverse direction for convenience
-                    results.append({
-                        'model_name': f"{normalization_type.capitalize()}: {var2} ~ {var1}",
-                        'var1': var2,
-                        'var1_category': var2_category,
-                        'var2': var1,
-                        'var2_category': var1_category,
-                        'normalization': normalization_type,
-                        'test_type': 'correlation',
-                        'n': result.get('n', 0),
-                        **self._extract_correlation_stats(result)
-                    })
+                    # Create a unique pair identifier (already sorted by the type ordering)
+                    pair_key = tuple(sorted([var1, var2]))
+                    
+                    # Skip if we've already tested this pair
+                    if pair_key in tested_pairs:
+                        continue
+                    
+                    # Mark pair as tested
+                    tested_pairs.add(pair_key)
+                    
+                    result = self._run_correlation_test(df, var1, var2)
+                    
+                    if result:
+                        results.append({
+                            'model_name': f"{normalization_type.capitalize()}: {var1} ~ {var2}",
+                            'var1': var1,
+                            'var1_category': 'fragmentation',
+                            'var2': var2,
+                            'var2_category': 'fragmentation',
+                            'normalization': normalization_type,
+                            'test_type': 'correlation',
+                            'n': result.get('n', 0),
+                            **self._extract_correlation_stats(result)
+                        })
         
         return results
     
@@ -711,11 +757,76 @@ class SplitPopulationAnalysis:
                     top_corrs.to_excel(writer, sheet_name='Top Correlations', index=False)
             
             self.logger.info(f"Saved {len(corr_df)} correlation results to {corr_path}")
+            
+            # Generate and save correlation heatmap
+            self._create_correlation_heatmap(corr_df, timestamp)
         
         # Also create a summary file
         self._create_summary_file(timestamp)
         
         return True
+    
+    def _create_correlation_heatmap(self, corr_df, timestamp):
+        """Create heatmap of correlations between variables.
+        
+        Args:
+            corr_df (DataFrame): Correlation results dataframe
+            timestamp (str): Timestamp for file naming
+        """
+        if corr_df.empty:
+            self.logger.warning("Cannot create correlation heatmap: No correlation results")
+            return
+        
+        # Create a directory for plots if it doesn't exist
+        plot_dir = self.output_dir / 'plots'
+        plot_dir.mkdir(exist_ok=True, parents=True)
+
+        # Pivot the correlation data to create a matrix
+        try:
+            # Create pivot table with var1 as rows, var2 as columns, correlation as values
+            pivot_table = corr_df.pivot_table(
+                index='var1', 
+                columns='var2', 
+                values='correlation',
+                aggfunc='mean'  # If duplicates exist, take the mean
+            )
+            
+            # Fill NaN values with 0 to avoid visualization issues
+            corr_matrix = pivot_table.fillna(0)
+            
+            # Ensure all values are numeric
+            corr_matrix = corr_matrix.astype(float)
+            
+            # Create figure with larger size for readability
+            plt.figure(figsize=(20, 16))
+            
+            # Create heatmap
+            sns.heatmap(corr_matrix,
+                       annot=True,  # Show correlation values
+                       cmap='coolwarm',  # Blue-red color map
+                       vmin=-1, vmax=1,  # Correlation range
+                       fmt='.2f',  # Format as 2 decimal places
+                       linewidths=0.5,  # Add lines between cells
+                       annot_kws={"size": 14})  # Larger annotation font
+            
+            # Add title and adjust layout
+            plt.title('Correlation Matrix of Variables', fontsize=24)
+            plt.xticks(fontsize=14, rotation=45, ha='right')
+            plt.yticks(fontsize=14)
+            
+            # Save the figure
+            output_file = plot_dir / f'correlation_heatmap_{timestamp}.png'
+            plt.tight_layout()
+            plt.savefig(output_file, dpi=300)
+            plt.close()
+            
+            self.logger.info(f"Created correlation heatmap: {output_file}")
+            
+        except Exception as e:
+            self.logger.error(f"Error creating correlation heatmap: {str(e)}")
+            if self.debug:
+                import traceback
+                self.logger.error(traceback.format_exc())
     
     def _create_summary_file(self, timestamp):
         """Create a summary file with key findings"""
@@ -855,3 +966,4 @@ def main():
 
 if __name__ == "__main__":
     exit(main())
+
