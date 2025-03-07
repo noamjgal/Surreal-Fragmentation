@@ -49,11 +49,11 @@ sys.path.append(str(Path(__file__).parent.parent))
 from config.paths import GPS_PREP_DIR, EPISODE_OUTPUT_DIR, PROCESSED_DATA_DIR
 
 # Parameters
-STAYPOINT_DISTANCE_THRESHOLD = 50  # meters
-STAYPOINT_TIME_THRESHOLD = 5.0     # minutes
+STAYPOINT_DISTANCE_THRESHOLD = 75  # meters
+STAYPOINT_TIME_THRESHOLD = 3.0     # minutes
 STAYPOINT_GAP_THRESHOLD = 60.0     # minutes
-LOCATION_EPSILON = 100             # meters
-MIN_MOVEMENT_SPEED = 20            # meters per minute
+LOCATION_EPSILON = 150             # meters
+MIN_MOVEMENT_SPEED = 35            # meters per minute
 MAX_REASONABLE_SPEED = 2500        # meters per minute
 MIN_GPS_POINTS_PER_DAY = 5
 MAX_ACCEPTABLE_GAP_PERCENT = 60
@@ -340,21 +340,31 @@ class EpisodeProcessor:
             raise
     
     def process_digital_episodes(self, app_df: pd.DataFrame) -> Dict[datetime.date, pd.DataFrame]:
-        """Process digital episodes by day"""
+        """Process digital episodes by day focusing on system-level screen events"""
         episodes_by_day = {}
         
         if DIGITAL_USE_COL not in app_df.columns:
             self.logger.warning(f"Digital use column '{DIGITAL_USE_COL}' not found")
             return episodes_by_day
         
-        # Define screen event patterns
-        screen_on_values = ['SCREEN ON', 'screen_on', 'SCREEN_ON', 'on', 'ON', 'UNLOCK', 'unlock', 'STARTED', 'started']
-        screen_off_values = ['SCREEN OFF', 'screen_off', 'SCREEN_OFF', 'off', 'OFF', 'LOCK', 'lock', 'LOCK SCREEN', 'PAUSED', 'paused']
+        # Define screen event patterns - MODIFIED to focus on actual screen events
+        screen_on_values = ['SCREEN ON', 'screen_on', 'SCREEN_ON', 'on', 'ON']
+        screen_off_values = ['SCREEN OFF', 'screen_off', 'SCREEN_OFF', 'off', 'OFF']
         
         for date, day_data in app_df.groupby('date'):
-            # Filter to only include relevant events
+            # Filter to only include system-level screen events
             screen_events = day_data.sort_values('timestamp')
-            screen_events = screen_events[screen_events[DIGITAL_USE_COL].isin(screen_on_values + screen_off_values)].copy()
+            
+            # Add check for 'package name' column
+            if 'package name' in screen_events.columns:
+                # Only include Android system screen events
+                screen_events = screen_events[
+                    (screen_events['package name'] == 'android') & 
+                    (screen_events[DIGITAL_USE_COL].isin(screen_on_values + screen_off_values))
+                ].copy()
+            else:
+                # Fallback to just filtering by action when package name is not available
+                screen_events = screen_events[screen_events[DIGITAL_USE_COL].isin(screen_on_values + screen_off_values)].copy()
             
             if len(screen_events) == 0:
                 continue
@@ -370,8 +380,8 @@ class EpisodeProcessor:
             
             # Mark events to remove (ON followed by OFF within 3 seconds)
             remove_mask = (screen_events[DIGITAL_USE_COL] == 'SCREEN OFF') & \
-                         (screen_events['prev_action'] == 'SCREEN ON') & \
-                         (screen_events['time_diff'] < 3)
+                           (screen_events['prev_action'] == 'SCREEN ON') & \
+                           (screen_events['time_diff'] < 3)
             
             # Also mark the preceding ON events
             remove_indices = screen_events.index[remove_mask].tolist()
@@ -875,6 +885,18 @@ def main():
                 summary_logger.info(f"\nPROCESSING METHODS:")
                 for method, count in method_counts.items():
                     summary_logger.info(f"  {method}: {count} days ({round(100*count/len(valid_days), 1)}%)")
+            
+            # Episode count and duration statistics
+            summary_logger.info("\nEPISODE STATISTICS (Valid Days Only):")
+            for ep_type in ['digital', 'mobility', 'overlap']:
+                ep_count = valid_days[f'{ep_type}_episodes'].sum()
+                avg_count = valid_days[f'{ep_type}_episodes'].mean()
+                ep_duration = valid_days[f'{ep_type}_duration'].sum()
+                avg_duration = valid_days[f'{ep_type}_duration'].mean()
+                
+                summary_logger.info(f"  {ep_type.capitalize()} Episodes:")
+                summary_logger.info(f"    Total: {int(ep_count)} episodes ({round(ep_duration/60, 1)} hours)")
+                summary_logger.info(f"    Per Day: {round(avg_count, 1)} episodes ({round(avg_duration, 1)} minutes)")
 
 if __name__ == "__main__":
     main()
