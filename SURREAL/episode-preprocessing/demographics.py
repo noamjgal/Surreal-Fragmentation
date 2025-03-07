@@ -535,7 +535,13 @@ def main():
     
     # Hardcode file paths relative to SURREAL folder
     demographics_path = os.path.join(surreal_path, 'data', 'raw', 'participant_info.xlsx')
-    data_path = "/Volumes/Extreme SSD/SURREAL-DataBackup/HUJI_data-main/processed/daily_ema_fragmentation/combined_metrics.csv"
+    
+    # Define input paths for both normalization approaches
+    input_file_paths = {
+        "participant": "/Volumes/Extreme SSD/SURREAL-DataBackup/HUJI_data-main/processed/daily_ema_fragmentation/combined_metrics_participant_norm.csv",
+        "population": "/Volumes/Extreme SSD/SURREAL-DataBackup/HUJI_data-main/processed/daily_ema_fragmentation/combined_metrics_population_norm.csv"
+    }
+    
     output_dir = os.path.join(surreal_path, 'processed', 'merged_data')
     
     # Still allow command-line overrides for flexibility
@@ -545,7 +551,7 @@ def main():
                         help='Path to demographics Excel file')
     
     parser.add_argument('--ema_data', type=str, 
-                        default=data_path,
+                        default=input_file_paths["population"],  # Default to population norm
                         help='Path to daily EMA data CSV')
     
     parser.add_argument('--output_dir', type=str,
@@ -561,21 +567,41 @@ def main():
     
     logger.info("Starting demographic data merging process")
     
-    # Load demographics
+    # Load demographics only once
     demographics = load_demographics(args.demographics)
     
     if demographics.empty:
         logger.error("Failed to load demographics data - exiting")
         return
     
-    # Merge with daily EMA data
-    daily_ema_output_path = output_dir / 'ema_fragmentation_daily_demographics.csv'
-    if Path(args.ema_data).exists():
-        merged_ema = merge_demographics_with_data(args.ema_data, demographics, daily_ema_output_path)
-        if not merged_ema.empty:
-            logger.info("Successfully merged demographics with daily EMA data")
+    # Check if specific file was requested via command line
+    if args.ema_data != input_file_paths["population"]:
+        # A specific file was provided via command line
+        logger.info(f"Processing single file specified via command line: {args.ema_data}")
+        
+        if Path(args.ema_data).exists():
+            output_filename = f"ema_fragmentation_demographics_custom.csv"
+            output_path = output_dir / output_filename
+            merged_data = merge_demographics_with_data(args.ema_data, demographics, output_path)
+            if not merged_data.empty:
+                logger.info(f"Successfully merged demographics with custom data file")
+        else:
+            logger.warning(f"Specified data file not found: {args.ema_data}")
     else:
-        logger.warning(f"Daily EMA data file not found: {args.ema_data}")
+        # Process both normalization files
+        for norm_type, input_path in input_file_paths.items():
+            logger.info(f"\n{'='*40}\nProcessing {norm_type}-level normalized data\n{'='*40}")
+            
+            if Path(input_path).exists():
+                output_filename = f"ema_fragmentation_demographics_{norm_type}_norm.csv"
+                output_path = output_dir / output_filename
+                
+                merged_data = merge_demographics_with_data(input_path, demographics, output_path)
+                if not merged_data.empty:
+                    logger.info(f"Successfully merged demographics with {norm_type}-normalized data")
+                    logger.info(f"Output saved to: {output_path}")
+            else:
+                logger.warning(f"{norm_type.capitalize()}-normalized data file not found: {input_path}")
     
     logger.info("Demographic data merging completed")
 
