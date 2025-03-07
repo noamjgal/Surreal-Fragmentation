@@ -60,7 +60,7 @@ def setup_logging():
 
 def load_normalized_ema_data(normalized_dir):
     """Load all normalized EMA data and create daily averages."""
-    logging.info("Loading normalized EMA data...")
+    logging.info(f"Loading normalized EMA data from {normalized_dir}...")
     
     # Find all normalized participant files
     normalized_files = list(normalized_dir.glob("normalized_participant_*.csv"))
@@ -445,8 +445,9 @@ def main():
     print(log_location_message)
     
     try:
-        # Use config-based paths instead of hardcoded ones
-        ema_output_dir = Path("/Users/noamgal/DSProjects/Fragmentation/SURREAL/EMA-Processing/output/normalized")
+        # Define paths for both normalization approaches
+        participant_norm_dir = Path("/Users/noamgal/DSProjects/Fragmentation/SURREAL/EMA-Processing/output/normalized")
+        population_norm_dir = Path("/Users/noamgal/DSProjects/Fragmentation/SURREAL/EMA-Processing/output/normalized_population")
         
         # Fragmentation data from the daily_fragmentation.py output
         fragmentation_file = PROCESSED_DATA_DIR / "fragmentation" / "fragmentation_all_metrics.csv"
@@ -460,278 +461,276 @@ def main():
             logging.error("Please check if daily_fragmentation.py generated the file in the expected location")
             return  # Exit if file not found
         
-        # Load EMA data
-        logging.info(f"Loading EMA data from {ema_output_dir}")
-        daily_ema = load_normalized_ema_data(ema_output_dir)
+        # Output directory
+        output_dir = PROCESSED_DATA_DIR / "daily_ema_fragmentation"
+        output_dir.mkdir(parents=True, exist_ok=True)
         
-        if daily_ema is None or daily_ema.empty:
-            logging.error("Failed to load any valid EMA data. Check the EMA data path and file formats.")
-            return
-            
-        logging.info(f"Loaded {len(daily_ema)} daily EMA records")
-        
-        # Load fragmentation data
+        # Load fragmentation data (only need to do this once)
         frag_data = load_fragmentation_data(fragmentation_file)
         
         if frag_data is None or frag_data.empty:
             logging.error("Failed to load fragmentation data. Check the fragmentation file path.")
             return
-        
-        # Log column names to help debug
-        logging.info(f"Fragmentation data columns: {list(frag_data.columns)}")
-        
-        # Log sample date formats from both datasets
-        if 'date' in frag_data.columns:
-            logging.info(f"Fragmentation data date samples: {frag_data['date'].head(5).tolist()}")
-            logging.info(f"Fragmentation date type: {type(frag_data['date'].iloc[0])}")
-        
-        if 'date' in daily_ema.columns:
-            logging.info(f"EMA data date samples: {daily_ema['date'].head(5).tolist()}")
-            logging.info(f"EMA date type: {type(daily_ema['date'].iloc[0])}")
-        elif 'date_str' in daily_ema.columns:
-            logging.info(f"EMA data date_str samples: {daily_ema['date_str'].head(5).tolist()}")
-            logging.info(f"EMA date_str type: {type(daily_ema['date_str'].iloc[0])}")
             
-        logging.info(f"Loaded {len(frag_data)} fragmentation records")
-        
-        # Output path
-        output_dir = PROCESSED_DATA_DIR / "daily_ema_fragmentation"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Clean and standardize the data before merging
-        data_cleaner = DataCleaner()
-        
-        # Get unique participant IDs in EMA data
-        ema_participants = set(daily_ema['Participant_ID'].unique())
-        logging.info(f"Found {len(ema_participants)} unique participants in EMA data")
-        
-        # Track discard statistics
-        discard_stats = {
-            'total': len(frag_data),
-            'discarded': 0,
-            'no_participant': 0,
-            'no_date': 0,
-            'format_mismatch': 0,
-            'no_participant_examples': [],  # Store ALL examples, not just a few
-            'no_date_examples': [],         # Store ALL examples, not just a few
-            'format_mismatch_examples': [],  # New category for date format issues
-            'ema_participants': sorted(list(ema_participants))  # Store all participants for reference
-        }
-        
-        # Create a new dataframe to store matched records
-        matched_records = []
-        
-        # First, standardize participant IDs in both datasets
-        # Use the correct column name 'participant_id' instead of 'user'
-        frag_data['cleaned_user_id'] = frag_data['participant_id'].apply(data_cleaner.standardize_participant_id)
-        daily_ema['cleaned_participant_id'] = daily_ema['Participant_ID'].apply(data_cleaner.standardize_participant_id)
-        
-        # Create sets for efficient lookup
-        ema_participants_clean = set(daily_ema['cleaned_participant_id'].unique())
-        
-        # Create a lookup table for EMA dates by participant
-        ema_dates_by_participant = {}
-        for participant in ema_participants_clean:
-            participant_data = daily_ema[daily_ema['cleaned_participant_id'] == participant]
-            ema_dates_by_participant[participant] = sorted(participant_data['date_str'].unique().tolist())
-        
-        # Process each fragmentation record
-        logging.info("Processing fragmentation records...")
-        
-        for index, frag_row in frag_data.iterrows():
-            # Get the standardized participant ID
-            participant = frag_row['cleaned_user_id']
+        # Process both normalization approaches
+        for norm_type, norm_dir in [("participant", participant_norm_dir), ("population", population_norm_dir)]:
+            logging.info(f"\n{'='*40}\nProcessing {norm_type}-level normalized EMA data\n{'='*40}")
             
-            # Check if participant exists in EMA data
-            if participant not in ema_participants_clean:
-                discard_stats['no_participant'] += 1
-                discard_stats['discarded'] += 1
-                
-                # Store the full example
-                example = {
-                    'user_id': frag_row['participant_id'],
-                    'cleaned_user_id': participant,
-                    'date': frag_row['date']
-                }
-                
-                # Add fragmentation indices if available
-                if 'digital_fragmentation_index' in frag_row:
-                    example['digital_fragmentation_index'] = frag_row['digital_fragmentation_index']
-                if 'moving_fragmentation_index' in frag_row:
-                    example['mobility_fragmentation_index'] = frag_row['moving_fragmentation_index']
-                
-                discard_stats['no_participant_examples'].append(example)
-                continue
+            # Load EMA data for current normalization approach
+            logging.info(f"Loading EMA data from {norm_dir}")
+            daily_ema = load_normalized_ema_data(norm_dir)
             
-            # Get the original date string from fragmentation data
-            date_str = str(frag_row['date'])
-            
-            # Try direct match first
-            matched = False
-            if date_str in ema_dates_by_participant[participant]:
-                matched = True
-                match_type = "direct"
-                matching_date = date_str
-            else:
-                # Try alternative date format (swap day and month)
-                try:
-                    # Parse the date using pandas
-                    orig_date = pd.to_datetime(date_str)
-                    
-                    # Create alternative format by swapping day and month
-                    alt_date_str = f"{orig_date.year}-{orig_date.day:02d}-{orig_date.month:02d}"
-                    
-                    # Also try with dashes
-                    alt_date_str2 = f"{orig_date.year}-{orig_date.day:02d}-{orig_date.month:02d}"
-                    
-                    # Log for debugging
-                    logging.debug(f"Original date: {date_str}, Alternative: {alt_date_str}, Alternative 2: {alt_date_str2}")
-                    
-                    # Check if alternative format exists in EMA data
-                    if alt_date_str in ema_dates_by_participant[participant]:
-                        matched = True
-                        match_type = "alt_format"
-                        matching_date = alt_date_str
-                    elif alt_date_str2 in ema_dates_by_participant[participant]:
-                        matched = True
-                        match_type = "alt_format2"
-                        matching_date = alt_date_str2
-                    else:
-                        # Try adjusting by one day to account for timezone differences
-                        next_day = orig_date + pd.Timedelta(days=1)
-                        prev_day = orig_date - pd.Timedelta(days=1)
-                        
-                        next_day_str = next_day.strftime("%Y-%m-%d")
-                        prev_day_str = prev_day.strftime("%Y-%m-%d")
-                        
-                        if next_day_str in ema_dates_by_participant[participant]:
-                            matched = True
-                            match_type = "next_day"
-                            matching_date = next_day_str
-                        elif prev_day_str in ema_dates_by_participant[participant]:
-                            matched = True
-                            match_type = "prev_day"
-                            matching_date = prev_day_str
-                except Exception as e:
-                    logging.debug(f"Error parsing date {date_str}: {e}")
-            
-            if not matched:
-                discard_stats['no_date'] += 1
-                discard_stats['discarded'] += 1
-                
-                # Log the date format issue if parsing succeeded but matching failed
-                example = {
-                    'user_id': frag_row['participant_id'],
-                    'cleaned_user_id': participant,
-                    'date': date_str,
-                    'ema_available_dates': ema_dates_by_participant[participant]
-                }
-                
-                # Add fragmentation indices if available
-                if 'digital_fragmentation_index' in frag_row:
-                    example['digital_fragmentation_index'] = frag_row['digital_fragmentation_index']
-                if 'moving_fragmentation_index' in frag_row:
-                    example['mobility_fragmentation_index'] = frag_row['moving_fragmentation_index']
-                
-                discard_stats['no_date_examples'].append(example)
-                continue
-            
-            # If we reach here, we have a match
-            # Find the matching EMA record
-            ema_match = daily_ema[(daily_ema['cleaned_participant_id'] == participant) & 
-                                 (daily_ema['date_str'] == matching_date)]
-            
-            if len(ema_match) == 0:
-                # This shouldn't happen based on our checks, but just in case
-                logging.warning(f"Logic error: No EMA match found for participant {participant} on {matching_date}")
+            if daily_ema is None or daily_ema.empty:
+                logging.error(f"Failed to load valid {norm_type}-normalized EMA data. Skipping this approach.")
                 continue
                 
-            # Use the first matching record if multiple exist
-            ema_match = ema_match.iloc[0]
+            logging.info(f"Loaded {len(daily_ema)} daily {norm_type}-normalized EMA records")
             
-            # Create a matched record
-            matched_record = {
-                'user_id': frag_row['participant_id'],
-                'date': date_str,
-                'matching_date': matching_date,
-                'match_type': match_type,
-                'Participant_ID': ema_match['Participant_ID']
+            # Log column names to help debug
+            logging.info(f"Fragmentation data columns: {list(frag_data.columns)}")
+            
+            # Log sample date formats from both datasets
+            if 'date' in frag_data.columns:
+                logging.info(f"Fragmentation data date samples: {frag_data['date'].head(5).tolist()}")
+                logging.info(f"Fragmentation date type: {type(frag_data['date'].iloc[0])}")
+            
+            if 'date' in daily_ema.columns:
+                logging.info(f"EMA data date samples: {daily_ema['date'].head(5).tolist()}")
+                logging.info(f"EMA date type: {type(daily_ema['date'].iloc[0])}")
+            elif 'date_str' in daily_ema.columns:
+                logging.info(f"EMA data date_str samples: {daily_ema['date_str'].head(5).tolist()}")
+                logging.info(f"EMA date_str type: {type(daily_ema['date_str'].iloc[0])}")
+                
+            # Clean and standardize the data before merging
+            data_cleaner = DataCleaner()
+            
+            # Get unique participant IDs in EMA data
+            ema_participants = set(daily_ema['Participant_ID'].unique())
+            logging.info(f"Found {len(ema_participants)} unique participants in {norm_type}-normalized EMA data")
+            
+            # Track discard statistics
+            discard_stats = {
+                'total': len(frag_data),
+                'discarded': 0,
+                'no_participant': 0,
+                'no_date': 0,
+                'format_mismatch': 0,
+                'no_participant_examples': [],
+                'no_date_examples': [],
+                'format_mismatch_examples': [],
+                'ema_participants': sorted(list(ema_participants))
             }
             
-            # Copy all columns from fragmentation data
-            for col in frag_data.columns:
-                if col not in ['participant_id', 'date', 'cleaned_user_id']:
-                    matched_record[f'frag_{col}'] = frag_row[col]
+            # Create a new dataframe to store matched records
+            matched_records = []
             
-            # Copy relevant EMA data
-            for col in daily_ema.columns:
-                if col not in ['date', 'date_str', 'Participant_ID', 'cleaned_participant_id']:
-                    matched_record[f'ema_{col}'] = ema_match[col]
+            # First, standardize participant IDs in both datasets
+            frag_data['cleaned_user_id'] = frag_data['participant_id'].apply(data_cleaner.standardize_participant_id)
+            daily_ema['cleaned_participant_id'] = daily_ema['Participant_ID'].apply(data_cleaner.standardize_participant_id)
             
-            matched_records.append(matched_record)
-        
-        # Convert to dataframe
-        if matched_records:
-            combined_data = pd.DataFrame(matched_records)
-            logging.info(f"Created {len(combined_data)} matched records")
+            # Create sets for efficient lookup
+            ema_participants_clean = set(daily_ema['cleaned_participant_id'].unique())
             
-            # Log match types
-            match_type_counts = combined_data['match_type'].value_counts()
-            logging.info(f"Match types: {match_type_counts.to_dict()}")
+            # Create a lookup table for EMA dates by participant
+            ema_dates_by_participant = {}
+            for participant in ema_participants_clean:
+                participant_data = daily_ema[daily_ema['cleaned_participant_id'] == participant]
+                ema_dates_by_participant[participant] = sorted(participant_data['date_str'].unique().tolist())
             
-            # Save to CSV
-            output_file = output_dir / "combined_metrics.csv"
-            combined_data.to_csv(output_file, index=False)
-            logging.info(f"Saved combined data to {output_file}")
-        else:
-            logging.warning("No matches found! Could not create combined dataset.")
-        
-        # Log discard statistics
-        logging.info("\n" + "="*50)
-        logging.info("MATCH STATISTICS:")
-        logging.info(f"Total fragmentation records: {discard_stats['total']}")
-        logging.info(f"Successfully matched: {discard_stats['total'] - discard_stats['discarded']} ({100 - 100 * discard_stats['discarded'] / discard_stats['total']:.1f}%)")
-        logging.info(f"Discarded: {discard_stats['discarded']} ({100 * discard_stats['discarded'] / discard_stats['total']:.1f}%)")
-        
-        logging.info("\nDISCARD REASONS:")
-        if discard_stats['no_participant'] > 0:
-            logging.info(f"- No matching participant: {discard_stats['no_participant']} ({100 * discard_stats['no_participant'] / discard_stats['total']:.1f}%)")
-        if discard_stats['no_date'] > 0:
-            logging.info(f"- No matching date: {discard_stats['no_date']} ({100 * discard_stats['no_date'] / discard_stats['total']:.1f}%)")
-        
-        # Log detailed examples
-        if discard_stats['no_participant'] > 0 or discard_stats['no_date'] > 0:
-            logging.info("\nDETAILED MISMATCH REPORT:")
+            # Process each fragmentation record
+            logging.info(f"Processing fragmentation records for {norm_type}-normalized data...")
             
-            # Log participant mismatches (ALL of them)
-            if discard_stats['no_participant_examples']:
-                logging.info(f"\nALL PARTICIPANT MISMATCHES ({len(discard_stats['no_participant_examples'])} records):")
-                for i, example in enumerate(discard_stats['no_participant_examples']):
-                    logging.info(f"  {i+1}. Original ID: {example['user_id']}, Cleaned ID: {example['cleaned_user_id']}, Date: {example['date']}")
-                    if 'digital_fragmentation_index' in example:
-                        logging.info(f"     Digital Fragmentation: {example['digital_fragmentation_index']}")
-                    if 'mobility_fragmentation_index' in example:
-                        logging.info(f"     Mobility Fragmentation: {example['mobility_fragmentation_index']}")
-            
-            # Log date mismatches (ALL of them)
-            if discard_stats['no_date_examples']:
-                logging.info(f"\nALL DATE MISMATCHES ({len(discard_stats['no_date_examples'])} records):")
-                for i, example in enumerate(discard_stats['no_date_examples']):
-                    logging.info(f"  {i+1}. Participant: {example['user_id']} (Cleaned: {example['cleaned_user_id']}), Date: {example['date']}")
-                    logging.info(f"     Available EMA dates for this participant: {example['ema_available_dates']}")
+            for index, frag_row in frag_data.iterrows():
+                # Get the standardized participant ID
+                participant = frag_row['cleaned_user_id']
+                
+                # Check if participant exists in EMA data
+                if participant not in ema_participants_clean:
+                    discard_stats['no_participant'] += 1
+                    discard_stats['discarded'] += 1
                     
-                    if 'digital_fragmentation_index' in example:
-                        logging.info(f"     Digital Fragmentation: {example['digital_fragmentation_index']}")
-                    if 'mobility_fragmentation_index' in example:
-                        logging.info(f"     Mobility Fragmentation: {example['mobility_fragmentation_index']}")
+                    # Store the full example
+                    example = {
+                        'user_id': frag_row['participant_id'],
+                        'cleaned_user_id': participant,
+                        'date': frag_row['date']
+                    }
+                    
+                    # Add fragmentation indices if available
+                    if 'digital_fragmentation_index' in frag_row:
+                        example['digital_fragmentation_index'] = frag_row['digital_fragmentation_index']
+                    if 'moving_fragmentation_index' in frag_row:
+                        example['mobility_fragmentation_index'] = frag_row['moving_fragmentation_index']
+                    
+                    discard_stats['no_participant_examples'].append(example)
+                    continue
+                
+                # Get the original date string from fragmentation data
+                date_str = str(frag_row['date'])
+                
+                # Try direct match first
+                matched = False
+                if date_str in ema_dates_by_participant[participant]:
+                    matched = True
+                    match_type = "direct"
+                    matching_date = date_str
+                else:
+                    # Try alternative date format (swap day and month)
+                    try:
+                        # Parse the date using pandas
+                        orig_date = pd.to_datetime(date_str)
+                        
+                        # Create alternative format by swapping day and month
+                        alt_date_str = f"{orig_date.year}-{orig_date.day:02d}-{orig_date.month:02d}"
+                        
+                        # Also try with dashes
+                        alt_date_str2 = f"{orig_date.year}-{orig_date.day:02d}-{orig_date.month:02d}"
+                        
+                        # Log for debugging
+                        logging.debug(f"Original date: {date_str}, Alternative: {alt_date_str}, Alternative 2: {alt_date_str2}")
+                        
+                        # Check if alternative format exists in EMA data
+                        if alt_date_str in ema_dates_by_participant[participant]:
+                            matched = True
+                            match_type = "alt_format"
+                            matching_date = alt_date_str
+                        elif alt_date_str2 in ema_dates_by_participant[participant]:
+                            matched = True
+                            match_type = "alt_format2"
+                            matching_date = alt_date_str2
+                        else:
+                            # Try adjusting by one day to account for timezone differences
+                            next_day = orig_date + pd.Timedelta(days=1)
+                            prev_day = orig_date - pd.Timedelta(days=1)
+                            
+                            next_day_str = next_day.strftime("%Y-%m-%d")
+                            prev_day_str = prev_day.strftime("%Y-%m-%d")
+                            
+                            if next_day_str in ema_dates_by_participant[participant]:
+                                matched = True
+                                match_type = "next_day"
+                                matching_date = next_day_str
+                            elif prev_day_str in ema_dates_by_participant[participant]:
+                                matched = True
+                                match_type = "prev_day"
+                                matching_date = prev_day_str
+                    except Exception as e:
+                        logging.debug(f"Error parsing date {date_str}: {e}")
+                
+                if not matched:
+                    discard_stats['no_date'] += 1
+                    discard_stats['discarded'] += 1
+                    
+                    # Log the date format issue if parsing succeeded but matching failed
+                    example = {
+                        'user_id': frag_row['participant_id'],
+                        'cleaned_user_id': participant,
+                        'date': date_str,
+                        'ema_available_dates': ema_dates_by_participant[participant]
+                    }
+                    
+                    # Add fragmentation indices if available
+                    if 'digital_fragmentation_index' in frag_row:
+                        example['digital_fragmentation_index'] = frag_row['digital_fragmentation_index']
+                    if 'moving_fragmentation_index' in frag_row:
+                        example['mobility_fragmentation_index'] = frag_row['moving_fragmentation_index']
+                    
+                    discard_stats['no_date_examples'].append(example)
+                    continue
+                
+                # If we reach here, we have a match
+                # Find the matching EMA record
+                ema_match = daily_ema[(daily_ema['cleaned_participant_id'] == participant) & 
+                                     (daily_ema['date_str'] == matching_date)]
+                
+                if len(ema_match) == 0:
+                    # This shouldn't happen based on our checks, but just in case
+                    logging.warning(f"Logic error: No EMA match found for participant {participant} on {matching_date}")
+                    continue
+                    
+                # Use the first matching record if multiple exist
+                ema_match = ema_match.iloc[0]
+                
+                # Create a matched record
+                matched_record = {
+                    'user_id': frag_row['participant_id'],
+                    'date': date_str,
+                    'matching_date': matching_date,
+                    'match_type': match_type,
+                    'Participant_ID': ema_match['Participant_ID']
+                }
+                
+                # Copy all columns from fragmentation data
+                for col in frag_data.columns:
+                    if col not in ['participant_id', 'date', 'cleaned_user_id']:
+                        matched_record[f'frag_{col}'] = frag_row[col]
+                
+                # Copy relevant EMA data
+                for col in daily_ema.columns:
+                    if col not in ['date', 'date_str', 'Participant_ID', 'cleaned_participant_id']:
+                        matched_record[f'ema_{col}'] = ema_match[col]
+                
+                matched_records.append(matched_record)
             
-            # List all available EMA participants for reference
-            logging.info("\nALL AVAILABLE EMA PARTICIPANTS:")
-            for i, participant in enumerate(sorted(discard_stats['ema_participants'])):
-                logging.info(f"  {i+1}. {participant}")
-        
-        logging.info("\nNote: Records may be discarded for multiple reasons, so percentages may not sum to 100%")
-        logging.info("="*50)
+            # Convert to dataframe
+            if matched_records:
+                combined_data = pd.DataFrame(matched_records)
+                logging.info(f"Created {len(combined_data)} matched records for {norm_type}-normalized data")
+                
+                # Log match types
+                match_type_counts = combined_data['match_type'].value_counts()
+                logging.info(f"Match types: {match_type_counts.to_dict()}")
+                
+                # Save to CSV with normalization type in filename
+                output_file = output_dir / f"combined_metrics_{norm_type}_norm.csv"
+                combined_data.to_csv(output_file, index=False)
+                logging.info(f"Saved {norm_type}-normalized combined data to {output_file}")
+            else:
+                logging.warning(f"No matches found for {norm_type}-normalized data! Could not create combined dataset.")
+            
+            # Log discard statistics
+            logging.info(f"\n{'='*50}")
+            logging.info(f"MATCH STATISTICS FOR {norm_type.upper()}-NORMALIZED DATA:")
+            logging.info(f"Total fragmentation records: {discard_stats['total']}")
+            logging.info(f"Successfully matched: {discard_stats['total'] - discard_stats['discarded']} ({100 - 100 * discard_stats['discarded'] / discard_stats['total']:.1f}%)")
+            logging.info(f"Discarded: {discard_stats['discarded']} ({100 * discard_stats['discarded'] / discard_stats['total']:.1f}%)")
+            
+            logging.info("\nDISCARD REASONS:")
+            if discard_stats['no_participant'] > 0:
+                logging.info(f"- No matching participant: {discard_stats['no_participant']} ({100 * discard_stats['no_participant'] / discard_stats['total']:.1f}%)")
+            if discard_stats['no_date'] > 0:
+                logging.info(f"- No matching date: {discard_stats['no_date']} ({100 * discard_stats['no_date'] / discard_stats['total']:.1f}%)")
+            
+            # Log detailed examples
+            if discard_stats['no_participant'] > 0 or discard_stats['no_date'] > 0:
+                logging.info(f"\nDETAILED MISMATCH REPORT FOR {norm_type.upper()}-NORMALIZED DATA:")
+                
+                # Log participant mismatches
+                if discard_stats['no_participant_examples']:
+                    logging.info(f"\nALL PARTICIPANT MISMATCHES ({len(discard_stats['no_participant_examples'])} records):")
+                    for i, example in enumerate(discard_stats['no_participant_examples']):
+                        logging.info(f"  {i+1}. Original ID: {example['user_id']}, Cleaned ID: {example['cleaned_user_id']}, Date: {example['date']}")
+                        if 'digital_fragmentation_index' in example:
+                            logging.info(f"     Digital Fragmentation: {example['digital_fragmentation_index']}")
+                        if 'mobility_fragmentation_index' in example:
+                            logging.info(f"     Mobility Fragmentation: {example['mobility_fragmentation_index']}")
+                
+                # Log date mismatches
+                if discard_stats['no_date_examples']:
+                    logging.info(f"\nALL DATE MISMATCHES ({len(discard_stats['no_date_examples'])} records):")
+                    for i, example in enumerate(discard_stats['no_date_examples']):
+                        logging.info(f"  {i+1}. Participant: {example['user_id']} (Cleaned: {example['cleaned_user_id']}), Date: {example['date']}")
+                        logging.info(f"     Available EMA dates for this participant: {example['ema_available_dates']}")
+                        
+                        if 'digital_fragmentation_index' in example:
+                            logging.info(f"     Digital Fragmentation: {example['digital_fragmentation_index']}")
+                        if 'mobility_fragmentation_index' in example:
+                            logging.info(f"     Mobility Fragmentation: {example['mobility_fragmentation_index']}")
+                
+                # List all available EMA participants for reference
+                logging.info("\nALL AVAILABLE EMA PARTICIPANTS:")
+                for i, participant in enumerate(sorted(discard_stats['ema_participants'])):
+                    logging.info(f"  {i+1}. {participant}")
         
         # Remind about log file location at the end
         end_message = f"\n{'='*80}\nCOMPLETE DETAILED REPORT SAVED TO: {log_file.absolute()}\n{'='*80}\n"
