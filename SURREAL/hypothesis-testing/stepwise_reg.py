@@ -18,7 +18,7 @@ class FixedStepwiseRegression:
     def __init__(self, debug=False):
         """Initialize the stepwise regression analysis class with hardcoded paths."""
         # Hardcoded paths
-        self.participant_file = "/Users/noamgal/DSProjects/Fragmentation/SURREAL/processed/merged_data/ema_fragmentation_demographics_population_norm.csv"
+        self.participant_file = "/Users/noamgal/DSProjects/Fragmentation/SURREAL/processed/merged_data/ema_fragmentation_demographics_participant_norm.csv"
         self.output_dir = Path("SURREAL/results/regression_analysis")
         
         self.output_dir.mkdir(parents=True, exist_ok=True)

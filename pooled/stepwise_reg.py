@@ -24,8 +24,8 @@ class PooledStepwiseRegression:
             output_dir (str): Directory to save outputs
             debug (bool): Enable debug logging
         """
-        # Set paths for population-level standardized data
-        self.pooled_data_path = Path("pooled/processed/pooled_stai_data_population.csv")
+        # Set paths for participant-level standardized data
+        self.pooled_data_path = Path("pooled/processed/pooled_stai_data_participant.csv")
         
         # Set output directory
         if output_dir:
@@ -73,8 +73,8 @@ class PooledStepwiseRegression:
             ]
         )
         self.logger = logging.getLogger(__name__)
-        self.logger.info(f"Initializing pooled stepwise regression analysis with population-level standardization")
-        self.logger.info(f"Pooled data (population standardized): {self.pooled_data_path}")
+        self.logger.info(f"Initializing pooled stepwise regression analysis with participant-level standardization")
+        self.logger.info(f"Pooled data (participant standardized): {self.pooled_data_path}")
         self.logger.info(f"Output directory: {self.output_dir}")
 
     def load_data(self):
@@ -83,8 +83,8 @@ class PooledStepwiseRegression:
         Returns:
             DataFrame: Participant-normalized pooled dataset
         """
-        # Load population-normalized data
-        self.logger.info(f"Loading population-normalized pooled data from {self.pooled_data_path}")
+        # Load participant-normalized data
+        self.logger.info(f"Loading participant-normalized pooled data from {self.pooled_data_path}")
         try:
             df = pd.read_csv(self.pooled_data_path)
             self.logger.info(f"Pooled data loaded successfully with shape: {df.shape}")
