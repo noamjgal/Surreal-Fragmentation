@@ -18,7 +18,7 @@ class FixedStepwiseRegression:
     def __init__(self, debug=False):
         """Initialize the stepwise regression analysis class with hardcoded paths."""
         # Hardcoded paths
-        self.participant_file = "/Users/noamgal/DSProjects/Fragmentation/SURREAL/processed/merged_data/ema_fragmentation_demographics_participant_norm.csv"
+        self.participant_file = "/Users/noamgal/DSProjects/Fragmentation/SURREAL/processed/merged_data/ema_fragmentation_demographics_population_norm.csv"
         self.output_dir = Path("SURREAL/results/regression_analysis")
         
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -89,13 +89,31 @@ class FixedStepwiseRegression:
                 self.logger.info("Renamed 'City.center' to 'city_center' to avoid patsy formula issues")
             
             # Check for required columns
-            required_controls = ['is_weekend', 'Gender', 'city_center']
+            required_controls = ['Gender', 'city_center']
             missing_controls = [col for col in required_controls if col not in df.columns]
+            if missing_controls:
+                self.logger.error(f"Missing required control variables: {missing_controls}")
+                self.logger.error("Available columns: " + ", ".join(df.columns.tolist()))
             
-            if 'is_weekend' in missing_controls:
-                self.logger.warning("'is_weekend' not found in dataset. Creating dummy variable.")
-                # Create a dummy is_weekend variable (replace with actual logic if known)
-                df['is_weekend'] = False
+            # Log location distribution
+            if 'city_center' in df.columns:
+                location_counts = df['city_center'].value_counts()
+                self.logger.info(f"City center distribution:")
+                for location, count in location_counts.items():
+                    location_pct = 100 * count / len(df)
+                    self.logger.info(f"  {location}: {count} ({location_pct:.1f}%)")
+            
+            # Check fragmentation duration variables - but don't create defaults
+            for frag_type in ['digital', 'mobility', 'overlap']:
+                duration_var = f'frag_{frag_type}_total_duration'
+                if duration_var not in df.columns:
+                    self.logger.warning(f"{duration_var} not found - models will use only fragmentation metrics")
+                else:
+                    # Log statistics on duration variables
+                    valid_count = df[duration_var].notna().sum()
+                    self.logger.info(f"{duration_var} has {valid_count} valid values ({100*valid_count/len(df):.1f}%)")
+                    if valid_count > 0:
+                        self.logger.info(f"  Mean: {df[duration_var].mean():.2f}, Min: {df[duration_var].min():.2f}, Max: {df[duration_var].max():.2f}")
             
             return df
             
@@ -122,9 +140,21 @@ class FixedStepwiseRegression:
         self.logger.info(f"Running regression: {formula}")
         
         try:
-            # Extract all variables from formula
-            all_vars = formula.replace(f"{outcome_var} ~", "").split("+")
-            all_vars = [var.strip() for var in all_vars] + [outcome_var]
+            # Extract all variables from formula, but handle categorical variables correctly
+            all_vars = []
+            formula_parts = formula.replace(f"{outcome_var} ~", "").split("+")
+            
+            for part in formula_parts:
+                part = part.strip()
+                if part.startswith('C(') and part.endswith(')'):
+                    # Extract the variable name from C(variable_name)
+                    var_name = part[2:-1].strip()
+                    all_vars.append(var_name)
+                else:
+                    all_vars.append(part)
+            
+            # Add the outcome variable
+            all_vars.append(outcome_var)
             
             # Clean data for regression (remove missing values)
             regression_data = df[all_vars].dropna()
@@ -240,25 +270,47 @@ class FixedStepwiseRegression:
         else:  # overlap
             duration_var = 'frag_overlap_total_duration'
         
-        # Define the 4 steps with fixed control variables
-        steps = [
-            {
-                'name': f"Step 1: {frag_predictor}",
-                'formula': f"{outcome_var} ~ {frag_predictor}"
-            },
-            {
-                'name': f"Step 2: Added {duration_var}",
-                'formula': f"{outcome_var} ~ {frag_predictor} + {duration_var}"
-            },
-            {
-                'name': f"Step 3: Added is_weekend",
-                'formula': f"{outcome_var} ~ {frag_predictor} + {duration_var} + is_weekend"
-            },
-            {
-                'name': f"Step 4: Added Gender",
-                'formula': f"{outcome_var} ~ {frag_predictor} + {duration_var} + is_weekend + Gender"
-            }
-        ]
+        # Check if duration variable exists - if not, skip steps that use it
+        has_duration = duration_var in df.columns and df[duration_var].notna().sum() > 5
+        
+        # Define the steps - now using city_center instead of is_weekend
+        if has_duration:
+            # Define all steps including duration if available
+            steps = [
+                {
+                    'name': f"Step 1: {frag_predictor}",
+                    'formula': f"{outcome_var} ~ {frag_predictor}"
+                },
+                {
+                    'name': f"Step 2: Added {duration_var}",
+                    'formula': f"{outcome_var} ~ {frag_predictor} + {duration_var}"
+                },
+                {
+                    'name': f"Step 3: Added city_center",
+                    'formula': f"{outcome_var} ~ {frag_predictor} + {duration_var} + C(city_center)"
+                },
+                {
+                    'name': f"Step 4: Added Gender",
+                    'formula': f"{outcome_var} ~ {frag_predictor} + {duration_var} + C(city_center) + C(Gender)"
+                }
+            ]
+        else:
+            # Skip steps with duration if not available
+            self.logger.warning(f"{duration_var} not available - skipping duration control steps")
+            steps = [
+                {
+                    'name': f"Step 1: {frag_predictor}",
+                    'formula': f"{outcome_var} ~ {frag_predictor}"
+                },
+                {
+                    'name': f"Step 2: Added city_center",
+                    'formula': f"{outcome_var} ~ {frag_predictor} + C(city_center)"
+                },
+                {
+                    'name': f"Step 3: Added Gender",
+                    'formula': f"{outcome_var} ~ {frag_predictor} + C(city_center) + C(Gender)"
+                }
+            ]
         
         # Run each step
         results = []

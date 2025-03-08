@@ -25,7 +25,7 @@ class PooledStepwiseRegression:
             debug (bool): Enable debug logging
         """
         # Set paths for participant-level standardized data
-        self.pooled_data_path = Path("pooled/processed/pooled_stai_data_participant.csv")
+        self.pooled_data_path = Path("pooled/processed/pooled_stai_data_population.csv")
         
         # Set output directory
         if output_dir:
@@ -96,60 +96,86 @@ class PooledStepwiseRegression:
             self.outcome_variables = [var.replace('-', '_') for var in self.outcome_variables]
             self.fragmentation_predictors = [var.replace('-', '_') for var in self.fragmentation_predictors]
             
-            # Create is_weekend variable if it doesn't exist
-            if 'is_weekend' not in df.columns and 'date' in df.columns:
-                try:
-                    # Try to extract day of week from date column
-                    df['date'] = pd.to_datetime(df['date'])
-                    df['is_weekend'] = df['date'].dt.dayofweek >= 5  # 5=Saturday, 6=Sunday
-                    self.logger.info("Created 'is_weekend' variable from date column")
-                except:
-                    # If that fails, create a dummy is_weekend variable
-                    self.logger.warning("Could not extract weekend info from date. Creating dummy variable.")
-                    df['is_weekend'] = False
-            elif 'is_weekend' not in df.columns:
-                # Create a dummy is_weekend variable if date doesn't exist
-                self.logger.warning("'is_weekend' and 'date' not found in dataset. Creating dummy variable.")
-                df['is_weekend'] = False
+            # Check for required columns
+            required_vars = self.fragmentation_predictors + self.outcome_variables
+            missing_vars = [var for var in required_vars if var not in df.columns]
+            if missing_vars:
+                self.logger.error(f"Missing critical variables: {missing_vars}")
+                self.logger.error("Available columns: " + ", ".join(df.columns.tolist()))
+                return None
             
-            # Check for required control variables
-            required_controls = ['is_weekend', 'gender_standardized', 'location_type', 'dataset_source']
+            # Check for required control variables - using location_type
+            required_controls = ['location_type', 'gender_standardized', 'age_group']
             missing_controls = [col for col in required_controls if col not in df.columns]
             if missing_controls:
                 self.logger.warning(f"Missing control variables: {missing_controls}")
                 
-                # Create gender_standardized if missing but Gender exists
-                if 'gender_standardized' in missing_controls and 'Gender' in df.columns:
-                    df['gender_standardized'] = df['Gender'].apply(
-                        lambda x: 'female' if str(x).strip().lower() in ['f', 'female', 'נקבה'] 
-                        else 'male' if str(x).strip().lower() in ['m', 'male', 'זכר'] 
-                        else 'other'
-                    )
-                    self.logger.info("Created 'gender_standardized' from 'Gender'")
+                # Create gender_standardized if missing but Gender exists (transform, not generate)
+                if 'gender_standardized' not in df.columns:
+                    gender_cols = ['Gender', 'gender', 'sex']
+                    found_gender = False
+                    for gender_col in gender_cols:
+                        if gender_col in df.columns:
+                            df['gender_standardized'] = df[gender_col].apply(
+                                lambda x: 'female' if str(x).strip().lower() in ['f', 'female', 'נקבה'] 
+                                else 'male' if str(x).strip().lower() in ['m', 'male', 'זכר'] 
+                                else 'other'
+                            )
+                            self.logger.info(f"Created 'gender_standardized' from '{gender_col}'")
+                            found_gender = True
+                            break
+                    if not found_gender:
+                        self.logger.error("No gender column found for standardization")
                 
-                # Create location_type if missing but city_center exists
-                if 'location_type' in missing_controls and 'city_center' in df.columns:
-                    df['location_type'] = df['city_center'].apply(
-                        lambda x: 'city_center' if x == 'Yes' else 'suburb'
+                # Create location_type if missing but city_center exists (transform, not generate)
+                if 'location_type' not in df.columns:
+                    location_cols = ['city_center', 'City.center', 'location', 'School']
+                    found_location = False
+                    for location_col in location_cols:
+                        if location_col in df.columns:
+                            df['location_type'] = df[location_col].apply(
+                                lambda x: 'city_center' if str(x).strip().lower() in ['yes', 'center', 'city_center'] 
+                                else 'suburb'
+                            )
+                            self.logger.info(f"Created 'location_type' from '{location_col}'")
+                            found_location = True
+                            break
+                    if not found_location:
+                        self.logger.error("No location column found for standardization")
+                
+                # Create age_group if missing but can be inferred from dataset_source (transform, not generate)
+                if 'age_group' not in df.columns and 'dataset_source' in df.columns:
+                    df['age_group'] = df['dataset_source'].apply(
+                        lambda x: 'adult' if x == 'surreal' else 'adolescent'
                     )
-                    self.logger.info("Created 'location_type' from 'city_center'")
-                    
-                # Create dataset_source if missing but can be inferred from participant_id
-                if 'dataset_source' in missing_controls and 'participant_id' in df.columns:
-                    df['dataset_source'] = df['participant_id'].apply(
-                        lambda x: 'surreal' if str(x).lower().startswith('surreal') 
-                        else 'tlv' if str(x).lower().startswith('tlv') 
-                        else 'unknown'
-                    )
-                    self.logger.info("Created 'dataset_source' from participant ID patterns")
+                    self.logger.info("Created 'age_group' from dataset_source")
+                
+                # Check again after transformations
+                still_missing = [col for col in required_controls if col not in df.columns]
+                if still_missing:
+                    self.logger.error(f"Still missing required control variables after transformation: {still_missing}")
             
-            # Create duration variables if they don't exist
+            # Log location type distribution
+            if 'location_type' in df.columns:
+                location_counts = df['location_type'].value_counts()
+                self.logger.info(f"Location type distribution:")
+                for location, count in location_counts.items():
+                    location_pct = 100 * count / len(df)
+                    self.logger.info(f"  {location}: {count} ({location_pct:.1f}%)")
+            
+            # Check fragmentation duration variables - but don't create defaults
             for frag_type in ['digital', 'mobility', 'overlap']:
                 duration_var = f'{frag_type}_duration'
                 if duration_var not in df.columns:
-                    self.logger.warning(f"{duration_var} not found - creating dummy variable")
-                    df[duration_var] = 1.0  # Default value
-                    
+                    self.logger.warning(f"{duration_var} not found - models will use only fragmentation metrics")
+                    # Do NOT create synthetic duration variables with default values
+                else:
+                    # Log statistics on duration variables
+                    valid_count = df[duration_var].notna().sum()
+                    self.logger.info(f"{duration_var} has {valid_count} valid values ({100*valid_count/len(df):.1f}%)")
+                    if valid_count > 0:
+                        self.logger.info(f"  Mean: {df[duration_var].mean():.2f}, Min: {df[duration_var].min():.2f}, Max: {df[duration_var].max():.2f}")
+            
             return df
             
         except Exception as e:
@@ -298,47 +324,63 @@ class PooledStepwiseRegression:
         self.logger.info(f"Running 4-step regression for {outcome_var} with {frag_predictor}")
         
         # Determine which duration metric to use based on the fragmentation predictor
-        if 'digital' in frag_predictor:
-            duration_var = 'digital_duration'
-        elif 'mobility' in frag_predictor:
-            duration_var = 'mobility_duration'
-        else:  # overlap
-            duration_var = 'overlap_duration'
+        frag_type = frag_predictor.split('_')[0]  # Extract 'digital', 'mobility', or 'overlap'
+        duration_var = f'{frag_type}_duration'
         
-        # Define the 4 steps with fixed control variables
-        steps = [
-            {
-                'name': f"Step 1: {frag_predictor}",
-                'formula': f"{outcome_var} ~ {frag_predictor}"
-            },
-            {
-                'name': f"Step 2: Added {duration_var}",
-                'formula': f"{outcome_var} ~ {frag_predictor} + {duration_var}"
-            },
-            {
-                'name': f"Step 3: Added is_weekend",
-                'formula': f"{outcome_var} ~ {frag_predictor} + {duration_var} + is_weekend"
-            },
-            {
-                'name': f"Step 4: Added gender_standardized",
-                'formula': f"{outcome_var} ~ {frag_predictor} + {duration_var} + is_weekend + gender_standardized"
-            }
-        ]
+        # Check if duration variable exists - if not, skip steps that use it
+        has_duration = duration_var in df.columns and df[duration_var].notna().sum() > 5
         
-        # Optional 5th step - add dataset source
-        if 'dataset_source' in df.columns:
-            steps.append({
-                'name': f"Step 5: Added dataset_source",
-                'formula': f"{outcome_var} ~ {frag_predictor} + {duration_var} + is_weekend + gender_standardized + dataset_source"
-            })
+        # Define the steps
+        if has_duration:
+            # Define all steps including duration if available
+            steps = [
+                {
+                    'name': f"Step 1: {frag_predictor}",
+                    'formula': f"{outcome_var} ~ {frag_predictor}"
+                },
+                {
+                    'name': f"Step 2: Added {duration_var}",
+                    'formula': f"{outcome_var} ~ {frag_predictor} + {duration_var}"
+                },
+                {
+                    'name': f"Step 3: Added location_type",
+                    'formula': f"{outcome_var} ~ {frag_predictor} + {duration_var} + C(location_type)"
+                },
+                {
+                    'name': f"Step 4: Added gender_standardized",
+                    'formula': f"{outcome_var} ~ {frag_predictor} + {duration_var} + C(location_type) + C(gender_standardized)"
+                }
+            ]
+        else:
+            # Skip steps with duration if not available
+            self.logger.warning(f"{duration_var} not available - skipping duration control steps")
+            steps = [
+                {
+                    'name': f"Step 1: {frag_predictor}",
+                    'formula': f"{outcome_var} ~ {frag_predictor}"
+                },
+                {
+                    'name': f"Step 2: Added location_type",
+                    'formula': f"{outcome_var} ~ {frag_predictor} + C(location_type)"
+                },
+                {
+                    'name': f"Step 3: Added gender_standardized",
+                    'formula': f"{outcome_var} ~ {frag_predictor} + C(location_type) + C(gender_standardized)"
+                }
+            ]
         
-        # Optional 6th step - add age_group
+        # Optional final step - add age_group
         if 'age_group' in df.columns:
-            last_step = steps[-1]
-            steps.append({
-                'name': f"Step 6: Added age_group",
-                'formula': f"{last_step['formula']} + age_group"
-            })
+            if has_duration:
+                steps.append({
+                    'name': f"Step 5: Added age_group",
+                    'formula': f"{outcome_var} ~ {frag_predictor} + {duration_var} + C(location_type) + C(gender_standardized) + C(age_group)"
+                })
+            else:
+                steps.append({
+                    'name': f"Step 4: Added age_group",
+                    'formula': f"{outcome_var} ~ {frag_predictor} + C(location_type) + C(gender_standardized) + C(age_group)"
+                })
         
         # Run each step
         results = []
