@@ -18,7 +18,7 @@ class FixedStepwiseRegression:
     def __init__(self, debug=False):
         """Initialize the stepwise regression analysis class with hardcoded paths."""
         # Hardcoded paths
-        self.participant_file = "/Users/noamgal/DSProjects/Fragmentation/SURREAL/processed/merged_data/ema_fragmentation_demographics_participant_norm.csv"
+        self.participant_file = "/Users/noamgal/DSProjects/Fragmentation/SURREAL/processed/merged_data/ema_fragmentation_demographics_population_norm.csv"
         self.output_dir = Path("SURREAL/results/regression_analysis")
         
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -65,13 +65,13 @@ class FixedStepwiseRegression:
         self.logger.info(f"Output directory: {self.output_dir}")
 
     def load_data(self):
-        """Load participant-normalized data.
+        """Load population-normalized data.
         
         Returns:
             DataFrame: Participant-normalized dataset
         """
-        # Load participant-normalized data
-        self.logger.info(f"Loading participant-normalized data from {self.participant_file}")
+        # Load population-normalized data
+        self.logger.info(f"Loading population-normalized data from {self.participant_file}")
         try:
             df = pd.read_csv(self.participant_file)
             self.logger.info(f"Data loaded successfully with shape: {df.shape}")
