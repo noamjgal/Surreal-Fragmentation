@@ -25,3 +25,4 @@ SURREAL/data/
 *.joblib
 *.html
 *viz
+*media
