@@ -23,3 +23,5 @@ SURREAL/data/
 *.pkl
 *.h5
 *.joblib
+*.html
+*viz
