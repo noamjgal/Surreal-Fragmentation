@@ -536,11 +536,24 @@ def main():
     # Hardcode file paths relative to SURREAL folder
     demographics_path = os.path.join(surreal_path, 'data', 'raw', 'participant_info.xlsx')
     
-    # Define input paths for both normalization approaches
+    # Define input paths for all three normalization approaches
     input_file_paths = {
+        "unstandardized": os.path.join(surreal_path, 'processed', 'daily_ema_fragmentation_unstd', 'combined_metrics_raw.csv'),
+        "participant": os.path.join(surreal_path, 'processed', 'daily_ema_fragmentation', 'combined_metrics_participant_norm.csv'),
+        "population": os.path.join(surreal_path, 'processed', 'daily_ema_fragmentation', 'combined_metrics_population_norm.csv')
+    }
+    
+    # Also try backup locations if files don't exist
+    backup_paths = {
+        "unstandardized": "/Volumes/Extreme SSD/SURREAL-DataBackup/HUJI_data-main/processed/daily_ema_fragmentation_unstd/combined_metrics_raw.csv",
         "participant": "/Volumes/Extreme SSD/SURREAL-DataBackup/HUJI_data-main/processed/daily_ema_fragmentation/combined_metrics_participant_norm.csv",
         "population": "/Volumes/Extreme SSD/SURREAL-DataBackup/HUJI_data-main/processed/daily_ema_fragmentation/combined_metrics_population_norm.csv"
     }
+    
+    # Verify input files exist, use backup if needed
+    for norm_type in input_file_paths:
+        if not os.path.exists(input_file_paths[norm_type]) and os.path.exists(backup_paths[norm_type]):
+            input_file_paths[norm_type] = backup_paths[norm_type]
     
     output_dir = os.path.join(surreal_path, 'processed', 'merged_data')
     
@@ -551,12 +564,15 @@ def main():
                         help='Path to demographics Excel file')
     
     parser.add_argument('--ema_data', type=str, 
-                        default=input_file_paths["population"],  # Default to population norm
-                        help='Path to daily EMA data CSV')
+                        default=None,  # No default - will process all files if not specified
+                        help='Path to specific EMA data CSV to process (optional)')
     
     parser.add_argument('--output_dir', type=str,
                         default=output_dir,
                         help='Directory to save output files')
+    
+    parser.add_argument('--types', type=str, default="all",
+                        help='Types of normalization to process (comma-separated: unstandardized,participant,population or "all")')
     
     args = parser.parse_args()
     
@@ -574,34 +590,84 @@ def main():
         logger.error("Failed to load demographics data - exiting")
         return
     
+    # Determine which normalization types to process
+    if args.types.lower() == "all":
+        norm_types_to_process = list(input_file_paths.keys())
+    else:
+        norm_types_to_process = [t.strip() for t in args.types.split(",")]
+    
     # Check if specific file was requested via command line
-    if args.ema_data != input_file_paths["population"]:
+    if args.ema_data:
         # A specific file was provided via command line
         logger.info(f"Processing single file specified via command line: {args.ema_data}")
         
         if Path(args.ema_data).exists():
-            output_filename = f"ema_fragmentation_demographics_custom.csv"
+            # Try to determine the normalization type from the filename
+            file_name = os.path.basename(args.ema_data)
+            if "raw" in file_name:
+                norm_type = "unstandardized"
+            elif "participant" in file_name:
+                norm_type = "participant"
+            elif "population" in file_name:
+                norm_type = "population"
+            else:
+                norm_type = "custom"
+            
+            output_filename = f"ema_fragmentation_demographics_{norm_type}.csv"
             output_path = output_dir / output_filename
             merged_data = merge_demographics_with_data(args.ema_data, demographics, output_path)
+            
             if not merged_data.empty:
-                logger.info(f"Successfully merged demographics with custom data file")
+                logger.info(f"Successfully merged demographics with {norm_type} data file")
+                
+                # Print clear output path
+                output_absolute_path = output_path.absolute()
+                output_message = f"\n{'*'*80}\n{norm_type.upper()} OUTPUT WITH DEMOGRAPHICS SAVED TO:\n{output_absolute_path}\n{'*'*80}"
+                logger.info(output_message)
+                print(output_message)
         else:
             logger.warning(f"Specified data file not found: {args.ema_data}")
     else:
-        # Process both normalization files
-        for norm_type, input_path in input_file_paths.items():
-            logger.info(f"\n{'='*40}\nProcessing {norm_type}-level normalized data\n{'='*40}")
+        # Process all specified normalization types
+        successfully_processed = []
+        
+        for norm_type in norm_types_to_process:
+            if norm_type not in input_file_paths:
+                logger.warning(f"Unknown normalization type: {norm_type} - skipping")
+                continue
+                
+            input_path = input_file_paths[norm_type]
+            
+            logger.info(f"\n{'='*40}\nProcessing {norm_type} data\n{'='*40}")
             
             if Path(input_path).exists():
-                output_filename = f"ema_fragmentation_demographics_{norm_type}_norm.csv"
+                output_filename = f"ema_fragmentation_demographics_{norm_type}.csv"
                 output_path = output_dir / output_filename
                 
                 merged_data = merge_demographics_with_data(input_path, demographics, output_path)
+                
                 if not merged_data.empty:
-                    logger.info(f"Successfully merged demographics with {norm_type}-normalized data")
-                    logger.info(f"Output saved to: {output_path}")
+                    logger.info(f"Successfully merged demographics with {norm_type} data")
+                    successfully_processed.append((norm_type, output_path))
+                else:
+                    logger.warning(f"Failed to merge demographics with {norm_type} data - output may be empty")
             else:
-                logger.warning(f"{norm_type.capitalize()}-normalized data file not found: {input_path}")
+                logger.warning(f"{norm_type} data file not found: {input_path}")
+        
+        # Add a CLEAR summary about output files at the end
+        logger.info(f"\n{'#'*80}\nOUTPUT SUMMARY:")
+        
+        if successfully_processed:
+            for norm_type, file_path in successfully_processed:
+                logger.info(f"- {norm_type.upper()} OUTPUT WITH DEMOGRAPHICS: {file_path.absolute()}")
+                # Also print directly to terminal to ensure visibility
+                print(f"\n{'*'*80}\n{norm_type.upper()} OUTPUT WITH DEMOGRAPHICS SAVED TO:\n{file_path.absolute()}\n{'*'*80}")
+        else:
+            no_output_msg = "- NO OUTPUT FILES CREATED - No successful merges completed"
+            logger.info(no_output_msg)
+            print(f"\n{'*'*80}\n{no_output_msg}\n{'*'*80}")
+            
+        logger.info(f"{'#'*80}\n")
     
     logger.info("Demographic data merging completed")
 
