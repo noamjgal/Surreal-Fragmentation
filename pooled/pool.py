@@ -34,9 +34,9 @@ class PooledSTAIAnalysis:
         # Hardcoded paths to data files - will be adjusted based on standardization type
         
         if self.standardization_type == 'population':
-            self.surreal_path = Path('pooled/data/ema_fragmentation_demographics_population_norm.csv')
+            self.surreal_path = Path('pooled/data/ema_fragmentation_demographics_population.csv')
         else:  # participant level
-            self.surreal_path = Path('pooled/data/ema_fragmentation_demographics_participant_norm.csv')
+            self.surreal_path = Path('pooled/data/ema_fragmentation_demographics_participant.csv')
             
         self.tlv_path = Path('pooled/data/combined_metrics.csv')
         
