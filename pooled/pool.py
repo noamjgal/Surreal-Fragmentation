@@ -338,7 +338,7 @@ class PooledSTAIAnalysis:
             self.logger.info(f"    Std: {df[std_anxiety_raw].std():.2f}")
             self.logger.info(f"    Min: {df[std_anxiety_raw].min():.2f}")
             self.logger.info(f"    Max: {df[std_anxiety_raw].max():.2f}")
-            
+        
         # Log mood score summary if available
         if std_mood in df.columns and df[std_mood].notna().sum() > 0:
             n_valid_mood = df[std_mood].notna().sum()
@@ -349,19 +349,31 @@ class PooledSTAIAnalysis:
             self.logger.info(f"    Min: {df[std_mood].min():.2f}")
             self.logger.info(f"    Max: {df[std_mood].max():.2f}")
         
-        # Log demographic summaries
+        # Log demographic summaries at observation level
         if std_gender in df.columns:
             gender_counts = df[std_gender].value_counts()
-            self.logger.info(f"  Gender distribution:")
+            self.logger.info(f"  Gender distribution (observations):")
             for gender, count in gender_counts.items():
                 self.logger.info(f"    {gender}: {count} ({count/n_observations:.1%})")
-                
+        
+            # Add participant-level gender counts
+            gender_participant_counts = df.groupby(std_gender)[std_id].nunique()
+            self.logger.info(f"  Gender distribution (participants):")
+            for gender, count in gender_participant_counts.items():
+                self.logger.info(f"    {gender}: {count} ({count/n_participants:.1%})")
+            
         if std_location in df.columns:
             location_counts = df[std_location].value_counts()
-            self.logger.info(f"  Location distribution:")
+            self.logger.info(f"  Location distribution (observations):")
             for location, count in location_counts.items():
                 self.logger.info(f"    {location}: {count} ({count/n_observations:.1%})")
             
+            # Add participant-level location counts
+            location_participant_counts = df.groupby(std_location)[std_id].nunique()
+            self.logger.info(f"  Location distribution (participants):")
+            for location, count in location_participant_counts.items():
+                self.logger.info(f"    {location}: {count} ({count/n_participants:.1%})")
+        
         # Log average observations per participant
         obs_per_participant = df.groupby(std_id).size()
         self.logger.info(f"  Observations per participant:")
@@ -717,19 +729,33 @@ class PooledSTAIAnalysis:
                 ds_obs_pct = 100 * ds_obs / total_obs
                 self.logger.info(f"  {dataset.upper()}: {ds_obs} obs ({ds_obs_pct:.1f}%), {ds_participants} participants")
             
-            # Gender distribution
-            self.logger.info("\nGENDER DISTRIBUTION:")
+            # Gender distribution - observations
+            self.logger.info("\nGENDER DISTRIBUTION (OBSERVATIONS):")
             genders = self.pooled_data[std_gender].value_counts()
             for gender, count in genders.items():
                 gender_pct = 100 * count / total_obs
                 self.logger.info(f"  {gender.upper()}: {count} obs ({gender_pct:.1f}%)")
             
-            # Location distribution
-            self.logger.info("\nLOCATION DISTRIBUTION:")
+            # Gender distribution - participants
+            self.logger.info("\nGENDER DISTRIBUTION (PARTICIPANTS):")
+            gender_participants = self.pooled_data.groupby(std_gender)[std_id].nunique()
+            for gender, count in gender_participants.items():
+                gender_pct = 100 * count / total_participants
+                self.logger.info(f"  {gender.upper()}: {count} participants ({gender_pct:.1f}%)")
+            
+            # Location distribution - observations
+            self.logger.info("\nLOCATION DISTRIBUTION (OBSERVATIONS):")
             locations = self.pooled_data[std_location].value_counts()
             for location, count in locations.items():
                 location_pct = 100 * count / total_obs
                 self.logger.info(f"  {location.upper()}: {count} obs ({location_pct:.1f}%)")
+            
+            # Location distribution - participants
+            self.logger.info("\nLOCATION DISTRIBUTION (PARTICIPANTS):")
+            location_participants = self.pooled_data.groupby(std_location)[std_id].nunique()
+            for location, count in location_participants.items():
+                location_pct = 100 * count / total_participants
+                self.logger.info(f"  {location.upper()}: {count} participants ({location_pct:.1f}%)")
             
             # Age group distribution
             self.logger.info("\nAGE GROUP DISTRIBUTION:")
