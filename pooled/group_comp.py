@@ -51,9 +51,9 @@ class PooledGroupAnalysis:
             'overlap_duration'
         ]
         
-        # Define emotion metrics
-        self.anxiety_metrics = ['anxiety_score_std', 'anxiety_score_raw']
-        self.mood_metrics = ['mood_score_std', 'mood_score_raw']
+        # Define emotion metrics - updated to only use standardized scores
+        self.anxiety_metrics = ['anxiety_score_std']  # Only standardized anxiety score
+        self.mood_metrics = ['mood_score_std']        # Only standardized mood/depression score
         
         # Define demographic variables
         self.demographic_vars = [

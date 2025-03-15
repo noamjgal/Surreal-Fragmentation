@@ -46,12 +46,10 @@ class PooledStepwiseRegression:
             'overlap_fragmentation'
         ]
         
-        # Define outcome variables - updated for pooled dataset
+        # Define outcome variables - updated to only use standardized scores
         self.outcome_variables = [
             'anxiety_score_std',   # Standardized anxiety score
-            'anxiety_score_raw',   # Raw anxiety score
-            'mood_score_std',      # Standardized mood/depression score
-            'mood_score_raw'       # Raw mood/depression score
+            'mood_score_std'       # Standardized mood/depression score
         ]
         
     def _setup_logging(self):
