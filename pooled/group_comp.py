@@ -63,7 +63,15 @@ class PooledGroupAnalysis:
             'dataset_source'        # surreal/tlv
         ]
         
-        # Results containers
+        # Define subset analyses to run
+        self.subsets = [
+            {'name': 'tlv', 'filter_column': 'dataset_source', 'filter_value': 'tlv'},
+            {'name': 'surreal', 'filter_column': 'dataset_source', 'filter_value': 'surreal'},
+            {'name': 'adults', 'filter_column': 'age_group', 'filter_value': 'adult'},
+            {'name': 'adolescents', 'filter_column': 'age_group', 'filter_value': 'adolescent'}
+        ]
+        
+        # Results containers - now with subset tracking
         self.ttest_results = []
         self.correlation_results = []
         
@@ -127,23 +135,63 @@ class PooledGroupAnalysis:
             self.logger.error("Participant dataset failed to load, cannot continue with correlations")
             return False
         
+        # First run analyses on the full pooled dataset
+        self.logger.info("Running analyses on complete pooled dataset")
+        
         # Process population-normalized data for t-tests
         if population_df is not None:
             self.logger.info("Running t-tests on population-normalized data")
-            pop_ttests = self._run_ttests(population_df)
+            pop_ttests = self._run_ttests(population_df, subset_name="pooled")
             self.ttest_results.extend(pop_ttests)
         
         # Process participant-normalized data for correlations
         if participant_df is not None:
             self.logger.info("Running correlations on participant-normalized data")
-            part_correlations = self._run_correlations(participant_df)
+            part_correlations = self._run_correlations(participant_df, subset_name="pooled")
             self.correlation_results.extend(part_correlations)
+        
+        # Now run analyses on each subset
+        for subset in self.subsets:
+            subset_name = subset['name']
+            filter_column = subset['filter_column']
+            filter_value = subset['filter_value']
+            
+            self.logger.info(f"Running analyses on {subset_name} subset")
+            
+            # Filter datasets for the current subset
+            if population_df is not None:
+                if filter_column in population_df.columns:
+                    subset_pop_df = population_df[population_df[filter_column] == filter_value].copy()
+                    self.logger.info(f"Filtered population dataset for {subset_name}: {len(subset_pop_df)} rows")
+                    
+                    if len(subset_pop_df) >= 10:  # Minimum sample size for meaningful analysis
+                        self.logger.info(f"Running t-tests on {subset_name} population-normalized data")
+                        subset_ttests = self._run_ttests(subset_pop_df, subset_name=subset_name)
+                        self.ttest_results.extend(subset_ttests)
+                    else:
+                        self.logger.warning(f"Insufficient data in {subset_name} population subset ({len(subset_pop_df)} rows)")
+                else:
+                    self.logger.warning(f"Filter column {filter_column} not found in population dataset")
+            
+            if participant_df is not None:
+                if filter_column in participant_df.columns:
+                    subset_part_df = participant_df[participant_df[filter_column] == filter_value].copy()
+                    self.logger.info(f"Filtered participant dataset for {subset_name}: {len(subset_part_df)} rows")
+                    
+                    if len(subset_part_df) >= 10:  # Minimum sample size for meaningful analysis
+                        self.logger.info(f"Running correlations on {subset_name} participant-normalized data")
+                        subset_correlations = self._run_correlations(subset_part_df, subset_name=subset_name)
+                        self.correlation_results.extend(subset_correlations)
+                    else:
+                        self.logger.warning(f"Insufficient data in {subset_name} participant subset ({len(subset_part_df)} rows)")
+                else:
+                    self.logger.warning(f"Filter column {filter_column} not found in participant dataset")
         
         self.logger.info(f"Completed all analyses. Generated {len(self.ttest_results)} t-test results and {len(self.correlation_results)} correlation results.")
         
         return True
     
-    def _run_ttests(self, df):
+    def _run_ttests(self, df, subset_name="pooled"):
         """Run t-test comparisons on population-normalized data."""
         results = []
         
@@ -156,8 +204,24 @@ class PooledGroupAnalysis:
             self.mood_metrics
         )
         
-        # Focus on key demographic comparisons, including age_group
-        key_demographics = ['age_group', 'gender_standardized', 'location_type']
+        # Focus on key demographic comparisons
+        key_demographics = ['gender_standardized', 'location_type']
+        
+        # For subset-specific analyses, adjust the demographics list
+        if subset_name == "tlv" or subset_name == "surreal":
+            # Don't include dataset_source when already filtering by it
+            if 'age_group' not in key_demographics:
+                key_demographics.append('age_group')
+        elif subset_name == "adults" or subset_name == "adolescents":
+            # Don't include age_group when already filtering by it
+            if 'dataset_source' not in key_demographics:
+                key_demographics.append('dataset_source')
+        else:
+            # For pooled analysis, include both age_group and dataset_source
+            if 'age_group' not in key_demographics:
+                key_demographics.append('age_group')
+            if 'dataset_source' not in key_demographics:
+                key_demographics.append('dataset_source')
         
         # 1. Compare emotional and fragmentation metrics across demographic groups
         for outcome_var in all_metrics:
@@ -175,13 +239,14 @@ class PooledGroupAnalysis:
                     
                     # Add to results
                     results.append({
-                        'model_name': f"Population: {outcome_var} ~ {demo_var}",
+                        'model_name': f"{subset_name.capitalize()}: {outcome_var} ~ {demo_var}",
                         'dv': outcome_var,
                         'dv_category': outcome_category,
                         'predictor': demo_var,
                         'predictor_category': 'demographic',
                         'normalization': 'population',
                         'test_type': 't-test',
+                        'subset': subset_name,
                         'n_obs': result.get('total_n', 0),
                         **self._extract_t_test_stats(result)
                     })
@@ -213,20 +278,21 @@ class PooledGroupAnalysis:
                     predictor_category = 'fragmentation'
                     
                     results.append({
-                        'model_name': f"Population: {outcome} ~ {predictor} (median split)",
+                        'model_name': f"{subset_name.capitalize()}: {outcome} ~ {predictor} (median split)",
                         'dv': outcome,
                         'dv_category': dv_category,
                         'predictor': predictor,
                         'predictor_category': predictor_category,
                         'normalization': 'population',
                         'test_type': 'median-split t-test',
+                        'subset': subset_name,
                         'n_obs': result.get('total_n', 0),
                         **self._extract_t_test_stats(result)
                     })
         
         return results
     
-    def _run_correlations(self, df):
+    def _run_correlations(self, df, subset_name="pooled"):
         """Run correlation analyses on participant-normalized data."""
         results = []
         tested_pairs = set()  # Track which pairs we've already tested
@@ -256,13 +322,14 @@ class PooledGroupAnalysis:
                     emotion_category = 'anxiety' if 'anxiety' in emotion_var else 'mood'
                     
                     results.append({
-                        'model_name': f"Participant: {frag_var} ~ {emotion_var}",
+                        'model_name': f"{subset_name.capitalize()}: {frag_var} ~ {emotion_var}",
                         'var1': frag_var,
                         'var1_category': frag_category,
                         'var2': emotion_var,
                         'var2_category': emotion_category,
                         'normalization': 'participant',
                         'test_type': 'correlation',
+                        'subset': subset_name,
                         'n': result.get('n', 0),
                         **self._extract_correlation_stats(result)
                     })
@@ -288,13 +355,14 @@ class PooledGroupAnalysis:
             
             if result:
                 results.append({
-                    'model_name': f"Participant: {var1} ~ {var2}",
+                    'model_name': f"{subset_name.capitalize()}: {var1} ~ {var2}",
                     'var1': var1,
                     'var1_category': 'fragmentation',
                     'var2': var2,
                     'var2_category': 'fragmentation',
                     'normalization': 'participant',
                     'test_type': 'correlation',
+                    'subset': subset_name,
                     'n': result.get('n', 0),
                     **self._extract_correlation_stats(result)
                 })
@@ -508,6 +576,13 @@ class PooledGroupAnalysis:
                 # All results
                 ttest_df.to_excel(writer, sheet_name='All T-Tests', index=False)
                 
+                # Filter by subsets
+                for subset in ['pooled'] + [s['name'] for s in self.subsets]:
+                    subset_data = ttest_df[ttest_df['subset'] == subset]
+                    if not subset_data.empty:
+                        sheet_name = f'{subset.capitalize()} Tests'
+                        subset_data.to_excel(writer, sheet_name=sheet_name, index=False)
+                
                 # By outcome category
                 for category in sorted(ttest_df['dv_category'].unique()):
                     cat_subset = ttest_df[ttest_df['dv_category'] == category]
@@ -546,6 +621,13 @@ class PooledGroupAnalysis:
                 # All results
                 corr_df.to_excel(writer, sheet_name='All Correlations', index=False)
                 
+                # Filter by subsets
+                for subset in ['pooled'] + [s['name'] for s in self.subsets]:
+                    subset_data = corr_df[corr_df['subset'] == subset]
+                    if not subset_data.empty:
+                        sheet_name = f'{subset.capitalize()} Correlations'
+                        subset_data.to_excel(writer, sheet_name=sheet_name, index=False)
+                
                 # By variable category combinations
                 var_combinations = []
                 for var1_cat in sorted(corr_df['var1_category'].unique()):
@@ -582,113 +664,89 @@ class PooledGroupAnalysis:
         """Create a summary file with key findings"""
         summary_data = []
         
-        # T-test summary
-        if self.ttest_results:
-            ttest_df = pd.DataFrame(self.ttest_results)
-            total_ttests = len(ttest_df)
-            sig_ttests = len(ttest_df[ttest_df['p_value'] < 0.05])
-            sig_percent = sig_ttests / total_ttests * 100 if total_ttests > 0 else 0
-            
+        # For each subset, create a summary section
+        for subset in ['pooled'] + [s['name'] for s in self.subsets]:
+            # Add a separator row
             summary_data.append({
-                'Analysis Type': 'T-tests (population)',
-                'Total Count': total_ttests,
-                'Significant Count': sig_ttests,
-                'Significant %': f"{sig_percent:.1f}%",
-                'Notes': 'Group comparisons'
+                'Analysis Type': f"--- {subset.upper()} SUBSET SUMMARY ---",
+                'Total Count': "",
+                'Significant Count': "",
+                'Significant %': "",
+                'Notes': ""
             })
             
-            # Adult vs adolescent comparisons
-            age_tests = ttest_df[ttest_df['predictor'] == 'age_group']
-            age_total = len(age_tests)
-            age_sig = len(age_tests[age_tests['p_value'] < 0.05])
-            age_percent = age_sig / age_total * 100 if age_total > 0 else 0
-            
-            summary_data.append({
-                'Analysis Type': 'Adult vs Adolescent',
-                'Total Count': age_total,
-                'Significant Count': age_sig,
-                'Significant %': f"{age_percent:.1f}%",
-                'Notes': 'Age group comparisons'
-            })
-            
-            # Breakdown by outcome category
-            for category in sorted(ttest_df['dv_category'].unique()):
-                cat_subset = ttest_df[ttest_df['dv_category'] == category]
-                cat_total = len(cat_subset)
-                cat_sig = len(cat_subset[cat_subset['p_value'] < 0.05])
-                cat_percent = cat_sig / cat_total * 100 if cat_total > 0 else 0
+            # T-test summary for this subset
+            if self.ttest_results:
+                ttest_df = pd.DataFrame(self.ttest_results)
+                subset_ttests = ttest_df[ttest_df['subset'] == subset]
                 
-                summary_data.append({
-                    'Analysis Type': f'T-tests ({category})',
-                    'Total Count': cat_total,
-                    'Significant Count': cat_sig,
-                    'Significant %': f"{cat_percent:.1f}%",
-                    'Notes': ''
-                })
-            
-            # Top t-test effects
-            top_ttests = ttest_df.sort_values(by='effect_size', ascending=False).head(5)
-            for i, row in top_ttests.iterrows():
-                summary_data.append({
-                    'Analysis Type': 'Top t-test effect',
-                    'Total Count': '',
-                    'Significant Count': '',
-                    'Significant %': f"d={row['effect_size']:.2f}",
-                    'Notes': f"{row['dv']} by {row['predictor']}, p={row['p_value']:.4f}"
-                })
-        
-        # Correlation summary
-        if self.correlation_results:
-            corr_df = pd.DataFrame(self.correlation_results)
-            total_corrs = len(corr_df)
-            sig_corrs = len(corr_df[corr_df['p_value'] < 0.05])
-            sig_percent = sig_corrs / total_corrs * 100 if total_corrs > 0 else 0
-            
-            summary_data.append({
-                'Analysis Type': 'Correlations (participant)',
-                'Total Count': total_corrs,
-                'Significant Count': sig_corrs,
-                'Significant %': f"{sig_percent:.1f}%",
-                'Notes': 'Continuous relationships'
-            })
-            
-            # By variable combinations
-            categories = {'fragmentation', 'anxiety', 'mood'}
-            for cat1 in categories:
-                for cat2 in categories:
-                    if cat1 == cat2:
-                        continue  # Skip same-category correlations
-                        
-                    combo_subset = corr_df[
-                        ((corr_df['var1_category'] == cat1) & (corr_df['var2_category'] == cat2)) |
-                        ((corr_df['var1_category'] == cat2) & (corr_df['var2_category'] == cat1))
-                    ]
-                    
-                    combo_total = len(combo_subset)
-                    if combo_total == 0:
-                        continue
-                        
-                    combo_sig = len(combo_subset[combo_subset['p_value'] < 0.05])
-                    combo_percent = combo_sig / combo_total * 100
+                if not subset_ttests.empty:
+                    total_ttests = len(subset_ttests)
+                    sig_ttests = len(subset_ttests[subset_ttests['p_value'] < 0.05])
+                    sig_percent = sig_ttests / total_ttests * 100 if total_ttests > 0 else 0
                     
                     summary_data.append({
-                        'Analysis Type': f'Correlations: {cat1} ~ {cat2}',
-                        'Total Count': combo_total,
-                        'Significant Count': combo_sig,
-                        'Significant %': f"{combo_percent:.1f}%",
-                        'Notes': ''
+                        'Analysis Type': f'T-tests ({subset})',
+                        'Total Count': total_ttests,
+                        'Significant Count': sig_ttests,
+                        'Significant %': f"{sig_percent:.1f}%",
+                        'Notes': 'Group comparisons'
                     })
+                    
+                    # Breakdown by outcome category
+                    for category in sorted(subset_ttests['dv_category'].unique()):
+                        cat_subset = subset_ttests[subset_ttests['dv_category'] == category]
+                        cat_total = len(cat_subset)
+                        cat_sig = len(cat_subset[cat_subset['p_value'] < 0.05])
+                        cat_percent = cat_sig / cat_total * 100 if cat_total > 0 else 0
+                        
+                        summary_data.append({
+                            'Analysis Type': f'T-tests ({subset}: {category})',
+                            'Total Count': cat_total,
+                            'Significant Count': cat_sig,
+                            'Significant %': f"{cat_percent:.1f}%",
+                            'Notes': ''
+                        })
+                    
+                    # Top t-test effects for this subset
+                    top_ttests = subset_ttests.sort_values(by='effect_size', ascending=False).head(3)
+                    for i, row in top_ttests.iterrows():
+                        summary_data.append({
+                            'Analysis Type': f'Top {subset} t-test effect',
+                            'Total Count': '',
+                            'Significant Count': '',
+                            'Significant %': f"d={row['effect_size']:.2f}",
+                            'Notes': f"{row['dv']} by {row['predictor']}, p={row['p_value']:.4f}"
+                        })
             
-            # Top correlations
-            top_corrs = corr_df.sort_values(by='correlation', key=abs, ascending=False).head(5)
-            for i, row in top_corrs.iterrows():
-                summary_data.append({
-                    'Analysis Type': 'Top correlation',
-                    'Total Count': '',
-                    'Significant Count': '',
-                    'Significant %': f"r={row['correlation']:.2f}",
-                    'Notes': f"{row['var1']} ~ {row['var2']}, p={row['p_value']:.4f}"
-                })
+            # Correlation summary for this subset
+            if self.correlation_results:
+                corr_df = pd.DataFrame(self.correlation_results)
+                subset_corrs = corr_df[corr_df['subset'] == subset]
+                
+                if not subset_corrs.empty:
+                    total_corrs = len(subset_corrs)
+                    sig_corrs = len(subset_corrs[subset_corrs['p_value'] < 0.05])
+                    sig_percent = sig_corrs / total_corrs * 100 if total_corrs > 0 else 0
+                    
+                    summary_data.append({
+                        'Analysis Type': f'Correlations ({subset})',
+                        'Total Count': total_corrs,
+                        'Significant Count': sig_corrs,
+                        'Significant %': f"{sig_percent:.1f}%",
+                        'Notes': 'Continuous relationships'
+                    })
+                    
+                    # Top correlations for this subset
+                    top_corrs = subset_corrs.sort_values(by='correlation', key=abs, ascending=False).head(3)
+                    for i, row in top_corrs.iterrows():
+                        summary_data.append({
+                            'Analysis Type': f'Top {subset} correlation',
+                            'Total Count': '',
+                            'Significant Count': '',
+                            'Significant %': f"r={row['correlation']:.2f}",
+                            'Notes': f"{row['var1']} ~ {row['var2']}, p={row['p_value']:.4f}"
+                        })
         
         # Create summary dataframe
         summary_df = pd.DataFrame(summary_data)
