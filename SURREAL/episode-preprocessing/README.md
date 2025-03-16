@@ -31,8 +31,7 @@ To ensure consistency across the pipeline, all data processing follows standardi
 - **Missing Value Treatment**: Standardized approach to handling missing or invalid data
 - **Data Validation**: Automatic validation of data ranges and integrity throughout processing
 
-#
-## Core Concepts
+### Core Concepts
 
 ### Episodes
 The project identifies three types of behavioral episodes:
