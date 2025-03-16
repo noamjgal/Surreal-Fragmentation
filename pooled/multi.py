@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Simplified Multilevel Analysis of Fragmentation Effects
+Improved Multilevel Analysis of Fragmentation Effects
 
 This script performs multilevel regression analysis to examine the relationship 
 between fragmentation metrics and emotional outcomes while properly accounting
-for within-participant variance.
+for within-participant variance, adding control variables, and testing 
+cross-fragmentation models.
 """
 
 import pandas as pd
@@ -16,7 +17,7 @@ import logging
 from datetime import datetime
 import warnings
 
-class SimplifiedMultilevelAnalysis:
+class ImprovedMultilevelAnalysis:
     def __init__(self, output_dir=None, debug=False, data_path=None):
         """Initialize the multilevel analysis.
         
@@ -53,11 +54,17 @@ class SimplifiedMultilevelAnalysis:
             'mood_score_std'       # Standardized mood/depression score
         ]
         
-        # Define subset variables for interaction testing
-        self.subset_variables = {
-            'dataset': 'dataset_source',
-            'gender': 'gender_standardized',
+        # Define control variables to include in models
+        self.control_variables = {
             'age': 'age_group',
+            'gender': 'gender_standardized',
+            'location': 'location_type'
+        }
+        
+        # Define subset variables for interaction testing (removed dataset since it's identical to age)
+        self.subset_variables = {
+            'age': 'age_group',
+            'gender': 'gender_standardized',
             'location': 'location_type'
         }
         
@@ -80,7 +87,7 @@ class SimplifiedMultilevelAnalysis:
             ]
         )
         self.logger = logging.getLogger(__name__)
-        self.logger.info(f"Initializing simplified multilevel analysis of fragmentation effects")
+        self.logger.info(f"Initializing improved multilevel analysis of fragmentation effects")
         self.logger.info(f"Pooled data path: {self.pooled_data_path}")
         self.logger.info(f"Output directory: {self.output_dir}")
 
@@ -103,7 +110,11 @@ class SimplifiedMultilevelAnalysis:
             self.fragmentation_predictors = [var.replace('-', '_') for var in self.fragmentation_predictors]
             
             # Check for required columns
-            required_vars = self.fragmentation_predictors + self.outcome_variables + ['participant_id']
+            required_vars = (self.fragmentation_predictors + 
+                            self.outcome_variables + 
+                            list(self.control_variables.values()) + 
+                            ['participant_id'])
+            
             missing_vars = [var for var in required_vars if var not in df.columns]
             if missing_vars:
                 self.logger.error(f"Missing critical variables: {missing_vars}")
@@ -142,6 +153,14 @@ class SimplifiedMultilevelAnalysis:
             self.logger.info(f"  Observations per participant: min={obs_per_participant.min()}, "
                            f"max={obs_per_participant.max()}, mean={obs_per_participant.mean():.1f}")
             
+            # Report categorical distributions for control variables
+            for control_name, control_var in self.control_variables.items():
+                if control_var in df.columns:
+                    value_counts = df[control_var].value_counts()
+                    self.logger.info(f"Distribution of {control_name} ({control_var}):")
+                    for val, count in value_counts.items():
+                        self.logger.info(f"  {val}: {count} ({100 * count / len(df):.1f}%)")
+            
             return df
             
         except Exception as e:
@@ -151,18 +170,20 @@ class SimplifiedMultilevelAnalysis:
                 self.logger.error(traceback.format_exc())
             return None
 
-    def run_basic_multilevel_model(self, df, outcome_var, predictor):
+    def run_basic_multilevel_model(self, df, outcome_var, predictor, with_controls=False):
         """Run a simple multilevel model with random intercepts.
         
         Args:
             df (DataFrame): Dataset with within/between decomposition
             outcome_var (str): Outcome variable name
             predictor (str): Predictor base name (without _within/_between suffixes)
+            with_controls (bool): Whether to include control variables
             
         Returns:
             dict: Model results
         """
-        self.logger.info(f"Running basic multilevel model for {outcome_var} ~ {predictor}")
+        model_type = "With Controls" if with_controls else "Basic"
+        self.logger.info(f"Running {model_type} multilevel model for {outcome_var} ~ {predictor}")
         
         # Define predictor components
         within_pred = f"{predictor}_within"
@@ -170,6 +191,15 @@ class SimplifiedMultilevelAnalysis:
         
         # Build dataset for analysis (handle missing values)
         model_vars = [outcome_var, within_pred, between_pred, 'participant_id']
+        
+        # Add control variables if requested
+        control_terms = []
+        if with_controls:
+            for control_var in self.control_variables.values():
+                model_vars.append(control_var)
+                # Add control variable to formula
+                control_terms.append(control_var)
+        
         model_data = df[model_vars].dropna()
         
         if len(model_data) < 20:
@@ -177,8 +207,12 @@ class SimplifiedMultilevelAnalysis:
             return None
             
         try:
-            # Build and fit the model - try a simpler specification first
-            model_formula = f"{outcome_var} ~ {within_pred} + {between_pred}"
+            # Build model formula with or without controls
+            if with_controls:
+                control_formula = " + " + " + ".join(control_terms)
+                model_formula = f"{outcome_var} ~ {within_pred} + {between_pred}{control_formula}"
+            else:
+                model_formula = f"{outcome_var} ~ {within_pred} + {between_pred}"
             
             self.logger.info(f"Fitting random intercepts model: {model_formula}")
             model = smf.mixedlm(
@@ -203,30 +237,68 @@ class SimplifiedMultilevelAnalysis:
             # Extract key parameters
             params = result.params
             pvalues = result.pvalues
+            conf_int = result.conf_int()
             
             # Get within-person effect
             within_coef = params.get(within_pred, np.nan)
             within_pval = pvalues.get(within_pred, np.nan)
             within_sig = '***' if within_pval < 0.001 else '**' if within_pval < 0.01 else '*' if within_pval < 0.05 else ''
             
+            # Get within-person confidence interval
+            if within_pred in conf_int.index:
+                within_ci_low = conf_int.loc[within_pred, 0]
+                within_ci_high = conf_int.loc[within_pred, 1]
+            else:
+                within_ci_low = within_ci_high = np.nan
+            
             # Get between-person effect
             between_coef = params.get(between_pred, np.nan)
             between_pval = pvalues.get(between_pred, np.nan)
             between_sig = '***' if between_pval < 0.001 else '**' if between_pval < 0.01 else '*' if between_pval < 0.05 else ''
             
+            # Get between-person confidence interval
+            if between_pred in conf_int.index:
+                between_ci_low = conf_int.loc[between_pred, 0]
+                between_ci_high = conf_int.loc[between_pred, 1]
+            else:
+                between_ci_low = between_ci_high = np.nan
+            
+            # Extract control variable effects (if included)
+            control_effects = {}
+            if with_controls:
+                for control_name, control_var in self.control_variables.items():
+                    # Some controls might be categorical with multiple parameters
+                    control_params = {k: v for k, v in params.items() if control_var in k}
+                    control_pvals = {k: v for k, v in pvalues.items() if control_var in k}
+                    control_sig = {k: '***' if v < 0.001 else '**' if v < 0.01 else '*' if v < 0.05 else '' 
+                                  for k, v in control_pvals.items()}
+                    
+                    # Get confidence intervals for control variables
+                    control_ci_low = {k: conf_int.loc[k, 0] if k in conf_int.index else np.nan 
+                                     for k in control_params.keys()}
+                    control_ci_high = {k: conf_int.loc[k, 1] if k in conf_int.index else np.nan 
+                                      for k in control_params.keys()}
+                    
+                    if control_params:
+                        control_effects[control_name] = {
+                            'params': control_params,
+                            'pvals': control_pvals,
+                            'sig': control_sig,
+                            'ci_low': control_ci_low,
+                            'ci_high': control_ci_high
+                        }
+            
             # Safely extract random effects variance components
-            # Handle different possible return types from statsmodels
             random_effects = result.cov_re
             if isinstance(random_effects, np.ndarray):
-                var_intercept = float(random_effects[0])  # For 1D array or first element
+                var_intercept = float(random_effects[0])
             elif isinstance(random_effects, pd.DataFrame):
-                var_intercept = float(random_effects.iloc[0, 0])  # Get first element if it's a DataFrame
+                var_intercept = float(random_effects.iloc[0, 0])
             elif hasattr(random_effects, 'iloc'):
-                var_intercept = float(random_effects.iloc[0])  # For Series
+                var_intercept = float(random_effects.iloc[0])
             elif hasattr(random_effects, 'item'):  
-                var_intercept = float(random_effects.item())  # For scalar
+                var_intercept = float(random_effects.item())
             else:
-                # If none of the above, try direct conversion or use a fallback value
                 try:
                     var_intercept = float(random_effects)
                 except:
@@ -245,15 +317,197 @@ class SimplifiedMultilevelAnalysis:
             model_results = {
                 'outcome': outcome_var,
                 'predictor': predictor,
-                'model_type': 'Random Intercepts',
+                'model_type': 'With Controls' if with_controls else 'Basic',
                 'n_obs': len(model_data),
                 'n_participants': model_data['participant_id'].nunique(),
                 'within_coef': within_coef,
                 'within_pval': within_pval,
                 'within_sig': within_sig,
+                'within_ci_low': within_ci_low,
+                'within_ci_high': within_ci_high,
                 'between_coef': between_coef,
                 'between_pval': between_pval,
                 'between_sig': between_sig,
+                'between_ci_low': between_ci_low,
+                'between_ci_high': between_ci_high,
+                'var_intercept': var_intercept,
+                'var_residual': var_residual,
+                'icc': icc,
+                'aic': result.aic,
+                'bic': result.bic,
+                'log_likelihood': result.llf,
+                'method': method
+            }
+            
+            # Add control effects if included
+            if with_controls:
+                model_results['control_effects'] = control_effects
+            
+            # Log key results
+            self.logger.info(f"Model results for {outcome_var} ~ {predictor} ({model_type}):")
+            self.logger.info(f"  Within-person effect: {within_coef:.4f}, p={within_pval:.4f} {within_sig}")
+            self.logger.info(f"  Between-person effect: {between_coef:.4f}, p={between_pval:.4f} {between_sig}")
+            self.logger.info(f"  ICC: {icc:.4f}, AIC: {result.aic:.1f}")
+            
+            return model_results
+            
+        except Exception as e:
+            self.logger.error(f"Error in multilevel model {outcome_var} ~ {predictor}: {str(e)}")
+            if self.debug:
+                import traceback
+                self.logger.error(traceback.format_exc())
+            return None
+    
+    def run_cross_fragmentation_model(self, df, outcome_var, primary_predictor, control_predictor):
+        """Run a multilevel model with one fragmentation controlling for another.
+        
+        Args:
+            df (DataFrame): Dataset with within/between decomposition
+            outcome_var (str): Outcome variable name
+            primary_predictor (str): Main predictor variable
+            control_predictor (str): Fragmentation variable to control for
+            
+        Returns:
+            dict: Model results
+        """
+        self.logger.info(f"Running cross-fragmentation model: {outcome_var} ~ {primary_predictor} controlling for {control_predictor}")
+        
+        # Define predictor components for both primary and control
+        primary_within = f"{primary_predictor}_within"
+        primary_between = f"{primary_predictor}_between"
+        control_within = f"{control_predictor}_within"
+        control_between = f"{control_predictor}_between"
+        
+        # Build dataset for analysis (handle missing values)
+        model_vars = [outcome_var, primary_within, primary_between, 
+                      control_within, control_between, 'participant_id']
+        
+        # Add demographic control variables too
+        for control_var in self.control_variables.values():
+            model_vars.append(control_var)
+        
+        model_data = df[model_vars].dropna()
+        
+        if len(model_data) < 20:
+            self.logger.warning(f"Not enough valid data for cross-fragmentation model (n={len(model_data)})")
+            return None
+            
+        try:
+            # Build formula with control fragmentation and demographic controls
+            control_terms = [control_within, control_between]
+            for control_var in self.control_variables.values():
+                control_terms.append(control_var)
+                
+            control_formula = " + " + " + ".join(control_terms)
+            model_formula = f"{outcome_var} ~ {primary_within} + {primary_between}{control_formula}"
+            
+            self.logger.info(f"Fitting cross-fragmentation model: {model_formula}")
+            model = smf.mixedlm(
+                formula=model_formula,
+                data=model_data,
+                groups=model_data["participant_id"],
+                re_formula="~1"  # Random intercepts only
+            )
+            
+            # Try to fit with restricted maximum likelihood
+            try:
+                result = model.fit(reml=True)
+                method = "REML"
+            except:
+                self.logger.warning(f"REML fitting failed, trying ML estimation")
+                result = model.fit(reml=False) 
+                method = "ML"
+                
+            # Extract model results
+            self.logger.info(f"Model successfully fitted using {method}")
+            
+            # Extract key parameters
+            params = result.params
+            pvalues = result.pvalues
+            conf_int = result.conf_int()
+            
+            # Get within-person effect for primary predictor
+            within_coef = params.get(primary_within, np.nan)
+            within_pval = pvalues.get(primary_within, np.nan)
+            within_sig = '***' if within_pval < 0.001 else '**' if within_pval < 0.01 else '*' if within_pval < 0.05 else ''
+            
+            # Get within-person confidence interval
+            if primary_within in conf_int.index:
+                within_ci_low = conf_int.loc[primary_within, 0]
+                within_ci_high = conf_int.loc[primary_within, 1]
+            else:
+                within_ci_low = within_ci_high = np.nan
+            
+            # Get between-person effect for primary predictor
+            between_coef = params.get(primary_between, np.nan)
+            between_pval = pvalues.get(primary_between, np.nan)
+            between_sig = '***' if between_pval < 0.001 else '**' if between_pval < 0.01 else '*' if between_pval < 0.05 else ''
+            
+            # Get between-person confidence interval
+            if primary_between in conf_int.index:
+                between_ci_low = conf_int.loc[primary_between, 0]
+                between_ci_high = conf_int.loc[primary_between, 1]
+            else:
+                between_ci_low = between_ci_high = np.nan
+                
+            # Get control predictor effects
+            control_within_coef = params.get(control_within, np.nan)
+            control_within_pval = pvalues.get(control_within, np.nan)
+            control_within_sig = '***' if control_within_pval < 0.001 else '**' if control_within_pval < 0.01 else '*' if control_within_pval < 0.05 else ''
+            
+            control_between_coef = params.get(control_between, np.nan)
+            control_between_pval = pvalues.get(control_between, np.nan)
+            control_between_sig = '***' if control_between_pval < 0.001 else '**' if control_between_pval < 0.01 else '*' if control_between_pval < 0.05 else ''
+            
+            # Safely extract random effects variance components
+            random_effects = result.cov_re
+            if isinstance(random_effects, np.ndarray):
+                var_intercept = float(random_effects[0])
+            elif isinstance(random_effects, pd.DataFrame):
+                var_intercept = float(random_effects.iloc[0, 0])
+            elif hasattr(random_effects, 'iloc'):
+                var_intercept = float(random_effects.iloc[0])
+            elif hasattr(random_effects, 'item'):  
+                var_intercept = float(random_effects.item())
+            else:
+                try:
+                    var_intercept = float(random_effects)
+                except:
+                    var_intercept = np.nan
+                    self.logger.warning(f"Could not extract random intercept variance, setting to NaN")
+            
+            var_residual = float(result.scale)
+            
+            # Calculate ICC
+            if var_intercept > 0 and var_residual > 0:
+                icc = var_intercept / (var_intercept + var_residual)
+            else:
+                icc = np.nan
+            
+            # Create results dictionary
+            model_results = {
+                'outcome': outcome_var,
+                'predictor': primary_predictor,
+                'control_predictor': control_predictor,
+                'model_type': 'Cross-Fragmentation',
+                'n_obs': len(model_data),
+                'n_participants': model_data['participant_id'].nunique(),
+                'within_coef': within_coef,
+                'within_pval': within_pval,
+                'within_sig': within_sig,
+                'within_ci_low': within_ci_low,
+                'within_ci_high': within_ci_high,
+                'between_coef': between_coef,
+                'between_pval': between_pval,
+                'between_sig': between_sig,
+                'between_ci_low': between_ci_low,
+                'between_ci_high': between_ci_high,
+                'control_within_coef': control_within_coef,
+                'control_within_pval': control_within_pval,
+                'control_within_sig': control_within_sig,
+                'control_between_coef': control_between_coef,
+                'control_between_pval': control_between_pval,
+                'control_between_sig': control_between_sig,
                 'var_intercept': var_intercept,
                 'var_residual': var_residual,
                 'icc': icc,
@@ -264,15 +518,17 @@ class SimplifiedMultilevelAnalysis:
             }
             
             # Log key results
-            self.logger.info(f"Model results for {outcome_var} ~ {predictor}:")
-            self.logger.info(f"  Within-person effect: {within_coef:.4f}, p={within_pval:.4f} {within_sig}")
-            self.logger.info(f"  Between-person effect: {between_coef:.4f}, p={between_pval:.4f} {between_sig}")
+            self.logger.info(f"Cross-fragmentation model results for {outcome_var} ~ {primary_predictor} | {control_predictor}:")
+            self.logger.info(f"  Primary within-effect: {within_coef:.4f}, p={within_pval:.4f} {within_sig}")
+            self.logger.info(f"  Primary between-effect: {between_coef:.4f}, p={between_pval:.4f} {between_sig}")
+            self.logger.info(f"  Control within-effect: {control_within_coef:.4f}, p={control_within_pval:.4f} {control_within_sig}")
+            self.logger.info(f"  Control between-effect: {control_between_coef:.4f}, p={control_between_pval:.4f} {control_between_sig}")
             self.logger.info(f"  ICC: {icc:.4f}, AIC: {result.aic:.1f}")
             
             return model_results
             
         except Exception as e:
-            self.logger.error(f"Error in multilevel model {outcome_var} ~ {predictor}: {str(e)}")
+            self.logger.error(f"Error in cross-fragmentation model: {str(e)}")
             if self.debug:
                 import traceback
                 self.logger.error(traceback.format_exc())
@@ -355,16 +611,31 @@ class SimplifiedMultilevelAnalysis:
                 # Extract key parameters
                 params = result.params
                 pvalues = result.pvalues
+                conf_int = result.conf_int()
                 
                 # Get within-person effect
                 within_coef = params.get(within_pred, np.nan)
                 within_pval = pvalues.get(within_pred, np.nan)
                 within_sig = '***' if within_pval < 0.001 else '**' if within_pval < 0.01 else '*' if within_pval < 0.05 else ''
                 
+                # Get within-person confidence interval
+                if within_pred in conf_int.index:
+                    within_ci_low = conf_int.loc[within_pred, 0]
+                    within_ci_high = conf_int.loc[within_pred, 1]
+                else:
+                    within_ci_low = within_ci_high = np.nan
+                
                 # Get between-person effect
                 between_coef = params.get(between_pred, np.nan)
                 between_pval = pvalues.get(between_pred, np.nan)
                 between_sig = '***' if between_pval < 0.001 else '**' if between_pval < 0.01 else '*' if between_pval < 0.05 else ''
+                
+                # Get between-person confidence interval
+                if between_pred in conf_int.index:
+                    between_ci_low = conf_int.loc[between_pred, 0]
+                    between_ci_high = conf_int.loc[between_pred, 1]
+                else:
+                    between_ci_low = between_ci_high = np.nan
                 
                 # Create results dictionary for this subgroup
                 group_results = {
@@ -378,9 +649,13 @@ class SimplifiedMultilevelAnalysis:
                     'within_coef': within_coef,
                     'within_pval': within_pval,
                     'within_sig': within_sig,
+                    'within_ci_low': within_ci_low,
+                    'within_ci_high': within_ci_high,
                     'between_coef': between_coef,
                     'between_pval': between_pval,
                     'between_sig': between_sig,
+                    'between_ci_low': between_ci_low,
+                    'between_ci_high': between_ci_high,
                     'aic': result.aic,
                     'bic': result.bic,
                     'method': method
@@ -483,16 +758,18 @@ class SimplifiedMultilevelAnalysis:
             return False
         
         # Results containers
-        basic_models = {}
-        moderation_analyses = {}
+        basic_models = {}          # Models without controls
+        controlled_models = {}     # Models with demographic controls
+        cross_frag_models = {}     # Digital vs. mobility fragmentation models
+        moderation_analyses = {}   # Subgroup analyses
         successful_models = 0
         
-        # 1. Run basic multilevel models
-        self.logger.info("Running basic multilevel models")
+        # 1. Run basic multilevel models (without controls)
+        self.logger.info("Running basic multilevel models (without controls)")
         for outcome_var in self.outcome_variables:
             outcome_models = {}
             for predictor in self.fragmentation_predictors:
-                model_result = self.run_basic_multilevel_model(df, outcome_var, predictor)
+                model_result = self.run_basic_multilevel_model(df, outcome_var, predictor, with_controls=False)
                 if model_result:
                     outcome_models[predictor] = model_result
                     successful_models += 1
@@ -500,13 +777,52 @@ class SimplifiedMultilevelAnalysis:
             if outcome_models:
                 basic_models[outcome_var] = outcome_models
         
-        # 2. Run moderation analyses
+        # 2. Run multilevel models with demographic controls
+        self.logger.info("Running multilevel models with demographic controls")
+        for outcome_var in self.outcome_variables:
+            outcome_models = {}
+            for predictor in self.fragmentation_predictors:
+                model_result = self.run_basic_multilevel_model(df, outcome_var, predictor, with_controls=True)
+                if model_result:
+                    outcome_models[predictor] = model_result
+                    successful_models += 1
+            
+            if outcome_models:
+                controlled_models[outcome_var] = outcome_models
+        
+        # 3. Run cross-fragmentation models (digital vs. mobility)
+        self.logger.info("Running cross-fragmentation models")
+        for outcome_var in self.outcome_variables:
+            outcome_models = {}
+            
+            # Run digital controlling for mobility
+            model_result = self.run_cross_fragmentation_model(
+                df, outcome_var, 'digital_fragmentation', 'mobility_fragmentation')
+            if model_result:
+                outcome_models['digital_controlling_for_mobility'] = model_result
+                successful_models += 1
+            
+            # Run mobility controlling for digital
+            model_result = self.run_cross_fragmentation_model(
+                df, outcome_var, 'mobility_fragmentation', 'digital_fragmentation')
+            if model_result:
+                outcome_models['mobility_controlling_for_digital'] = model_result
+                successful_models += 1
+            
+            if outcome_models:
+                cross_frag_models[outcome_var] = outcome_models
+        
+        # 4. Run moderation analyses
         self.logger.info("Running moderation analyses")
         for outcome_var in self.outcome_variables:
             outcome_moderations = {}
             for predictor in self.fragmentation_predictors:
                 predictor_moderations = {}
                 for moderator_name, moderator_var in self.subset_variables.items():
+                    # Skip the dataset moderator (since it's identical to age)
+                    if moderator_name == 'dataset':
+                        continue
+                        
                     moderation_result = self.run_moderation_analysis(df, outcome_var, predictor, moderator_var)
                     if moderation_result:
                         predictor_moderations[moderator_name] = moderation_result
@@ -520,16 +836,17 @@ class SimplifiedMultilevelAnalysis:
         
         # Store all results
         self.model_results['basic_models'] = basic_models
+        self.model_results['controlled_models'] = controlled_models
+        self.model_results['cross_frag_models'] = cross_frag_models
         self.model_results['moderation_analyses'] = moderation_analyses
         
         self.logger.info(f"Completed multilevel analysis with {successful_models} successful models")
         
-        # Consider any successful subset model as a success, even if basic models failed
         return successful_models > 0
     
     def save_results(self):
         """Save multilevel model results to Excel file"""
-        if not self.model_results or (not self.model_results.get('basic_models') and not self.model_results.get('moderation_analyses')):
+        if not self.model_results:
             self.logger.warning("No results to save")
             return None
         
@@ -539,21 +856,28 @@ class SimplifiedMultilevelAnalysis:
             
             # Prepare summary dataframes
             basic_summary = []
+            controlled_summary = []
+            cross_frag_summary = []
             moderation_summary = []
             comparison_summary = []
             
-            # Process basic models
+            # Process basic models (without controls)
             for outcome_var, outcome_models in self.model_results.get('basic_models', {}).items():
                 for predictor, model_result in outcome_models.items():
                     basic_summary.append({
                         'Outcome': outcome_var,
                         'Predictor': predictor,
+                        'Model Type': 'Basic',
                         'Within-Effect': model_result.get('within_coef', np.nan),
                         'Within-P': model_result.get('within_pval', np.nan),
                         'Within-Sig': model_result.get('within_sig', ''),
+                        'Within-CI Low': model_result.get('within_ci_low', np.nan),
+                        'Within-CI High': model_result.get('within_ci_high', np.nan),
                         'Between-Effect': model_result.get('between_coef', np.nan),
                         'Between-P': model_result.get('between_pval', np.nan),
                         'Between-Sig': model_result.get('between_sig', ''),
+                        'Between-CI Low': model_result.get('between_ci_low', np.nan),
+                        'Between-CI High': model_result.get('between_ci_high', np.nan),
                         'N': model_result.get('n_obs', 0),
                         'Participants': model_result.get('n_participants', 0),
                         'ICC': model_result.get('icc', np.nan),
@@ -561,6 +885,92 @@ class SimplifiedMultilevelAnalysis:
                         'BIC': model_result.get('bic', np.nan)
                     })
             
+            # Process models with demographic controls
+            control_var_effects = []  # New list for control variable effects
+            
+            for outcome_var, outcome_models in self.model_results.get('controlled_models', {}).items():
+                for predictor, model_result in outcome_models.items():
+                    controlled_summary.append({
+                        'Outcome': outcome_var,
+                        'Predictor': predictor,
+                        'Model Type': 'With Controls',
+                        'Within-Effect': model_result.get('within_coef', np.nan),
+                        'Within-P': model_result.get('within_pval', np.nan),
+                        'Within-Sig': model_result.get('within_sig', ''),
+                        'Within-CI Low': model_result.get('within_ci_low', np.nan),
+                        'Within-CI High': model_result.get('within_ci_high', np.nan),
+                        'Between-Effect': model_result.get('between_coef', np.nan),
+                        'Between-P': model_result.get('between_pval', np.nan),
+                        'Between-Sig': model_result.get('between_sig', ''),
+                        'Between-CI Low': model_result.get('between_ci_low', np.nan),
+                        'Between-CI High': model_result.get('between_ci_high', np.nan),
+                        'N': model_result.get('n_obs', 0),
+                        'Participants': model_result.get('n_participants', 0),
+                        'ICC': model_result.get('icc', np.nan),
+                        'AIC': model_result.get('aic', np.nan),
+                        'BIC': model_result.get('bic', np.nan)
+                    })
+                    
+                    # Extract control variable effects if present
+                    if 'control_effects' in model_result:
+                        for control_name, control_data in model_result['control_effects'].items():
+                            for param_name, coefficient in control_data['params'].items():
+                                # Extract the level name from parameter (e.g., "age_group[T.26-35]" -> "26-35")
+                                if '[T.' in param_name:
+                                    level = param_name.split('[T.')[1].rstrip(']')
+                                elif param_name == control_name:
+                                    level = 'Continuous'  # For continuous variables
+                                else:
+                                    level = param_name.replace(control_name, '').lstrip('_').lstrip('[').rstrip(']')
+                                
+                                # Get p-value and significance
+                                p_value = control_data['pvals'].get(param_name, np.nan)
+                                significance = control_data['sig'].get(param_name, '')
+                                
+                                # Get confidence intervals
+                                ci_low = control_data['ci_low'].get(param_name, np.nan)
+                                ci_high = control_data['ci_high'].get(param_name, np.nan)
+                                
+                                control_var_effects.append({
+                                    'Outcome': outcome_var,
+                                    'Predictor': predictor,
+                                    'Control Variable': control_name,
+                                    'Level': level,
+                                    'Coefficient': coefficient,
+                                    'P-value': p_value,
+                                    'Significance': significance,
+                                    'CI Low': ci_low,
+                                    'CI High': ci_high
+                                })
+            
+            # Process cross-fragmentation models
+            for outcome_var, outcome_models in self.model_results.get('cross_frag_models', {}).items():
+                for model_name, model_result in outcome_models.items():
+                    primary_pred = model_result.get('predictor', '')
+                    control_pred = model_result.get('control_predictor', '')
+                    
+                    cross_frag_summary.append({
+                        'Outcome': outcome_var,
+                        'Primary Predictor': primary_pred,
+                        'Control Predictor': control_pred,
+                        'Within-Effect': model_result.get('within_coef', np.nan),
+                        'Within-P': model_result.get('within_pval', np.nan),
+                        'Within-Sig': model_result.get('within_sig', ''),
+                        'Between-Effect': model_result.get('between_coef', np.nan),
+                        'Between-P': model_result.get('between_pval', np.nan),
+                        'Between-Sig': model_result.get('between_sig', ''),
+                        'Control Within-Effect': model_result.get('control_within_coef', np.nan),
+                        'Control Within-P': model_result.get('control_within_pval', np.nan),
+                        'Control Within-Sig': model_result.get('control_within_sig', ''),
+                        'Control Between-Effect': model_result.get('control_between_coef', np.nan),
+                        'Control Between-P': model_result.get('control_between_pval', np.nan),
+                        'Control Between-Sig': model_result.get('control_between_sig', ''),
+                        'N': model_result.get('n_obs', 0),
+                        'Participants': model_result.get('n_participants', 0),
+                        'AIC': model_result.get('aic', np.nan),
+                        'BIC': model_result.get('bic', np.nan)
+                    })
+                    
             # Process moderation analyses
             for outcome_var, outcome_moderations in self.model_results.get('moderation_analyses', {}).items():
                 for predictor, predictor_moderations in outcome_moderations.items():
@@ -575,9 +985,13 @@ class SimplifiedMultilevelAnalysis:
                                     'Within-Effect': subgroup_result.get('within_coef', np.nan),
                                     'Within-P': subgroup_result.get('within_pval', np.nan),
                                     'Within-Sig': subgroup_result.get('within_sig', ''),
+                                    'Within-CI Low': subgroup_result.get('within_ci_low', np.nan),
+                                    'Within-CI High': subgroup_result.get('within_ci_high', np.nan),
                                     'Between-Effect': subgroup_result.get('between_coef', np.nan),
                                     'Between-P': subgroup_result.get('between_pval', np.nan),
                                     'Between-Sig': subgroup_result.get('between_sig', ''),
+                                    'Between-CI Low': subgroup_result.get('between_ci_low', np.nan),
+                                    'Between-CI High': subgroup_result.get('between_ci_high', np.nan),
                                     'N': subgroup_result.get('n_obs', 0),
                                     'Participants': subgroup_result.get('n_participants', 0)
                                 })
@@ -599,11 +1013,14 @@ class SimplifiedMultilevelAnalysis:
             
             # Convert to dataframes
             basic_df = pd.DataFrame(basic_summary) if basic_summary else pd.DataFrame()
+            controlled_df = pd.DataFrame(controlled_summary) if controlled_summary else pd.DataFrame()
+            cross_frag_df = pd.DataFrame(cross_frag_summary) if cross_frag_summary else pd.DataFrame()
             moderation_df = pd.DataFrame(moderation_summary) if moderation_summary else pd.DataFrame()
             comparison_df = pd.DataFrame(comparison_summary) if comparison_summary else pd.DataFrame()
+            control_var_df = pd.DataFrame(control_var_effects) if control_var_effects else pd.DataFrame()
             
             # Round numeric columns
-            for df in [basic_df, moderation_df, comparison_df]:
+            for df in [basic_df, controlled_df, cross_frag_df, moderation_df, comparison_df, control_var_df]:
                 if not df.empty:
                     numeric_cols = df.select_dtypes(include=[np.number]).columns
                     df[numeric_cols] = df[numeric_cols].round(4)
@@ -616,21 +1033,63 @@ class SimplifiedMultilevelAnalysis:
                 if not basic_df.empty:
                     basic_df.to_excel(writer, sheet_name='Basic Models', index=False)
                 
+                if not controlled_df.empty:
+                    controlled_df.to_excel(writer, sheet_name='Controlled Models', index=False)
+                
+                if not cross_frag_df.empty:
+                    cross_frag_df.to_excel(writer, sheet_name='Cross-Frag Models', index=False)
+                
                 if not moderation_df.empty:
                     moderation_df.to_excel(writer, sheet_name='Subgroup Effects', index=False)
                 
                 if not comparison_df.empty:
                     comparison_df.to_excel(writer, sheet_name='Group Comparisons', index=False)
                 
+                # Save control variable effects
+                if not control_var_df.empty:
+                    control_var_df.to_excel(writer, sheet_name='Control Variable Effects', index=False)
+                
+                # Create combined overview sheet
+                combined_models = pd.concat([
+                    basic_df.assign(model_category='Basic'),
+                    controlled_df.assign(model_category='With Controls')
+                ]) if not (basic_df.empty and controlled_df.empty) else pd.DataFrame()
+                
+                if not combined_models.empty:
+                    combined_models.to_excel(writer, sheet_name='All Models Overview', index=False)
+                
                 # Create outcome-specific sheets
                 for outcome_var in self.outcome_variables:
-                    # Basic results for this outcome
+                    # Combine basic and controlled models for this outcome
                     outcome_basic = basic_df[basic_df['Outcome'] == outcome_var] if not basic_df.empty else pd.DataFrame()
-                    if not outcome_basic.empty:
-                        sheet_name = f"{outcome_var.replace('_std', '')}_Basic"
+                    outcome_controlled = controlled_df[controlled_df['Outcome'] == outcome_var] if not controlled_df.empty else pd.DataFrame()
+                    
+                    outcome_combined = pd.concat([
+                        outcome_basic.assign(model_category='Basic'),
+                        outcome_controlled.assign(model_category='With Controls')
+                    ]) if not (outcome_basic.empty and outcome_controlled.empty) else pd.DataFrame()
+                    
+                    if not outcome_combined.empty:
+                        sheet_name = f"{outcome_var.replace('_std', '')}_Models"
                         if len(sheet_name) > 30:  # Excel sheet name limit
                             sheet_name = sheet_name[:30]
-                        outcome_basic.to_excel(writer, sheet_name=sheet_name, index=False)
+                        outcome_combined.to_excel(writer, sheet_name=sheet_name, index=False)
+                    
+                    # Cross-fragmentation results for this outcome
+                    outcome_cross = cross_frag_df[cross_frag_df['Outcome'] == outcome_var] if not cross_frag_df.empty else pd.DataFrame()
+                    if not outcome_cross.empty:
+                        sheet_name = f"{outcome_var.replace('_std', '')}_CrossFrag"
+                        if len(sheet_name) > 30:  # Excel sheet name limit
+                            sheet_name = sheet_name[:30]
+                        outcome_cross.to_excel(writer, sheet_name=sheet_name, index=False)
+                    
+                    # Control variable effects for this outcome
+                    outcome_controls = control_var_df[control_var_df['Outcome'] == outcome_var] if not control_var_df.empty else pd.DataFrame()
+                    if not outcome_controls.empty:
+                        sheet_name = f"{outcome_var.replace('_std', '')}_Controls"
+                        if len(sheet_name) > 30:  # Excel sheet name limit
+                            sheet_name = sheet_name[:30]
+                        outcome_controls.to_excel(writer, sheet_name=sheet_name, index=False)
                     
                     # Moderation results for this outcome
                     outcome_mod = moderation_df[moderation_df['Outcome'] == outcome_var] if not moderation_df.empty else pd.DataFrame()
@@ -639,14 +1098,6 @@ class SimplifiedMultilevelAnalysis:
                         if len(sheet_name) > 30:  # Excel sheet name limit
                             sheet_name = sheet_name[:30]
                         outcome_mod.to_excel(writer, sheet_name=sheet_name, index=False)
-                    
-                    # Comparison results for this outcome
-                    outcome_comp = comparison_df[comparison_df['Outcome'] == outcome_var] if not comparison_df.empty else pd.DataFrame()
-                    if not outcome_comp.empty:
-                        sheet_name = f"{outcome_var.replace('_std', '')}_Comparisons"
-                        if len(sheet_name) > 30:  # Excel sheet name limit
-                            sheet_name = sheet_name[:30]
-                        outcome_comp.to_excel(writer, sheet_name=sheet_name, index=False)
                 
                 # Create moderator-specific comparison sheets
                 moderators = comparison_df['Moderator'].unique() if not comparison_df.empty else []
@@ -657,6 +1108,17 @@ class SimplifiedMultilevelAnalysis:
                         if len(sheet_name) > 30:  # Excel sheet name limit
                             sheet_name = sheet_name[:30]
                         mod_comp.to_excel(writer, sheet_name=sheet_name, index=False)
+                
+                # Create control-variable specific sheets
+                if not control_var_df.empty:
+                    control_vars = control_var_df['Control Variable'].unique()
+                    for control_var in control_vars:
+                        control_specific = control_var_df[control_var_df['Control Variable'] == control_var]
+                        if not control_specific.empty:
+                            sheet_name = f"{control_var.title()}_Effects"
+                            if len(sheet_name) > 30:  # Excel sheet name limit
+                                sheet_name = sheet_name[:30]
+                            control_specific.to_excel(writer, sheet_name=sheet_name, index=False)
             
             self.logger.info(f"Saved multilevel model results to {output_path}")
             return output_path
@@ -669,10 +1131,10 @@ class SimplifiedMultilevelAnalysis:
             return None
 
 def main():
-    """Main function to run the simplified multilevel analysis."""
+    """Main function to run the improved multilevel analysis."""
     try:
         # Create analyzer with debug mode
-        analyzer = SimplifiedMultilevelAnalysis(debug=True)
+        analyzer = ImprovedMultilevelAnalysis(debug=True)
         
         # Load and prepare data
         df = analyzer.load_data()
