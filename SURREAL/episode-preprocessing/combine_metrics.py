@@ -93,6 +93,36 @@ def load_normalized_ema_data(normalized_dir):
             
             # Filter only for STAI and CES-D scales
             ema_data = ema_data[ema_data['Scale'].isin(['STAI-Y-A-6', 'CES-D-8'])].copy()
+
+            # Calculate and log response counts per day statistics
+            response_counts = ema_data.groupby(['Participant_ID', 'date', 'Scale']).size().reset_index(name='response_count')
+
+            # Overall statistics across all participants
+            all_responses_stats = response_counts.groupby('Scale')['response_count'].agg(['mean', 'min', 'max']).reset_index()
+            logging.info(f"Overall daily response statistics:")
+            for _, row in all_responses_stats.iterrows():
+                logging.info(f"  Scale {row['Scale']}: Average: {row['mean']:.2f}, Min: {row['min']}, Max: {row['max']}")
+
+            # Per-participant statistics
+            for pid in response_counts['Participant_ID'].unique():
+                part_responses = response_counts[response_counts['Participant_ID'] == pid]
+                part_stats = part_responses.groupby('Scale')['response_count'].agg(['mean', 'min', 'max']).reset_index()
+                logging.info(f"Participant {pid} daily response statistics:")
+                for _, row in part_stats.iterrows():
+                    logging.info(f"  Scale {row['Scale']}: Average: {row['mean']:.2f}, Min: {row['min']}, Max: {row['max']}")
+
+            # Count days with multiple responses
+            multiple_resp_days = response_counts[response_counts['response_count'] > 1]
+            multiple_resp_count = len(multiple_resp_days)
+            total_days = len(response_counts)
+            logging.info(f"Days with multiple responses: {multiple_resp_count} out of {total_days} ({(multiple_resp_count/total_days*100):.1f}%)")
+
+            # Distribution of response counts
+            resp_dist = response_counts['response_count'].value_counts().sort_index()
+            logging.info(f"Distribution of daily response counts:")
+            for count, freq in resp_dist.items():
+                logging.info(f"  {count} response(s): {freq} days ({(freq/total_days*100):.1f}%)")
+            
             
             # Skip if no valid data after filtering
             if ema_data.empty:
