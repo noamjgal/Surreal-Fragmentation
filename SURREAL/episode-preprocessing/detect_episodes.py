@@ -7,7 +7,7 @@ with consistent timezone handling and improved integration with preprocessing
 import pandas as pd
 import numpy as np
 import os
-from datetime import datetime, date as datetime_date
+from datetime import timedelta, datetime, date as datetime_date
 import traceback
 from pathlib import Path
 import sys
@@ -55,14 +55,15 @@ except ImportError:
     logging.warning("Could not import preprocess_gps module. Preprocessing may not be available.")
 
 # Parameters for trackintel processing
-STAYPOINT_DISTANCE_THRESHOLD = 75  # meters
-STAYPOINT_TIME_THRESHOLD = 3.0     # minutes
-STAYPOINT_GAP_THRESHOLD = 60.0     # minutes
-LOCATION_EPSILON = 150             # meters
+STAYPOINT_DISTANCE_THRESHOLD = 75  # meters (standard academic value)
+STAYPOINT_TIME_THRESHOLD = 5.0     # minutes (standard minimum in literature)
+STAYPOINT_GAP_THRESHOLD = 45.0     # minutes (slightly reduced from default)
+LOCATION_EPSILON = 100             # meters (slightly reduced for better precision)
 MIN_GPS_POINTS_PER_DAY = 5
 MAX_ACCEPTABLE_GAP_PERCENT = 60
 MIN_TRACK_DURATION_HOURS = 1
 DIGITAL_USE_COL = 'action'         # Column containing screen events
+MAX_REASONABLE_TRIP_DURATION = 120  # Maximum reasonable trip duration in minutes
 
 def ensure_tz_aware(datetime_series: pd.Series) -> pd.Series:
     """Ensure datetime series has timezone info (UTC)"""
@@ -532,15 +533,72 @@ class EpisodeProcessor:
                 
                 self.logger.info(f"Generated {len(triplegs)} triplegs")
                 
-                # Flag activities and generate trips
+                # Flag activities and generate trips with stricter parameters
                 staypoints = staypoints.create_activity_flag()
-                staypoints, triplegs, trips = staypoints.generate_trips(triplegs, gap_threshold=STAYPOINT_GAP_THRESHOLD)
+                staypoints, triplegs, trips = staypoints.generate_trips(
+                    triplegs, 
+                    gap_threshold=STAYPOINT_GAP_THRESHOLD/2  # More sensitive to gaps
+                )
                 
                 if trips.empty:
                     self.logger.warning(f"No trips detected for date {date}")
                     continue
                 
                 self.logger.info(f"Generated {len(trips)} trips")
+                
+                # Log trip duration stats for debugging
+                trip_durations = (trips['finished_at'] - trips['started_at']).dt.total_seconds() / 60
+                
+                # Calculate and log duration statistics
+                if not trip_durations.empty:
+                    min_duration = trip_durations.min()
+                    max_duration = trip_durations.max()
+                    avg_duration = trip_durations.mean()
+                    self.logger.info(f"Trip durations - Min: {min_duration:.1f}min, Max: {max_duration:.1f}min, Avg: {avg_duration:.1f}min")
+                    
+                    # Identify suspiciously long trips
+                    long_trips = trips[trip_durations > 120]  # Over 2 hours
+                    if not long_trips.empty:
+                        self.logger.warning(f"Found {len(long_trips)} suspiciously long trips (>2hrs)")
+                        for idx, trip in long_trips.iterrows():
+                            duration_min = (trip['finished_at'] - trip['started_at']).total_seconds() / 60
+                            start_time = trip['started_at'].strftime('%H:%M:%S')
+                            end_time = trip['finished_at'].strftime('%H:%M:%S')
+                            self.logger.warning(f"Long trip: {start_time} - {end_time} ({duration_min:.1f}min)")
+                
+                # Add trip duration validation and correction
+                MAX_REASONABLE_TRIP_MINUTES = 120  # 2 hours
+                original_trips_count = len(trips)
+                
+                # Split unreasonably long trips
+                reasonable_trips = trips[trip_durations <= MAX_REASONABLE_TRIP_MINUTES].copy()
+                long_trips = trips[trip_durations > MAX_REASONABLE_TRIP_MINUTES].copy()
+                
+                if not long_trips.empty:
+                    self.logger.info(f"Splitting {len(long_trips)} overly long trips")
+                    
+                    # For each long trip, create shorter segments
+                    for _, long_trip in long_trips.iterrows():
+                        trip_duration = (long_trip['finished_at'] - long_trip['started_at']).total_seconds() / 60
+                        num_segments = max(2, int(trip_duration / MAX_REASONABLE_TRIP_MINUTES))
+                        
+                        segment_duration = (long_trip['finished_at'] - long_trip['started_at']) / num_segments
+                        
+                        for i in range(num_segments):
+                            segment_start = long_trip['started_at'] + (i * segment_duration)
+                            segment_end = segment_start + segment_duration
+                            
+                            # Create new trip segment
+                            new_segment = long_trip.copy()
+                            new_segment['started_at'] = segment_start
+                            new_segment['finished_at'] = segment_end
+                            
+                            # Add to reasonable trips
+                            reasonable_trips = pd.concat([reasonable_trips, pd.DataFrame([new_segment])], ignore_index=True)
+                    
+                    # Replace original trips with processed ones
+                    trips = reasonable_trips
+                    self.logger.info(f"Split long trips: {original_trips_count} → {len(trips)} trips")
                 
                 # Create mobility episodes from trips
                 trips['latitude'], trips['longitude'] = np.nan, np.nan
