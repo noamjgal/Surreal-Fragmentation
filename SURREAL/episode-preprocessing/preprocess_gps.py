@@ -60,6 +60,154 @@ quality_report = {
 }
 
 
+class GPSPreprocessor:
+    """Special class for handling problematic GPS data"""
+    
+    def __init__(self, logger):
+        self.logger = logger
+    
+    def load_smartphone_gps(self, file_path):
+        """Load GPS data with special encoding and format handling for P18"""
+        if not os.path.exists(file_path):
+            self.logger.error(f"File not found: {file_path}")
+            return pd.DataFrame()
+            
+        # Try multiple encodings with error handling
+        df = None
+        encodings = ['utf-8', 'latin-1', 'ISO-8859-1', 'cp1252', 'windows-1252']
+        
+        for encoding in encodings:
+            try:
+                self.logger.info(f"Trying to read file with encoding: {encoding}")
+                df = pd.read_csv(file_path, encoding=encoding, sep=None, engine='python')
+                self.logger.info(f"Successfully read file with encoding: {encoding}")
+                break
+            except Exception as e:
+                self.logger.warning(f"Failed to read with encoding {encoding}: {str(e)}")
+                continue
+        
+        if df is None or df.empty:
+            self.logger.error("Failed to read file with any encoding")
+            return pd.DataFrame()
+        
+        # Clean column names and handle P18's specific format
+        df.columns = df.columns.str.strip().str.lower()
+        self.logger.info(f"Columns found: {df.columns.tolist()}")
+        
+        # Filter out any completely empty columns
+        df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
+        
+        # Create cleaned dataframe with proper column mapping
+        try:
+            # Fix time formatting (add leading zeros)
+            if 'time' in df.columns:
+                df['time'] = df['time'].astype(str).apply(
+                    lambda t: re.sub(r'^(\d{1,2}):(\d{1}):(\d{1,2})$', r'\1:0\2:\3', t) if re.match(r'^\d{1,2}:\d{1}:\d{1,2}$', t) else
+                             re.sub(r'^(\d{1,2}):(\d{1,2}):(\d{1})$', r'\1:\2:0\3', t) if re.match(r'^\d{1,2}:\d{1,2}:\d{1}$', t) else t
+                )
+            
+            # Combine date and time for tracked_at
+            cleaned_df = pd.DataFrame()
+            
+            if 'date' in df.columns and 'time' in df.columns:
+                cleaned_df['tracked_at'] = pd.to_datetime(
+                    df['date'].astype(str) + ' ' + df['time'].astype(str),
+                    errors='coerce'
+                )
+            
+            # Map columns correctly, handling P18's reversed lat/long
+            if 'long' in df.columns and 'lat' in df.columns:
+                cleaned_df['latitude'] = pd.to_numeric(df['lat'], errors='coerce')
+                cleaned_df['longitude'] = pd.to_numeric(df['long'], errors='coerce')
+            elif 'longitude' in df.columns and 'latitude' in df.columns:
+                cleaned_df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
+                cleaned_df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
+            
+            # Add accuracy if available
+            if 'accuracy' in df.columns:
+                cleaned_df['accuracy'] = pd.to_numeric(df['accuracy'], errors='coerce')
+            
+            # Add provider if available
+            if 'provider' in df.columns:
+                cleaned_df['provider'] = df['provider']
+            
+            # Add participant ID and source
+            cleaned_df['user_id'] = '18'
+            cleaned_df['data_source'] = 'smartphone'
+            
+            # Add date column
+            cleaned_df['date'] = cleaned_df['tracked_at'].dt.date
+            
+            # Remove NaN values
+            cleaned_df = cleaned_df.dropna(subset=['tracked_at', 'latitude', 'longitude'])
+            
+            self.logger.info(f"Successfully cleaned {len(cleaned_df)} GPS points")
+            return cleaned_df
+            
+        except Exception as e:
+            self.logger.error(f"Error cleaning P18 data: {str(e)}")
+            traceback.print_exc()
+            return pd.DataFrame()
+    
+    def clean_coordinates(self, df):
+        """Special coordinate cleaning for P18"""
+        if df.empty:
+            return df
+            
+        self.logger.info(f"Cleaning coordinates for {len(df)} points")
+        
+        # 1. Remove rows with NaN coordinates
+        df = df.dropna(subset=['latitude', 'longitude'])
+        
+        # 2. Remove rows with zero coordinates
+        df = df[(df['latitude'] != 0) & (df['longitude'] != 0)]
+        
+        # 3. Check coordinates are within Israel bounds
+        in_bounds = (
+            (df['latitude'] >= ISRAEL_BOUNDS['min_lat']) & 
+            (df['latitude'] <= ISRAEL_BOUNDS['max_lat']) & 
+            (df['longitude'] >= ISRAEL_BOUNDS['min_lon']) & 
+            (df['longitude'] <= ISRAEL_BOUNDS['max_lon'])
+        )
+        
+        # Check if we need to swap coordinates
+        out_of_bounds = df[~in_bounds]
+        if len(out_of_bounds) > len(df) * 0.5:  # More than half out of bounds
+            self.logger.warning("Most coordinates out of bounds, trying lat/long swap")
+            
+            # Try swapping lat/long
+            df_swapped = df.copy()
+            df_swapped['temp'] = df_swapped['latitude']
+            df_swapped['latitude'] = df_swapped['longitude']
+            df_swapped['longitude'] = df_swapped['temp']
+            df_swapped = df_swapped.drop(columns=['temp'])
+            
+            # Check if swap improved things
+            swapped_in_bounds = (
+                (df_swapped['latitude'] >= ISRAEL_BOUNDS['min_lat']) & 
+                (df_swapped['latitude'] <= ISRAEL_BOUNDS['max_lat']) & 
+                (df_swapped['longitude'] >= ISRAEL_BOUNDS['min_lon']) & 
+                (df_swapped['longitude'] <= ISRAEL_BOUNDS['max_lon'])
+            )
+            
+            if swapped_in_bounds.mean() > in_bounds.mean():
+                self.logger.info("Coordinate swap improved in-bounds ratio, using swapped coordinates")
+                df = df_swapped
+                in_bounds = swapped_in_bounds
+        
+        # 4. Filter to in-bounds coordinates
+        df = df[in_bounds]
+        
+        # 5. Add timezone if not present
+        if hasattr(df['tracked_at'].dt, 'tz') and df['tracked_at'].dt.tz is None:
+            df['tracked_at'] = df['tracked_at'].dt.tz_localize('UTC')
+        
+        # 6. Sort by tracked_at
+        df = df.sort_values('tracked_at')
+        
+        self.logger.info(f"Cleaning complete, {len(df)} valid points remaining")
+        return df
+
 # --------------- UTILITY FUNCTIONS ---------------
 
 def haversine_distance(lat1, lon1, lat2, lon2):
@@ -1239,7 +1387,7 @@ def main():
     
     logging.info(f"Found {len(processable_participants)} processable participants")
     quality_report['participants_processed'] = len(processable_participants)
-    
+
     # 3. Process participants
     results = []
     
