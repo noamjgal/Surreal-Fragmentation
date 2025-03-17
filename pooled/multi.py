@@ -92,7 +92,7 @@ class ImprovedMultilevelAnalysis:
         self.logger.info(f"Output directory: {self.output_dir}")
 
     def load_data(self):
-        """Load pooled data and prepare for multilevel modeling.
+        """Load pooled data and prepare for multilevel modeling with corrected participant IDs.
         
         Returns:
             DataFrame: Pooled dataset with within and between-person variables
@@ -109,6 +109,39 @@ class ImprovedMultilevelAnalysis:
             self.outcome_variables = [var.replace('-', '_') for var in self.outcome_variables]
             self.fragmentation_predictors = [var.replace('-', '_') for var in self.fragmentation_predictors]
             
+            # Check for dataset source column (needed for creating unique participant IDs)
+            dataset_source_col = 'dataset_source'
+            if dataset_source_col not in df.columns:
+                self.logger.error(f"Missing dataset source column: {dataset_source_col}")
+                self.logger.error("Available columns: " + ", ".join(df.columns.tolist()))
+                return None
+            
+            # Create unique participant IDs by combining dataset source and participant ID
+            self.logger.info("Creating unique participant IDs across datasets")
+            df['original_participant_id'] = df['participant_id']  # Keep original ID for reference
+            
+            # Check that we have both necessary columns
+            if 'participant_id' in df.columns and dataset_source_col in df.columns:
+                # Create unique participant ID
+                df['participant_id'] = df[dataset_source_col] + '_' + df['participant_id'].astype(str)
+                
+                # Log the number of unique participants before and after correction
+                original_ids_count = df['original_participant_id'].nunique()
+                new_ids_count = df['participant_id'].nunique()
+                self.logger.info(f"Original number of participant IDs: {original_ids_count}")
+                self.logger.info(f"Corrected number of unique participant IDs: {new_ids_count}")
+                
+                # Check if this fixed the issue
+                if new_ids_count > original_ids_count:
+                    self.logger.info(f"Successfully disambiguated {new_ids_count - original_ids_count} duplicate participant IDs")
+                elif new_ids_count == original_ids_count:
+                    self.logger.info("No duplicate participant IDs were found")
+                else:
+                    self.logger.warning("Unexpected reduction in unique participant IDs after correction")
+            else:
+                self.logger.error("Could not create unique participant IDs due to missing columns")
+                return None
+                
             # Check for required columns
             required_vars = (self.fragmentation_predictors + 
                             self.outcome_variables + 
@@ -124,7 +157,7 @@ class ImprovedMultilevelAnalysis:
             # Create decomposition of predictors (within and between components)
             self.logger.info("Decomposing fragmentation metrics into within and between-person components")
             for predictor in self.fragmentation_predictors:
-                # Calculate person mean (between-person component)
+                # Calculate person mean (between-person component) using the new unique IDs
                 df[f'{predictor}_between'] = df.groupby('participant_id')[predictor].transform('mean')
                 
                 # Calculate person-centered values (within-person component)
@@ -151,7 +184,14 @@ class ImprovedMultilevelAnalysis:
             self.logger.info(f"  Total observations: {len(df)}")
             self.logger.info(f"  Total participants: {df['participant_id'].nunique()}")
             self.logger.info(f"  Observations per participant: min={obs_per_participant.min()}, "
-                           f"max={obs_per_participant.max()}, mean={obs_per_participant.mean():.1f}")
+                        f"max={obs_per_participant.max()}, mean={obs_per_participant.mean():.1f}")
+            
+            # Report participant counts by dataset
+            if dataset_source_col in df.columns:
+                dataset_counts = df.groupby(dataset_source_col)['participant_id'].nunique()
+                self.logger.info(f"Participant count by dataset:")
+                for dataset, count in dataset_counts.items():
+                    self.logger.info(f"  {dataset}: {count} participants")
             
             # Report categorical distributions for control variables
             for control_name, control_var in self.control_variables.items():
@@ -861,9 +901,13 @@ class ImprovedMultilevelAnalysis:
             moderation_summary = []
             comparison_summary = []
             
-            # Process basic models (without controls)
+                            # Process basic models (without controls)
             for outcome_var, outcome_models in self.model_results.get('basic_models', {}).items():
                 for predictor, model_result in outcome_models.items():
+                    # Create CI strings for cleaner presentation
+                    within_ci = f"[{model_result.get('within_ci_low', np.nan):.2f}, {model_result.get('within_ci_high', np.nan):.2f}]"
+                    between_ci = f"[{model_result.get('between_ci_low', np.nan):.2f}, {model_result.get('between_ci_high', np.nan):.2f}]"
+                    
                     basic_summary.append({
                         'Outcome': outcome_var,
                         'Predictor': predictor,
@@ -871,11 +915,13 @@ class ImprovedMultilevelAnalysis:
                         'Within-Effect': model_result.get('within_coef', np.nan),
                         'Within-P': model_result.get('within_pval', np.nan),
                         'Within-Sig': model_result.get('within_sig', ''),
+                        'Within-CI': within_ci,
                         'Within-CI Low': model_result.get('within_ci_low', np.nan),
                         'Within-CI High': model_result.get('within_ci_high', np.nan),
                         'Between-Effect': model_result.get('between_coef', np.nan),
                         'Between-P': model_result.get('between_pval', np.nan),
                         'Between-Sig': model_result.get('between_sig', ''),
+                        'Between-CI': between_ci,
                         'Between-CI Low': model_result.get('between_ci_low', np.nan),
                         'Between-CI High': model_result.get('between_ci_high', np.nan),
                         'N': model_result.get('n_obs', 0),
@@ -890,6 +936,10 @@ class ImprovedMultilevelAnalysis:
             
             for outcome_var, outcome_models in self.model_results.get('controlled_models', {}).items():
                 for predictor, model_result in outcome_models.items():
+                    # Create CI strings for cleaner presentation
+                    within_ci = f"[{model_result.get('within_ci_low', np.nan):.2f}, {model_result.get('within_ci_high', np.nan):.2f}]"
+                    between_ci = f"[{model_result.get('between_ci_low', np.nan):.2f}, {model_result.get('between_ci_high', np.nan):.2f}]"
+                    
                     controlled_summary.append({
                         'Outcome': outcome_var,
                         'Predictor': predictor,
@@ -897,11 +947,13 @@ class ImprovedMultilevelAnalysis:
                         'Within-Effect': model_result.get('within_coef', np.nan),
                         'Within-P': model_result.get('within_pval', np.nan),
                         'Within-Sig': model_result.get('within_sig', ''),
+                        'Within-CI': within_ci,
                         'Within-CI Low': model_result.get('within_ci_low', np.nan),
                         'Within-CI High': model_result.get('within_ci_high', np.nan),
                         'Between-Effect': model_result.get('between_coef', np.nan),
                         'Between-P': model_result.get('between_pval', np.nan),
                         'Between-Sig': model_result.get('between_sig', ''),
+                        'Between-CI': between_ci,
                         'Between-CI Low': model_result.get('between_ci_low', np.nan),
                         'Between-CI High': model_result.get('between_ci_high', np.nan),
                         'N': model_result.get('n_obs', 0),
@@ -931,6 +983,9 @@ class ImprovedMultilevelAnalysis:
                                 ci_low = control_data['ci_low'].get(param_name, np.nan)
                                 ci_high = control_data['ci_high'].get(param_name, np.nan)
                                 
+                                # Create formatted CI string
+                                ci_str = f"[{ci_low:.2f}, {ci_high:.2f}]"
+                                
                                 control_var_effects.append({
                                     'Outcome': outcome_var,
                                     'Predictor': predictor,
@@ -939,6 +994,7 @@ class ImprovedMultilevelAnalysis:
                                     'Coefficient': coefficient,
                                     'P-value': p_value,
                                     'Significance': significance,
+                                    'CI': ci_str,
                                     'CI Low': ci_low,
                                     'CI High': ci_high
                                 })
@@ -949,6 +1005,10 @@ class ImprovedMultilevelAnalysis:
                     primary_pred = model_result.get('predictor', '')
                     control_pred = model_result.get('control_predictor', '')
                     
+                    # Create CI strings for cleaner presentation
+                    within_ci = f"[{model_result.get('within_ci_low', np.nan):.2f}, {model_result.get('within_ci_high', np.nan):.2f}]"
+                    between_ci = f"[{model_result.get('between_ci_low', np.nan):.2f}, {model_result.get('between_ci_high', np.nan):.2f}]"
+                    
                     cross_frag_summary.append({
                         'Outcome': outcome_var,
                         'Primary Predictor': primary_pred,
@@ -956,9 +1016,11 @@ class ImprovedMultilevelAnalysis:
                         'Within-Effect': model_result.get('within_coef', np.nan),
                         'Within-P': model_result.get('within_pval', np.nan),
                         'Within-Sig': model_result.get('within_sig', ''),
+                        'Within-CI': within_ci,
                         'Between-Effect': model_result.get('between_coef', np.nan),
                         'Between-P': model_result.get('between_pval', np.nan),
                         'Between-Sig': model_result.get('between_sig', ''),
+                        'Between-CI': between_ci,
                         'Control Within-Effect': model_result.get('control_within_coef', np.nan),
                         'Control Within-P': model_result.get('control_within_pval', np.nan),
                         'Control Within-Sig': model_result.get('control_within_sig', ''),
@@ -1097,17 +1159,31 @@ class ImprovedMultilevelAnalysis:
                         sheet_name = f"{outcome_var.replace('_std', '')}_Subgroups"
                         if len(sheet_name) > 30:  # Excel sheet name limit
                             sheet_name = sheet_name[:30]
-                        outcome_mod.to_excel(writer, sheet_name=sheet_name, index=False)
-                
-                # Create moderator-specific comparison sheets
-                moderators = comparison_df['Moderator'].unique() if not comparison_df.empty else []
-                for moderator in moderators:
-                    mod_comp = comparison_df[comparison_df['Moderator'] == moderator]
-                    if not mod_comp.empty:
-                        sheet_name = f"{moderator.title()}_Comparisons"
-                        if len(sheet_name) > 30:  # Excel sheet name limit
-                            sheet_name = sheet_name[:30]
-                        mod_comp.to_excel(writer, sheet_name=sheet_name, index=False)
+                            outcome_mod.to_excel(writer, sheet_name=sheet_name, index=False)
+                            # Create combined summary table for presentation
+                            presenter_df = pd.DataFrame()
+                            if not controlled_df.empty:
+                                # Select key columns for presentation
+                                presenter_cols = ['Outcome', 'Predictor', 'Within-Effect', 'Within-P', 'Within-Sig', 
+                                                'Within-CI', 'Between-Effect', 'Between-P', 'Between-Sig', 
+                                                'Between-CI', 'N', 'Participants']
+                                presenter_df = controlled_df[presenter_cols].copy()
+                                
+                                # Format numeric columns for presentation
+                                for col in ['Within-Effect', 'Between-Effect']:
+                                    presenter_df[col] = presenter_df[col].round(2)
+                                for col in ['Within-P', 'Between-P']:
+                                    presenter_df[col] = presenter_df[col].round(3)
+                                
+                                # Create formatted coefficient strings with significance markers
+                                presenter_df['Within-Coef'] = presenter_df.apply(
+                                    lambda x: f"{x['Within-Effect']:.2f}{x['Within-Sig']}", axis=1)
+                                presenter_df['Between-Coef'] = presenter_df.apply(
+                                    lambda x: f"{x['Between-Effect']:.2f}{x['Within-Sig']}", axis=1)
+                                
+                                presenter_df = presenter_df[['Outcome', 'Predictor', 'Within-Coef', 'Within-CI', 
+                                                         'Between-Coef', 'Between-CI', 'N', 'Participants']]
+                                presenter_df.to_excel(writer, sheet_name='Presentation Table', index=False)
                 
                 # Create control-variable specific sheets
                 if not control_var_df.empty:
