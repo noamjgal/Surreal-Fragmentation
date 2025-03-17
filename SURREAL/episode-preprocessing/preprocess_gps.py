@@ -1150,6 +1150,12 @@ def process_participant(participant_id, qstarz_files, app_files, app_gps_files):
         app_data = None
         if participant_id in app_files:
             app_data = read_app_data(app_files[participant_id])
+            
+            # Save app usage data to file
+            if app_data is not None and not app_data.empty:
+                app_output_path = GPS_PREP_DIR / f"{participant_id}_app_prep.csv"
+                app_data.to_csv(app_output_path, index=False)
+                logging.info(f"Saved processed app usage data to {app_output_path}")
         
         # Merge GPS data sources
         merged_gps = merge_gps_sources(qstarz_data, smartphone_data, participant_id)
