@@ -475,28 +475,20 @@ def main():
     print(log_location_message)
     
     try:
-        # Define paths for both normalization approaches
-        participant_norm_dir = Path("/Users/noamgal/DSProjects/Fragmentation/SURREAL/EMA-Processing/output/normalized")
-        population_norm_dir = Path("/Users/noamgal/DSProjects/Fragmentation/SURREAL/EMA-Processing/output/normalized_population")
+        # Define paths - use standardized path for fragmentation
+        frag_path = PROCESSED_DATA_DIR / 'fragmentation' / 'fragmentation_all_metrics.csv'
         
-        # Fragmentation data from the daily_fragmentation.py output
-        fragmentation_file = PROCESSED_DATA_DIR / "fragmentation" / "fragmentation_all_metrics.csv"
+        # Update paths to match where EMA-Processing scripts actually output the files
+        ema_processing_dir = Path("/Users/noamgal/DSProjects/Fragmentation/SURREAL/EMA-Processing")
+        participant_norm_dir = ema_processing_dir / "output" / "normalized"
+        population_norm_dir = ema_processing_dir / "output" / "normalized_population"
         
-        # Log the full resolved path
-        logging.info(f"Resolved fragmentation file path: {fragmentation_file.absolute()}")
-        
-        # Verify the file exists
-        if not fragmentation_file.exists():
-            logging.error(f"FRAGMENTATION FILE NOT FOUND at: {fragmentation_file.absolute()}")
-            logging.error("Please check if daily_fragmentation.py generated the file in the expected location")
-            return  # Exit if file not found
-        
-        # Output directory
-        output_dir = PROCESSED_DATA_DIR / "daily_ema_fragmentation"
+        # Create output directory within the standardized processed data directory
+        output_dir = PROCESSED_DATA_DIR / 'daily_ema_fragmentation'
         output_dir.mkdir(parents=True, exist_ok=True)
         
         # Load fragmentation data (only need to do this once)
-        frag_data = load_fragmentation_data(fragmentation_file)
+        frag_data = load_fragmentation_data(frag_path)
         
         if frag_data is None or frag_data.empty:
             logging.error("Failed to load fragmentation data. Check the fragmentation file path.")

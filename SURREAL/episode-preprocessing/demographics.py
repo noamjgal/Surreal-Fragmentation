@@ -17,6 +17,7 @@ import argparse
 from datetime import datetime
 import re
 from data_utils import DataCleaner
+import sys
 
 def setup_logging(output_dir):
     """Set up logging configuration"""
@@ -536,26 +537,9 @@ def main():
     # Hardcode file paths relative to SURREAL folder
     demographics_path = os.path.join(surreal_path, 'data', 'raw', 'participant_info.xlsx')
     
-    # Define input paths for all three normalization approaches
-    input_file_paths = {
-        "unstandardized": os.path.join(surreal_path, 'processed', 'daily_ema_fragmentation_unstd', 'combined_metrics_raw.csv'),
-        "participant": os.path.join(surreal_path, 'processed', 'daily_ema_fragmentation', 'combined_metrics_participant_norm.csv'),
-        "population": os.path.join(surreal_path, 'processed', 'daily_ema_fragmentation', 'combined_metrics_population_norm.csv')
-    }
-    
-    # Also try backup locations if files don't exist
-    backup_paths = {
-        "unstandardized": "/Volumes/Extreme SSD/SURREAL-DataBackup/HUJI_data-main/processed/daily_ema_fragmentation_unstd/combined_metrics_raw.csv",
-        "participant": "/Volumes/Extreme SSD/SURREAL-DataBackup/HUJI_data-main/processed/daily_ema_fragmentation/combined_metrics_participant_norm.csv",
-        "population": "/Volumes/Extreme SSD/SURREAL-DataBackup/HUJI_data-main/processed/daily_ema_fragmentation/combined_metrics_population_norm.csv"
-    }
-    
-    # Verify input files exist, use backup if needed
-    for norm_type in input_file_paths:
-        if not os.path.exists(input_file_paths[norm_type]) and os.path.exists(backup_paths[norm_type]):
-            input_file_paths[norm_type] = backup_paths[norm_type]
-    
-    output_dir = os.path.join(surreal_path, 'processed', 'merged_data')
+    # Use Path objects for proper cross-platform compatibility
+    output_dir = Path(surreal_path) / 'processed' / 'merged_data'
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     # Still allow command-line overrides for flexibility
     parser = argparse.ArgumentParser(description='Merge demographic data with fragmentation and EMA datasets')
@@ -590,6 +574,18 @@ def main():
         logger.error("Failed to load demographics data - exiting")
         return
     
+    # Define input paths using standardized config import
+    # Import config if not already imported
+    if 'PROCESSED_DATA_DIR' not in globals():
+        sys.path.append(str(Path(__file__).parent.parent))
+        from config.paths import PROCESSED_DATA_DIR
+    
+    # Update the input file paths to use PROCESSED_DATA_DIR (removing raw metrics)
+    input_file_paths = {
+        "participant": PROCESSED_DATA_DIR / 'daily_ema_fragmentation' / 'combined_metrics_participant_norm.csv',
+        "population": PROCESSED_DATA_DIR / 'daily_ema_fragmentation' / 'combined_metrics_population_norm.csv'
+    }
+    
     # Determine which normalization types to process
     if args.types.lower() == "all":
         norm_types_to_process = list(input_file_paths.keys())
@@ -605,7 +601,7 @@ def main():
             # Try to determine the normalization type from the filename
             file_name = os.path.basename(args.ema_data)
             if "raw" in file_name:
-                norm_type = "unstandardized"
+                norm_type = "raw"
             elif "participant" in file_name:
                 norm_type = "participant"
             elif "population" in file_name:

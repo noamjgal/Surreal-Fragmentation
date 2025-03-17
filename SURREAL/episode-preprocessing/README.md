@@ -37,7 +37,7 @@ The project identifies three types of behavioral episodes:
 2. Preprocess GPS data: `python preprocess-gps.py`
 3. Detect episodes: `python detect_episodes.py`
 4. Calculate fragmentation: `python daily_fragmentation.py`
-5. Integrate datasets: `python combine_metrics.py` or `python combine_metrics_raw.py`
+5. Integrate datasets: `python combine_metrics.py`
 6. Process demographics: `python demographics.py`
 7. (Optional) Generate visualizations: `python map-episodes.py`
 
