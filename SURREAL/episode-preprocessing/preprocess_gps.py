@@ -1246,6 +1246,9 @@ def main():
     """Main processing function"""
     start_time = datetime.now()
     
+    # List of participants who are missing app data to skip
+    SKIP_PARTICIPANTS = {'11', '12', '15', '17', '18', '21', '26', '31'}
+    
     # 1. Find data files with flexible path handling
     qstarz_files = {}
     
@@ -1398,7 +1401,9 @@ def main():
     results = []
     
     for participant_id in processable_participants:
-        if participant_id.startswith('._'):
+        if participant_id.startswith('._') or participant_id in SKIP_PARTICIPANTS:
+            if participant_id in SKIP_PARTICIPANTS:
+                logging.info(f"Skipping participant {participant_id} as requested")
             continue
             
         logging.info(f"Processing participant {participant_id}...")
