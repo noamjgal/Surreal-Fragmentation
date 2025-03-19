@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Simplified GPS data preprocessing script with improved outlier detection
+Simplified GPS data preprocessing script with sequential outlier detection
 """
 import pandas as pd
 import numpy as np
@@ -56,7 +56,10 @@ quality_report = {
     'merged_days': 0,
     'coordinate_fixes': 0,
     'date_fixes': 0,
-    'outliers_removed': 0
+    'outliers_removed': 0,
+    'discarded_days': 0,
+    'initial_qstarz_days': 0,
+    'initial_smartphone_days': 0
 }
 
 
@@ -284,37 +287,26 @@ def fix_smartphone_dates(df):
     return df
 
 
-def clean_coordinates(points, source='unknown'):
-    """
-    Clean and validate GPS coordinates with improved outlier detection
-    """
-    if points is None or points.empty:
+def clean_coordinates_sequential(points, max_reasonable_jump_km=50):
+    """Clean coordinates based on sequential movement rather than median location"""
+    if points is None or len(points) < 2:
         return points
-    
-    df = points.copy()
+        
+    df = points.copy().sort_values('tracked_at')
     original_len = len(df)
     
-    # Log initial coordinate ranges
-    lat_min, lat_max = df['latitude'].min(), df['latitude'].max()
-    lon_min, lon_max = df['longitude'].min(), df['longitude'].max()
-    logging.info(f"{source} initial coordinate range: Lat [{lat_min:.6f}, {lat_max:.6f}], "
-                f"Lon [{lon_min:.6f}, {lon_max:.6f}]")
-    
-    # 1. Basic cleaning - remove NaN and zeros
+    # Basic cleaning first
     df = df.dropna(subset=['latitude', 'longitude'])
     df = df[(df['latitude'] != 0) & (df['longitude'] != 0)]
     
-    # 2. Remove extreme outliers (beyond Earth's coordinates)
+    # Remove extreme outliers (beyond Earth's coordinates)
     earth_mask = (df['latitude'].between(-90, 90) & df['longitude'].between(-180, 180))
     extreme_outliers = (~earth_mask).sum()
     if extreme_outliers > 0:
-        # Log sample of extreme outliers for debugging
-        extreme_sample = df[~earth_mask].head(3)
         logging.warning(f"Removed {extreme_outliers} impossible coordinates beyond Earth's bounds")
-        logging.warning(f"Sample extreme outliers: \n{extreme_sample[['latitude', 'longitude']].to_string()}")
         df = df[earth_mask]
     
-    # 3. Check if coordinates are within Israel bounds
+    # Check if coordinates are within Israel bounds
     in_bounds = (
         (df['latitude'] >= ISRAEL_BOUNDS['min_lat']) & 
         (df['latitude'] <= ISRAEL_BOUNDS['max_lat']) & 
@@ -322,7 +314,7 @@ def clean_coordinates(points, source='unknown'):
         (df['longitude'] <= ISRAEL_BOUNDS['max_lon'])
     )
     
-    # Handle out-of-bounds points
+    # Handle out-of-bounds points with possible lat/long swap fix
     out_of_bounds = df[~in_bounds].copy()
     if not out_of_bounds.empty:
         # Try lat/long swap fix for out-of-bounds points
@@ -342,111 +334,61 @@ def clean_coordinates(points, source='unknown'):
             logging.info(f"Fixed {fixed_by_swap} coordinates by swapping lat/long")
             quality_report['coordinate_fixes'] += fixed_by_swap
             
-            # Log sample of fixed coordinates
-            if fixed_by_swap > 0:
-                sample_fixed = swapped_df[swapped_in_bounds].head(3)
-                sample_original = out_of_bounds.loc[sample_fixed.index]
-                for i, (_, orig) in enumerate(sample_original.iterrows()):
-                    fixed = sample_fixed.iloc[i]
-                    logging.info(f"Coordinate swap example: ({orig['latitude']:.6f}, {orig['longitude']:.6f}) → "
-                                f"({fixed['latitude']:.6f}, {fixed['longitude']:.6f})")
-            
             # Combine in-bounds original points with fixed swapped points
             in_bounds_points = df[in_bounds]
             fixed_points = swapped_df[swapped_in_bounds]
             df = pd.concat([in_bounds_points, fixed_points], ignore_index=True)
         else:
-            # Log sample of removed out-of-bounds coordinates
-            sample_removed = out_of_bounds.head(3)
+            # Remove remaining out-of-bounds points
             logging.warning(f"Removed {len(out_of_bounds)} coordinates outside Israel's bounds")
-            logging.warning(f"Sample removed out-of-bounds points: \n{sample_removed[['latitude', 'longitude']].to_string()}")
             df = df[in_bounds]
     else:
         df = df[in_bounds]
     
-    # 4. Improved outlier detection with adaptive thresholding
-    if len(df) >= 10:
-        # Calculate median location
-        median_lat = df['latitude'].median()
-        median_lon = df['longitude'].median()
-        
-        # Calculate distances from median location (in kilometers)
-        df['dist_from_median'] = df.apply(
-            lambda row: haversine_distance(median_lat, median_lon, row['latitude'], row['longitude'])/1000,
-            axis=1
-        )
-        
-        # Calculate IQR statistics
-        q1 = df['dist_from_median'].quantile(0.25)
-        q3 = df['dist_from_median'].quantile(0.75)
-        iqr = q3 - q1
-        
-        # Use adaptive threshold with minimum distance guarantee
-        # Ensure threshold is at least 1km to allow for normal movement patterns
-        min_threshold = 1.0  # Minimum 1km threshold
-        calculated_threshold = q3 + (2.0 * iqr)
-        upper_bound = max(calculated_threshold, min_threshold)
-        
-        # For large datasets, use percentile-based approach as fallback
-        if len(df) > 1000:
-            percentile_threshold = df['dist_from_median'].quantile(0.95)  # Keep 95% of points
-            upper_bound = max(upper_bound, percentile_threshold)
-        
-        # Identify outliers
-        outliers = df['dist_from_median'] > upper_bound
-        outlier_count = outliers.sum()
-        
-        if outlier_count > 0:
-            # Log sample of detected outliers
-            outlier_sample = df[outliers].sort_values('dist_from_median', ascending=False).head(3)
-            logging.warning(f"Removed {outlier_count} spatial outliers (>{upper_bound:.1f}km from median)")
-            logging.warning(f"Sample outliers: \n{outlier_sample[['latitude', 'longitude', 'dist_from_median']].to_string()}")
-            
-            # Special case: check if outliers form a separate valid cluster
-            # (in case the dataset has multiple valid locations)
-            if outlier_count >= 10 and outlier_count <= len(df) * 0.4:  # Increased from 0.3
-                outlier_median_lat = df.loc[outliers, 'latitude'].median()
-                outlier_median_lon = df.loc[outliers, 'longitude'].median()
-                
-                # Check if outlier cluster is within Israel
-                if (ISRAEL_BOUNDS['min_lat'] <= outlier_median_lat <= ISRAEL_BOUNDS['max_lat'] and
-                    ISRAEL_BOUNDS['min_lon'] <= outlier_median_lon <= ISRAEL_BOUNDS['max_lon']):
-                    
-                    # Calculate spread of outlier cluster
-                    outlier_df = df[outliers]
-                    lat_spread = outlier_df['latitude'].max() - outlier_df['latitude'].min()
-                    lon_spread = outlier_df['longitude'].max() - outlier_df['longitude'].min()
-                    
-                    # If the outlier cluster is compact, it might be valid
-                    if lat_spread < 0.5 and lon_spread < 0.5:
-                        logging.info("Detected potential secondary location cluster - keeping these points")
-                        outliers = pd.Series(False, index=df.index)
-                        outlier_count = 0
-            
-            # Remove outliers from dataset
-            df = df[~outliers]
-            quality_report['outliers_removed'] += outlier_count
-        
-        # Drop distance column
-        df = df.drop(columns=['dist_from_median'])
+    # Sort again after potential modifications
+    df = df.sort_values('tracked_at')
     
-    # Log final coordinate ranges and changes
-    if not df.empty:
-        lat_min, lat_max = df['latitude'].min(), df['latitude'].max()
-        lon_min, lon_max = df['longitude'].min(), df['longitude'].max()
-        logging.info(f"{source} final coordinate range: Lat [{lat_min:.6f}, {lat_max:.6f}], "
-                    f"Lon [{lon_min:.6f}, {lon_max:.6f}]")
+    # Add previous coordinates for sequential analysis
+    df['prev_lat'] = df['latitude'].shift(1)
+    df['prev_lon'] = df['longitude'].shift(1)
+    df['time_diff'] = (df['tracked_at'] - df['tracked_at'].shift(1)).dt.total_seconds()
+    
+    # Only calculate distances where time gap is reasonable (< 3 hours)
+    reasonable_time = df['time_diff'] < 10800  # 3 hours in seconds
+    
+    # Calculate jump distance (km) from previous point
+    df.loc[reasonable_time, 'jump_dist_km'] = df[reasonable_time].apply(
+        lambda row: haversine_distance(
+            row['prev_lat'], row['prev_lon'], row['latitude'], row['longitude']
+        ) / 1000 if not pd.isna(row['prev_lat']) else 0,
+        axis=1
+    )
+    
+    # Flag unreasonable jumps as outliers
+    outliers = (df['jump_dist_km'] > max_reasonable_jump_km) & reasonable_time
+    outlier_count = outliers.sum()
+    
+    if outlier_count > 0:
+        logging.info(f"Removed {outlier_count} points with jumps > {max_reasonable_jump_km}km")
+        quality_report['outliers_removed'] += outlier_count
+        
+        # Keep first point even if we can't calculate distance
+        df = df[~outliers | df['time_diff'].isna()]
+    
+    # Remove temporary columns
+    df = df.drop(columns=['prev_lat', 'prev_lon', 'time_diff', 'jump_dist_km'])
     
     # Log summary
     points_removed = original_len - len(df)
     if points_removed > 0:
+        source = df['data_source'].iloc[0] if 'data_source' in df.columns else 'unknown'
         logging.info(f"Total coordinates filtered from {source}: {points_removed} ({points_removed/original_len:.1%})")
     
     return df
 
 
-def filter_speed_outliers(points, max_speed_kph=150):
-    """Remove points with unrealistic speeds between them"""
+def filter_speed_outliers(points, max_speed_kph=200):
+    """Remove points with unrealistic speeds between them (standardized to 200km/h)"""
     if points is None or len(points) < 2:
         return points
     
@@ -485,12 +427,6 @@ def filter_speed_outliers(points, max_speed_kph=150):
             
             if outlier_count > 0:
                 source = df['data_source'].iloc[0] if 'data_source' in df.columns else 'unknown'
-                
-                # Log sample of speed outliers
-                if outlier_count > 0:
-                    sample_outliers = df[outliers].sort_values('speed_kmh', ascending=False).head(3)
-                    logging.info(f"Sample speed outliers: \n{sample_outliers[['tracked_at', 'latitude', 'longitude', 'speed_kmh']].to_string()}")
-                
                 logging.info(f"Removed {outlier_count} {source} points with speed > {max_speed_kph} km/h")
                 df = df[~outliers]
         
@@ -588,12 +524,13 @@ def read_qstarz_data(file_path):
             gps_data['tracked_at'] = gps_data['tracked_at'].dt.tz_localize('UTC')
         
         # Clean coordinates and filter speed outliers
-        gps_data = clean_coordinates(gps_data, source='qstarz')
-        gps_data = filter_speed_outliers(gps_data, max_speed_kph=150)
+        gps_data = clean_coordinates_sequential(gps_data)
+        gps_data = filter_speed_outliers(gps_data, max_speed_kph=200)  # Standardized to 200 km/h
         
         if not gps_data.empty:
             logging.info(f"Processed {len(gps_data)} Qstarz points for {participant_id}")
-            logging.info(f"Processed {gps_data['date'].nunique()} days of Qstarz data")
+            logging.info(f"Processed {len(gps_data['date'])} days of Qstarz data")
+            quality_report['initial_qstarz_days'] += len(gps_data['date'])
         else:
             logging.warning(f"No valid Qstarz data after cleaning for {participant_id}")
             
@@ -706,10 +643,6 @@ def read_smartphone_data(file_path):
         nat_count = df['tracked_at'].isna().sum()
         if nat_count > 0:
             logging.warning(f"{nat_count} NaT values ({nat_count/len(df):.1%}) in datetime parsing")
-            # Log sample of problematic dates
-            if nat_count > 0:
-                nat_samples = df[df['tracked_at'].isna()].head(3)
-                logging.warning(f"Sample unparseable dates: \n{nat_samples[[date_col, time_col]].to_string()}")
         
         # Create output dataframe with explicit type conversion
         try:
@@ -757,18 +690,14 @@ def read_smartphone_data(file_path):
             gps_data['tracked_at'] = gps_data['tracked_at'].dt.tz_localize('UTC')
         
         # Clean coordinates and filter speed outliers
-        gps_data = clean_coordinates(gps_data, source='smartphone')
-        gps_data = filter_speed_outliers(gps_data, max_speed_kph=200)  # Higher threshold for smartphones
+        gps_data = clean_coordinates_sequential(gps_data)
+        gps_data = filter_speed_outliers(gps_data, max_speed_kph=200)  # Standardized to 200 km/h
         
         if not gps_data.empty:
-            days_covered = gps_data['date'].nunique()
+            days_covered = len(gps_data['date'])
             logging.info(f"Processed {len(gps_data)} smartphone GPS points for {participant_id}")
             logging.info(f"Processed {days_covered} days of smartphone GPS data")
-            
-            # Log date range
-            min_date = gps_data['date'].min()
-            max_date = gps_data['date'].max()
-            logging.info(f"Date range: {min_date} to {max_date}")
+            quality_report['initial_smartphone_days'] += days_covered
         else:
             logging.warning(f"No valid smartphone data after cleaning for {participant_id}")
             
@@ -894,10 +823,10 @@ def calculate_metrics(gps_df, source_name="unknown"):
             'has_data': False
         }
     
-    # Basic metrics
-    days = gps_df['date'].nunique()
+    # Corrected metrics calculation
     total_points = len(gps_df)
-    points_per_day = total_points / max(1, days)
+    days = gps_df['date'].nunique()
+    points_per_day = total_points / days if days > 0 else 0
     
     # Average gap
     if len(gps_df) > 1:
@@ -938,23 +867,26 @@ def calculate_metrics(gps_df, source_name="unknown"):
     else:
         spatial_coverage = 0
     
-    # Quality score (0-100)
-    score = min(100, (
-        min(50, points_per_day / 5) +        # Up to 50 points for density
-        min(20, spatial_coverage / 10) +     # Up to 20 points for spatial coverage
-        min(30, 30 * (1 - min(1, average_gap / 300)))  # Up to 30 points for low gaps
-    ))
+    # Improved quality score calculation
+    score_components = {
+        'density': min(40, points_per_day / 4),
+        'coverage': min(30, spatial_coverage / 3),
+        'continuity': min(30, 30 * (1 - min(1, average_gap / 300)))
+    }
+    
+    quality_score = sum(score_components.values())
     
     return {
         'source': source_name,
-        'quality_score': score,
+        'quality_score': min(100, quality_score),
         'total_points': total_points,
         'days': days,
         'points_per_day': points_per_day,
         'average_gap_seconds': average_gap,
         'spatial_coverage': spatial_coverage,
         'coordinate_range': coordinate_range,
-        'has_data': True
+        'has_data': True,
+        'score_components': score_components
     }
 
 
@@ -1024,72 +956,37 @@ def merge_gps_sources(qstarz_data, smartphone_data, participant_id="unknown"):
         qstarz_day_metrics = calculate_metrics(qstarz_day, f"qstarz_{date}")
         smartphone_day_metrics = calculate_metrics(smartphone_day, f"smartphone_{date}")
         
-        # Check for spatial coverage discrepancy on this day
-        qstarz_daily_coverage = qstarz_day_metrics['spatial_coverage']
-        smartphone_daily_coverage = smartphone_day_metrics['spatial_coverage']
-        
         # Both sources have usable data for this day
         qstarz_quality = qstarz_day_metrics['quality_score']
         smartphone_quality = smartphone_day_metrics['quality_score']
         
         # Smart merging - prefer one source or intelligently combine both
-        if qstarz_quality >= 60 and smartphone_quality >= 60:
-            # Both are good quality - merge them intelligently
+        if qstarz_day_metrics['total_points'] >= 50:  # More lenient threshold
+            # Use Qstarz as base and supplement with smartphone data
             merged_day = qstarz_day.copy()
             merged_day['data_source'] = 'qstarz'
             
-            # Sort by time
-            qstarz_day = qstarz_day.sort_values('tracked_at')
-            smartphone_day = smartphone_day.sort_values('tracked_at')
+            # Get smartphone points not already covered by Qstarz
+            q_start = qstarz_day['tracked_at'].min() - timedelta(minutes=5)
+            q_end = qstarz_day['tracked_at'].max() + timedelta(minutes=5)
+            supplemental_points = smartphone_day[
+                (smartphone_day['tracked_at'] < q_start) | 
+                (smartphone_day['tracked_at'] > q_end)
+            ]
             
-            # Identify gaps in Qstarz data
-            qstarz_day['time_diff'] = qstarz_day['tracked_at'].diff().dt.total_seconds()
-            gaps = qstarz_day[qstarz_day['time_diff'] > 300]  # 5-min gaps
+            if not supplemental_points.empty:
+                merged_day = pd.concat([merged_day, supplemental_points], ignore_index=True)
             
-            # Fill gaps with smartphone data
-            for _, gap_row in gaps.iterrows():
-                gap_start = gap_row['tracked_at'] - timedelta(seconds=300)
-                
-                # Find smartphone points in this gap
-                gap_points = smartphone_day[
-                    (smartphone_day['tracked_at'] > gap_start) & 
-                    (smartphone_day['tracked_at'] < gap_row['tracked_at'])
-                ].copy()
-                
-                if not gap_points.empty:
-                    gap_points['data_source'] = 'merged_high_conf'
-                    merged_day = pd.concat([merged_day, gap_points], ignore_index=True)
-            
-            # Add smartphone data outside Qstarz timespan
-            if not qstarz_day.empty and not smartphone_day.empty:
-                earliest_qstarz = qstarz_day['tracked_at'].min()
-                latest_qstarz = qstarz_day['tracked_at'].max()
-                
-                # Early morning smartphone data
-                early_points = smartphone_day[smartphone_day['tracked_at'] < earliest_qstarz].copy()
-                if not early_points.empty:
-                    early_points['data_source'] = 'merged_high_conf'
-                    merged_day = pd.concat([merged_day, early_points], ignore_index=True)
-                
-                # Late evening smartphone data
-                late_points = smartphone_day[smartphone_day['tracked_at'] > latest_qstarz].copy()
-                if not late_points.empty:
-                    late_points['data_source'] = 'merged_high_conf'
-                    merged_day = pd.concat([merged_day, late_points], ignore_index=True)
-            
-            # Sort merged data
-            merged_day = merged_day.sort_values('tracked_at')
             merged_parts.append(merged_day)
             quality_report['merged_days'] += 1
-            
-        elif qstarz_quality >= smartphone_quality * 1.2:  # Qstarz significantly better
-            qstarz_day['data_source'] = 'qstarz'
-            merged_parts.append(qstarz_day)
-            quality_report['qstarz_only_days'] += 1
-        else:  # Smartphone is better or comparable
+        elif smartphone_quality > qstarz_quality:  
             smartphone_day['data_source'] = 'smartphone'
             merged_parts.append(smartphone_day)
             quality_report['smartphone_only_days'] += 1
+        else:  # Fallback to Qstarz even with lower quality
+            qstarz_day['data_source'] = 'qstarz'
+            merged_parts.append(qstarz_day)
+            quality_report['qstarz_only_days'] += 1
     
     # Add days with data in only one source
     for date in qstarz_only_dates:
@@ -1126,7 +1023,8 @@ def process_participant(participant_id, qstarz_files, app_files, app_gps_files):
         'qstarz_days': 0,
         'smartphone_days': 0,
         'common_days': 0,
-        'reason': None
+        'reason': None,
+        'discarded_days': 0
     }
     
     try:
@@ -1136,7 +1034,7 @@ def process_participant(participant_id, qstarz_files, app_files, app_gps_files):
             qstarz_data = read_qstarz_data(qstarz_files[participant_id])
             
             if qstarz_data is not None and not qstarz_data.empty:
-                result['qstarz_days'] = len(qstarz_data['date'].unique())
+                result['qstarz_days'] = len(qstarz_data['date'])
         
         # Process smartphone GPS data if available
         smartphone_data = None
@@ -1144,7 +1042,7 @@ def process_participant(participant_id, qstarz_files, app_files, app_gps_files):
             smartphone_data = read_smartphone_data(app_gps_files[participant_id])
             
             if smartphone_data is not None and not smartphone_data.empty:
-                result['smartphone_days'] = len(smartphone_data['date'].unique())
+                result['smartphone_days'] = len(smartphone_data['date'])
         
         # Process app usage data if available
         app_data = None
@@ -1162,6 +1060,12 @@ def process_participant(participant_id, qstarz_files, app_files, app_gps_files):
         
         if merged_gps is None or merged_gps.empty:
             result['reason'] = "No valid GPS data after processing"
+            # Track discarded days
+            if qstarz_data is not None:
+                result['discarded_days'] += len(qstarz_data['date'])
+            if smartphone_data is not None:
+                result['discarded_days'] += len(smartphone_data['date'])
+            quality_report['discarded_days'] += result['discarded_days']
             return result
         
         # Calculate overlapping days
@@ -1188,6 +1092,7 @@ def process_participant(participant_id, qstarz_files, app_files, app_gps_files):
             f.write("DATA SOURCE QUALITY METRICS\n")
             f.write("-"*80 + "\n")
             
+            # Handle Qstarz metrics only if data exists
             if qstarz_data is not None and not qstarz_data.empty:
                 qstarz_metrics = calculate_metrics(qstarz_data, "qstarz")
                 f.write("Qstarz Data:\n")
@@ -1198,6 +1103,7 @@ def process_participant(participant_id, qstarz_files, app_files, app_gps_files):
                 f.write(f"  - Average Gap: {qstarz_metrics['average_gap_seconds']:.1f} seconds\n")
                 f.write(f"  - Spatial Coverage: {qstarz_metrics['spatial_coverage']:.2f} km²\n\n")
             
+            # Handle smartphone metrics only if data exists
             if smartphone_data is not None and not smartphone_data.empty:
                 smartphone_metrics = calculate_metrics(smartphone_data, "smartphone")
                 f.write("Smartphone Data:\n")
@@ -1218,12 +1124,31 @@ def process_participant(participant_id, qstarz_files, app_files, app_gps_files):
             f.write(f"  - Average Gap: {merged_metrics['average_gap_seconds']:.1f} seconds\n")
             f.write(f"  - Spatial Coverage: {merged_metrics['spatial_coverage']:.2f} km²\n\n")
             
-            # Data source breakdown
             f.write("MERGED DATA SOURCE BREAKDOWN\n")
             f.write("-"*80 + "\n")
             source_counts = merged_gps['data_source'].value_counts()
             for source, count in source_counts.items():
                 f.write(f"{source}: {count} points ({count/len(merged_gps)*100:.1f}%)\n")
+            
+            f.write("\nQUALITY SCORE BREAKDOWN\n")
+            f.write("-"*80 + "\n")
+            # Only include available metrics
+            if qstarz_data is not None and not qstarz_data.empty:
+                f.write("Qstarz Components:\n")
+                f.write(f"  Density: {qstarz_metrics['score_components']['density']:.1f}\n")
+                f.write(f"  Coverage: {qstarz_metrics['score_components']['coverage']:.1f}\n")
+                f.write(f"  Continuity: {qstarz_metrics['score_components']['continuity']:.1f}\n\n")
+            
+            if smartphone_data is not None and not smartphone_data.empty:
+                f.write("Smartphone Components:\n")
+                f.write(f"  Density: {smartphone_metrics['score_components']['density']:.1f}\n")
+                f.write(f"  Coverage: {smartphone_metrics['score_components']['coverage']:.1f}\n")
+                f.write(f"  Continuity: {smartphone_metrics['score_components']['continuity']:.1f}\n\n")
+            
+            f.write("Merged Components:\n")
+            f.write(f"  Density: {merged_metrics['score_components']['density']:.1f}\n")
+            f.write(f"  Coverage: {merged_metrics['score_components']['coverage']:.1f}\n")
+            f.write(f"  Continuity: {merged_metrics['score_components']['continuity']:.1f}\n")
         
         logging.info(f"Saved diagnostics to {diagnostics_path}")
         
@@ -1259,9 +1184,9 @@ def main():
         '**/Qstarz*.csv',
         '**/qstarz*.csv',
         '**/GPS/Q*.csv',
-        '**/*_Qstarz_*.csv',     # Added pattern for files like 006_1_Qstarz_processed.csv
-        '**/*_Qstarz*.csv',      # More general pattern with underscore
-        '**/Q*.csv'              # Very general pattern for any Q files
+        '**/*_Qstarz_*.csv',
+        '**/*_Qstarz*.csv',
+        '**/Q*.csv'
     ]
     
     # Check in both raw data dir and processed data dir for Qstarz files
@@ -1392,9 +1317,27 @@ def main():
     # 2. Determine participants to process
     participants_with_gps = set(qstarz_files.keys()) | set(app_gps_files.keys())
     participants_with_app = set(app_files.keys())
-    processable_participants = participants_with_gps & participants_with_app
-    
-    logging.info(f"Found {len(processable_participants)} processable participants")
+
+    # Normalize participant IDs by stripping leading zeros and non-numeric characters
+    def normalize_pid(pid):
+        # Extract numeric part and remove leading zeros
+        numeric_id = re.sub(r"\D", "", str(pid)).lstrip("0") or "0"
+        return numeric_id.zfill(2)  # Standardize to at least 2 digits
+
+    # Normalize all participant IDs
+    SKIP_PARTICIPANTS = {normalize_pid(pid) for pid in SKIP_PARTICIPANTS}
+    participants_with_gps = {normalize_pid(pid) for pid in participants_with_gps}
+    participants_with_app = {normalize_pid(pid) for pid in participants_with_app}
+    qstarz_files = {normalize_pid(k): v for k, v in qstarz_files.items()}
+    app_gps_files = {normalize_pid(k): v for k, v in app_gps_files.items()}
+    app_files = {normalize_pid(k): v for k, v in app_files.items()}
+
+    processable_participants = [
+        pid for pid in participants_with_gps & participants_with_app
+        if pid not in SKIP_PARTICIPANTS
+    ]
+
+    logging.info(f"Found {len(processable_participants)} processable participants after excluding {len(SKIP_PARTICIPANTS)} skipped participants")
     quality_report['participants_processed'] = len(processable_participants)
 
     # 3. Process participants
@@ -1419,6 +1362,12 @@ def main():
     report_path = GPS_PREP_DIR / "preprocessing_report.txt"
     run_time = (datetime.now() - start_time).total_seconds()
     
+    # Calculate data retention metrics
+    initial_total_days = quality_report['initial_qstarz_days'] + quality_report['initial_smartphone_days']
+    final_total_days = quality_report['merged_days'] + quality_report['qstarz_only_days'] + quality_report['smartphone_only_days']
+    days_lost = initial_total_days - final_total_days
+    retention_percent = (final_total_days / initial_total_days * 100) if initial_total_days > 0 else 0
+    
     with open(report_path, 'w') as f:
         f.write(f"GPS Preprocessing Report ({quality_report['start_time']})\n")
         f.write("="*80 + "\n")
@@ -1429,12 +1378,22 @@ def main():
         
         f.write("DATA FUSION STATISTICS\n")
         f.write("-"*80 + "\n")
-        f.write(f"Days with merged data from both sources: {quality_report['merged_days']}\n")
+        f.write(f"Observation days with merged data: {quality_report['merged_days']}\n")
         f.write(f"Days with only Qstarz data: {quality_report['qstarz_only_days']}\n")
         f.write(f"Days with only smartphone data: {quality_report['smartphone_only_days']}\n")
+        f.write(f"Total observation days: {final_total_days}\n")
         f.write(f"Coordinate fixes applied: {quality_report['coordinate_fixes']}\n")
         f.write(f"Date fixes applied: {quality_report['date_fixes']}\n")
         f.write(f"Outliers removed: {quality_report['outliers_removed']}\n\n")
+        
+        f.write("DATA RETENTION SUMMARY\n")
+        f.write("-"*80 + "\n")
+        f.write(f"Initial Qstarz days: {quality_report['initial_qstarz_days']}\n")
+        f.write(f"Initial smartphone days: {quality_report['initial_smartphone_days']}\n")
+        f.write(f"Initial total days: {initial_total_days}\n")
+        f.write(f"Final total days: {final_total_days}\n")
+        f.write(f"Days lost during processing: {days_lost} ({100-retention_percent:.1f}%)\n")
+        f.write(f"Data retention rate: {retention_percent:.1f}%\n\n")
         
         if quality_report['failed_reasons']:
             f.write("PROCESSING ERRORS\n")
