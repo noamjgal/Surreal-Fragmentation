@@ -59,8 +59,7 @@ quality_report = {
     'outliers_removed': 0,
     'discarded_days': 0,
     'initial_qstarz_days': 0,
-    'initial_smartphone_days': 0,
-    'all_initial_days': set()
+    'initial_smartphone_days': 0
 }
 
 
@@ -533,7 +532,6 @@ def read_qstarz_data(file_path):
             logging.info(f"Processed {len(gps_data)} Qstarz points for {participant_id}")
             logging.info(f"Processed {distinct_days} days of Qstarz data")
             quality_report['initial_qstarz_days'] += distinct_days
-            quality_report['all_initial_days'].update(gps_data['date'].unique())
         else:
             logging.warning(f"No valid Qstarz data after cleaning for {participant_id}")
             
@@ -701,7 +699,6 @@ def read_smartphone_data(file_path):
             logging.info(f"Processed {len(gps_data)} smartphone GPS points for {participant_id}")
             logging.info(f"Processed {distinct_days} days of smartphone GPS data")
             quality_report['initial_smartphone_days'] += distinct_days
-            quality_report['all_initial_days'].update(gps_data['date'].unique())
         else:
             logging.warning(f"No valid smartphone data after cleaning for {participant_id}")
             
@@ -1039,7 +1036,6 @@ def process_participant(participant_id, qstarz_files, app_files, app_gps_files):
             
             if qstarz_data is not None and not qstarz_data.empty:
                 result['qstarz_days'] = len(qstarz_data['date'])
-                quality_report['all_initial_days'].update(qstarz_data['date'].unique())
         
         # Process smartphone GPS data if available
         smartphone_data = None
@@ -1048,7 +1044,6 @@ def process_participant(participant_id, qstarz_files, app_files, app_gps_files):
             
             if smartphone_data is not None and not smartphone_data.empty:
                 result['smartphone_days'] = len(smartphone_data['date'])
-                quality_report['all_initial_days'].update(smartphone_data['date'].unique())
         
         # Process app usage data if available
         app_data = None
@@ -1369,10 +1364,10 @@ def main():
     run_time = (datetime.now() - start_time).total_seconds()
     
     # Calculate data retention metrics
-    quality_report['initial_unique_days'] = len(quality_report['all_initial_days'])
+    initial_total_days = quality_report['initial_qstarz_days'] + quality_report['initial_smartphone_days']
     final_total_days = quality_report['merged_days'] + quality_report['qstarz_only_days'] + quality_report['smartphone_only_days']
-    days_lost = quality_report['initial_unique_days'] - final_total_days
-    retention_percent = (final_total_days / quality_report['initial_unique_days'] * 100) if quality_report['initial_unique_days'] > 0 else 0
+    days_lost = initial_total_days - final_total_days
+    retention_percent = (final_total_days / initial_total_days * 100) if initial_total_days > 0 else 0
     
     with open(report_path, 'w') as f:
         f.write(f"GPS Preprocessing Report ({quality_report['start_time']})\n")
@@ -1394,9 +1389,9 @@ def main():
         
         f.write("DATA RETENTION SUMMARY\n")
         f.write("-"*80 + "\n")
-        f.write(f"Initial Qstarz days: {quality_report['initial_qstarz_days']} (may include overlapping days)\n")
-        f.write(f"Initial smartphone days: {quality_report['initial_smartphone_days']} (may include overlapping days)\n")
-        f.write(f"Initial unique days (deduplicated): {quality_report['initial_unique_days']}\n")
+        f.write(f"Initial Qstarz days: {quality_report['initial_qstarz_days']}\n")
+        f.write(f"Initial smartphone days: {quality_report['initial_smartphone_days']}\n")
+        f.write(f"Initial total days: {initial_total_days}\n")
         f.write(f"Final total days: {final_total_days}\n")
         f.write(f"Days lost during processing: {days_lost} ({100-retention_percent:.1f}%)\n")
         f.write(f"Data retention rate: {retention_percent:.1f}%\n\n")
