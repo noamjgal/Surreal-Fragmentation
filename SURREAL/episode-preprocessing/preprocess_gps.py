@@ -59,7 +59,8 @@ quality_report = {
     'outliers_removed': 0,
     'discarded_days': 0,
     'initial_qstarz_days': 0,
-    'initial_smartphone_days': 0
+    'initial_smartphone_days': 0,
+    'all_initial_days': set()
 }
 
 
@@ -532,6 +533,7 @@ def read_qstarz_data(file_path):
             logging.info(f"Processed {len(gps_data)} Qstarz points for {participant_id}")
             logging.info(f"Processed {distinct_days} days of Qstarz data")
             quality_report['initial_qstarz_days'] += distinct_days
+            quality_report['all_initial_days'].update(gps_data['date'].unique())
         else:
             logging.warning(f"No valid Qstarz data after cleaning for {participant_id}")
             
@@ -699,6 +701,7 @@ def read_smartphone_data(file_path):
             logging.info(f"Processed {len(gps_data)} smartphone GPS points for {participant_id}")
             logging.info(f"Processed {distinct_days} days of smartphone GPS data")
             quality_report['initial_smartphone_days'] += distinct_days
+            quality_report['all_initial_days'].update(gps_data['date'].unique())
         else:
             logging.warning(f"No valid smartphone data after cleaning for {participant_id}")
             
@@ -1036,6 +1039,7 @@ def process_participant(participant_id, qstarz_files, app_files, app_gps_files):
             
             if qstarz_data is not None and not qstarz_data.empty:
                 result['qstarz_days'] = len(qstarz_data['date'])
+                quality_report['all_initial_days'].update(qstarz_data['date'].unique())
         
         # Process smartphone GPS data if available
         smartphone_data = None
@@ -1044,6 +1048,7 @@ def process_participant(participant_id, qstarz_files, app_files, app_gps_files):
             
             if smartphone_data is not None and not smartphone_data.empty:
                 result['smartphone_days'] = len(smartphone_data['date'])
+                quality_report['all_initial_days'].update(smartphone_data['date'].unique())
         
         # Process app usage data if available
         app_data = None
