@@ -678,6 +678,67 @@ def main():
                 
                 matched_records.append(matched_record)
             
+            # NEW: Track EMA data that doesn't have matching fragmentation data
+            logging.info(f"\nChecking for EMA data without matching fragmentation records...")
+            
+            # Create a set of matched fragmentation data for efficient lookup
+            matched_frag_keys = set()
+            for record in matched_records:
+                # Create a unique key from participant ID and date
+                key = (record['Participant_ID'], record['matching_date'])
+                matched_frag_keys.add(key)
+            
+            # Track EMA data without fragmentation matches
+            ema_without_frag = {
+                'total_ema_records': len(daily_ema),
+                'missing_fragmentation': 0,
+                'examples': []
+            }
+            
+            # Create lookup table for fragmentation dates by participant
+            frag_dates_by_participant = {}
+            for index, row in frag_data.iterrows():
+                participant = row['cleaned_user_id']
+                date_str = str(row['date'])
+                
+                if participant not in frag_dates_by_participant:
+                    frag_dates_by_participant[participant] = []
+                
+                frag_dates_by_participant[participant].append(date_str)
+            
+            # Check each EMA record
+            for index, ema_row in daily_ema.iterrows():
+                participant = ema_row['Participant_ID']
+                cleaned_participant = ema_row['cleaned_participant_id']
+                date_str = ema_row['date_str']
+                
+                # Create key to check if it was matched
+                key = (participant, date_str)
+                
+                if key not in matched_frag_keys:
+                    ema_without_frag['missing_fragmentation'] += 1
+                    
+                    # Create example with details
+                    example = {
+                        'participant_id': participant,
+                        'cleaned_participant_id': cleaned_participant,
+                        'date': date_str
+                    }
+                    
+                    # Add EMA metrics if available
+                    if 'STAI-Y-A-6_zstd' in ema_row:
+                        example['STAI-Y-A-6_zstd'] = ema_row['STAI-Y-A-6_zstd']
+                    if 'CES-D-8_zstd' in ema_row:
+                        example['CES-D-8_zstd'] = ema_row['CES-D-8_zstd']
+                    
+                    # Add available fragmentation dates for this participant if any
+                    if cleaned_participant in frag_dates_by_participant:
+                        example['frag_available_dates'] = frag_dates_by_participant[cleaned_participant]
+                    else:
+                        example['frag_available_dates'] = []
+                    
+                    ema_without_frag['examples'].append(example)
+            
             # Convert to dataframe
             if matched_records:
                 combined_data = pd.DataFrame(matched_records)
@@ -706,6 +767,65 @@ def main():
                 logging.info(f"- No matching participant: {discard_stats['no_participant']} ({100 * discard_stats['no_participant'] / discard_stats['total']:.1f}%)")
             if discard_stats['no_date'] > 0:
                 logging.info(f"- No matching date: {discard_stats['no_date']} ({100 * discard_stats['no_date'] / discard_stats['total']:.1f}%)")
+            
+            # NEW: Log EMA without fragmentation statistics
+            logging.info(f"\n{'='*50}")
+            logging.info(f"EMA DATA WITHOUT MATCHING FRAGMENTATION ({norm_type.upper()}-NORMALIZED):")
+            logging.info(f"Total EMA records: {ema_without_frag['total_ema_records']}")
+            logging.info(f"Missing fragmentation data: {ema_without_frag['missing_fragmentation']} ({100 * ema_without_frag['missing_fragmentation'] / ema_without_frag['total_ema_records']:.1f}%)")
+            
+            # Group missing EMA data by participant for a more organized report
+            by_participant = {}
+            for example in ema_without_frag['examples']:
+                pid = example['participant_id']
+                if pid not in by_participant:
+                    by_participant[pid] = []
+                by_participant[pid].append(example)
+            
+            logging.info(f"\nDETAILED EMA WITHOUT FRAGMENTATION REPORT:")
+            logging.info(f"Missing fragmentation data for {len(by_participant)} participants")
+            
+            # Sort by participant ID for consistent reporting
+            for pid in sorted(by_participant.keys()):
+                examples = by_participant[pid]
+                logging.info(f"\nParticipant {pid} (Cleaned ID: {examples[0]['cleaned_participant_id']}):")
+                logging.info(f"  Missing fragmentation for {len(examples)} EMA dates")
+                
+                # Sort examples by date
+                sorted_examples = sorted(examples, key=lambda x: x['date'])
+                
+                # Log the first 10 examples, then summarize if more
+                show_count = min(10, len(sorted_examples))
+                for i, example in enumerate(sorted_examples[:show_count]):
+                    logging.info(f"  {i+1}. Date: {example['date']}")
+                    
+                    # Show EMA metrics if available
+                    metrics = []
+                    if 'STAI-Y-A-6_zstd' in example:
+                        metrics.append(f"STAI: {example['STAI-Y-A-6_zstd']:.2f}")
+                    if 'CES-D-8_zstd' in example:
+                        metrics.append(f"CES-D: {example['CES-D-8_zstd']:.2f}")
+                    
+                    if metrics:
+                        logging.info(f"     EMA Metrics: {', '.join(metrics)}")
+                
+                # Indicate if there are more examples
+                if len(sorted_examples) > show_count:
+                    logging.info(f"     ... and {len(sorted_examples) - show_count} more dates")
+                
+                # Show available fragmentation dates for reference
+                if 'frag_available_dates' in examples[0] and examples[0]['frag_available_dates']:
+                    frag_dates = examples[0]['frag_available_dates']
+                    show_frag_count = min(5, len(frag_dates))
+                    
+                    logging.info(f"  Available fragmentation dates for this participant ({len(frag_dates)} total):")
+                    for i, date in enumerate(sorted(frag_dates)[:show_frag_count]):
+                        logging.info(f"     {i+1}. {date}")
+                    
+                    if len(frag_dates) > show_frag_count:
+                        logging.info(f"     ... and {len(frag_dates) - show_frag_count} more dates")
+                else:
+                    logging.info("  No fragmentation data available for this participant")
             
             # Log detailed examples
             if discard_stats['no_participant'] > 0 or discard_stats['no_date'] > 0:
