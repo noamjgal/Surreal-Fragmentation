@@ -1109,6 +1109,7 @@ def main():
             logging.error(f"Error processing participant {pid}: {str(e)}")
             failed_count += 1
     
+    # In main() function, update the summary reporting section to include new metrics
     if all_stats:
         # Create overall summary
         all_summary = pd.DataFrame(all_stats)
@@ -1155,6 +1156,21 @@ def main():
                 summary_logger.info(f"  {ep_type.capitalize()} Episodes:")
                 summary_logger.info(f"    Total: {int(ep_count)} episodes ({round(ep_duration/60, 1)} hours)")
                 summary_logger.info(f"    Per Day: {round(avg_count, 1)} episodes ({round(avg_duration, 1)} minutes)")
-
+            
+            # Transport mode statistics
+            summary_logger.info("\nTRANSPORT MODE STATISTICS (Valid Days Only):")
+            active_count = valid_days['active_transport_episodes'].sum()
+            active_duration = valid_days['active_transport_duration'].sum()
+            auto_count = valid_days['automated_transport_episodes'].sum()
+            auto_duration = valid_days['automated_transport_duration'].sum()
+            
+            summary_logger.info(f"  Active Transport (Walking, Cycling):")
+            summary_logger.info(f"    Total: {int(active_count)} episodes ({round(active_duration/60, 1)} hours)")
+            summary_logger.info(f"    Per Day: {round(valid_days['active_transport_episodes'].mean(), 1)} episodes ({round(valid_days['active_transport_duration'].mean(), 1)} minutes)")
+            
+            summary_logger.info(f"  Automated Transport (Car, Bus, Train):")
+            summary_logger.info(f"    Total: {int(auto_count)} episodes ({round(auto_duration/60, 1)} hours)")
+            summary_logger.info(f"    Per Day: {round(valid_days['automated_transport_episodes'].mean(), 1)} episodes ({round(valid_days['automated_transport_duration'].mean(), 1)} minutes)")
+                
 if __name__ == "__main__":
     main()
