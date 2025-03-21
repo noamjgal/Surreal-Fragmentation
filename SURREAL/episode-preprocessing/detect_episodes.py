@@ -173,6 +173,7 @@ class EpisodeProcessor:
         self.logger = logging.getLogger(f"EpisodeProcessor_{participant_id}")
         self.output_dir = EPISODE_OUTPUT_DIR / participant_id
         self.preprocess_data = preprocess_data
+        self.home_location = (np.nan, np.nan)  # Initialize home location
         
         # Skip creation if the path is a macOS hidden file
         if '._' in str(self.output_dir):
@@ -217,7 +218,7 @@ class EpisodeProcessor:
                 if start < end:  # There is an overlap
                     duration = end - start
                     if duration >= pd.Timedelta(minutes=1):  # Minimum 1 minute overlap
-                        overlap_episodes.append({
+                        overlap_data = {
                             'start_time': start,
                             'end_time': end,
                             'state': 'overlap',
@@ -225,7 +226,17 @@ class EpisodeProcessor:
                             'latitude': m_ep.get('latitude', np.nan),
                             'longitude': m_ep.get('longitude', np.nan),
                             'duration': duration
-                        })
+                        }
+                        
+                        # Copy transport type and mode if available
+                        if 'transport_type' in m_ep:
+                            overlap_data['transport_type'] = m_ep['transport_type']
+                        if 'primary_mode' in m_ep:
+                            overlap_data['primary_mode'] = m_ep['primary_mode']
+                        if 'location_type' in m_ep:
+                            overlap_data['location_type'] = m_ep['location_type']
+                            
+                        overlap_episodes.append(overlap_data)
         
         return pd.DataFrame(overlap_episodes) if overlap_episodes else pd.DataFrame()
     
@@ -268,6 +279,125 @@ class EpisodeProcessor:
         # Made it through all checks
         quality_stats['valid'] = True
         return True, quality_stats
+    
+    def identify_home_location(self, positionfixes: ti.Positionfixes) -> Tuple[float, float]:
+        """Identify home location based on 3-6 AM positions"""
+        if positionfixes.empty:
+            return (np.nan, np.nan)
+        
+        # Create a copy with hour information
+        pfs = positionfixes.copy()
+        pfs['hour'] = pfs['tracked_at'].dt.hour
+        
+        # Filter for nighttime hours (3-6 AM)
+        night_pfs = pfs[(pfs['hour'] >= 3) & (pfs['hour'] < 6)]
+        
+        if night_pfs.empty:
+            self.logger.warning("No nighttime (3-6 AM) data found for home location detection")
+            # Use most common daytime location as fallback
+            all_pfs = pfs.copy()
+            
+            # Generate staypoints for all data
+            try:
+                _, staypoints = all_pfs.generate_staypoints(
+                    method='sliding',
+                    dist_threshold=STAYPOINT_DISTANCE_THRESHOLD,
+                    time_threshold=STAYPOINT_TIME_THRESHOLD * 2,  # Use longer threshold for home detection
+                    gap_threshold=STAYPOINT_GAP_THRESHOLD
+                )
+                
+                if staypoints.empty:
+                    self.logger.warning("No staypoints available for home detection")
+                    return (np.nan, np.nan)
+                
+                # Find most common staypoint by duration
+                staypoints['duration'] = (staypoints['finished_at'] - staypoints['started_at']).dt.total_seconds()
+                longest_staypoint = staypoints.loc[staypoints['duration'].idxmax()]
+                home_lat = longest_staypoint.geometry.y
+                home_lon = longest_staypoint.geometry.x
+                
+                self.logger.info(f"Home location determined from longest staypoint: {home_lat:.6f}, {home_lon:.6f}")
+                return (home_lat, home_lon)
+                
+            except Exception as e:
+                self.logger.error(f"Error in home location detection fallback: {str(e)}")
+                return (np.nan, np.nan)
+        
+        # Generate staypoints from nighttime data
+        try:
+            _, night_staypoints = night_pfs.generate_staypoints(
+                method='sliding',
+                dist_threshold=STAYPOINT_DISTANCE_THRESHOLD,
+                time_threshold=STAYPOINT_TIME_THRESHOLD,
+                gap_threshold=STAYPOINT_GAP_THRESHOLD
+            )
+            
+            if night_staypoints.empty:
+                self.logger.warning("No nighttime staypoints found for home location")
+                return (np.nan, np.nan)
+            
+            # Calculate duration for each staypoint
+            night_staypoints['duration'] = (night_staypoints['finished_at'] - night_staypoints['started_at']).dt.total_seconds()
+            
+            # Find the most common nighttime staypoint location (by total duration)
+            longest_staypoint = night_staypoints.loc[night_staypoints['duration'].idxmax()]
+            home_lat = longest_staypoint.geometry.y
+            home_lon = longest_staypoint.geometry.x
+            
+            self.logger.info(f"Home location determined: {home_lat:.6f}, {home_lon:.6f}")
+            return (home_lat, home_lon)
+            
+        except Exception as e:
+            self.logger.error(f"Error in nighttime home location detection: {str(e)}")
+            return (np.nan, np.nan)
+
+    def haversine_distance(self, lat1, lon1, lat2, lon2):
+        """Calculate haversine distance between two points in meters"""
+        if np.isnan(lat1) or np.isnan(lon1) or np.isnan(lat2) or np.isnan(lon2):
+            return np.inf
+            
+        # Earth radius in meters
+        R = 6371000
+        
+        # Convert to radians
+        lat1_rad = np.radians(lat1)
+        lon1_rad = np.radians(lon1)
+        lat2_rad = np.radians(lat2)
+        lon2_rad = np.radians(lon2)
+        
+        # Haversine formula
+        dlon = lon2_rad - lon1_rad
+        dlat = lat2_rad - lat1_rad
+        a = np.sin(dlat/2)**2 + np.cos(lat1_rad) * np.cos(lat2_rad) * np.sin(dlon/2)**2
+        c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+        
+        return R * c
+
+    def process_staypoints_with_location(self, staypoints, home_location):
+        """Process staypoints and classify as home or out_of_home"""
+        if staypoints.empty:
+            return staypoints
+            
+        staypoints = staypoints.copy()
+        home_lat, home_lon = home_location
+        
+        # Add location_type column
+        staypoints['location_type'] = 'unknown'
+        
+        # Calculate distance to home for each staypoint
+        for idx, sp in staypoints.iterrows():
+            distance = self.haversine_distance(
+                sp.geometry.y, sp.geometry.x, 
+                home_lat, home_lon
+            )
+            
+            # Classify based on distance (100m threshold)
+            if distance <= 100:
+                staypoints.at[idx, 'location_type'] = 'home'
+            else:
+                staypoints.at[idx, 'location_type'] = 'out_of_home'
+        
+        return staypoints
     
     def load_gps_data(self) -> Optional[ti.Positionfixes]:
         """Load GPS data with validation or trigger preprocessing if needed"""
@@ -459,10 +589,15 @@ class EpisodeProcessor:
         return episodes_by_day
     
     def process_mobility_episodes(self, positionfixes: ti.Positionfixes) -> Dict[str, pd.DataFrame]:
-        """Process mobility episodes using Trackintel with transport mode detection"""
+        """Process mobility episodes using Trackintel with transport mode detection and home location"""
         if positionfixes.empty or len(positionfixes) <= 5:
             self.logger.warning("Insufficient position fixes for mobility processing")
             return {}
+        
+        # Identify home location first
+        home_location = self.identify_home_location(positionfixes)
+        self.home_location = home_location  # Store for later use
+        self.logger.info(f"Home location identified as: {home_location}")
         
         # Split by day and filter low-quality days
         pfs_by_day = {}
@@ -494,6 +629,7 @@ class EpisodeProcessor:
         
         # Process each day with trackintel
         all_mobility_episodes = {}
+        all_staypoints_by_day = {}  # Store staypoints by day for location analysis
         
         for date, day_positionfixes in pfs_by_day.items():
             try:
@@ -505,7 +641,7 @@ class EpisodeProcessor:
                 
                 # Generate staypoints
                 self.logger.info(f"Generating staypoints with distance={STAYPOINT_DISTANCE_THRESHOLD}m, " +
-                            f"time={STAYPOINT_TIME_THRESHOLD}min, gap={STAYPOINT_GAP_THRESHOLD}min")
+                                f"time={STAYPOINT_TIME_THRESHOLD}min, gap={STAYPOINT_GAP_THRESHOLD}min")
                 
                 day_pfs, staypoints = day_pfs.generate_staypoints(
                     method='sliding',
@@ -519,6 +655,12 @@ class EpisodeProcessor:
                     continue
                 
                 self.logger.info(f"Generated {len(staypoints)} staypoints")
+                
+                # Classify staypoints as home or out_of_home
+                staypoints = self.process_staypoints_with_location(staypoints, home_location)
+                
+                # Store staypoints for later use
+                all_staypoints_by_day[date] = staypoints
                 
                 # Generate triplegs (movement segments)
                 day_pfs, triplegs = day_pfs.generate_triplegs(staypoints, gap_threshold=STAYPOINT_GAP_THRESHOLD)
@@ -663,6 +805,22 @@ class EpisodeProcessor:
                             if not origin_sp.empty:
                                 trips.at[idx, 'latitude'] = origin_sp.iloc[0].geometry.y
                                 trips.at[idx, 'longitude'] = origin_sp.iloc[0].geometry.x
+                                # Add location type info from staypoint
+                                if 'location_type' in origin_sp.columns:
+                                    trips.at[idx, 'origin_location_type'] = origin_sp.iloc[0]['location_type']
+                                    # Also set the main location_type for the trip
+                                    trips.at[idx, 'location_type'] = origin_sp.iloc[0]['location_type']
+                
+                # Add destination location type
+                if 'destination_staypoint_id' in trips.columns and not staypoints.empty:
+                    for idx, trip in trips.iterrows():
+                        if pd.notna(trip['destination_staypoint_id']):
+                            dest_sp = staypoints[staypoints.index == trip['destination_staypoint_id']]
+                            if not dest_sp.empty and 'location_type' in dest_sp.columns:
+                                trips.at[idx, 'destination_location_type'] = dest_sp.iloc[0]['location_type']
+                                # Update the main location_type if needed (prioritize destination)
+                                if 'location_type' not in trips.columns or pd.isna(trips.at[idx, 'location_type']):
+                                    trips.at[idx, 'location_type'] = dest_sp.iloc[0]['location_type']
                 
                 # Create mobility episodes
                 mobility_episodes = pd.DataFrame({
@@ -674,7 +832,10 @@ class EpisodeProcessor:
                     'state': 'mobility',
                     'primary_mode': trips['primary_mode'] if 'primary_mode' in trips.columns else 'unknown',
                     'transport_type': trips['transport_type'] if 'transport_type' in trips.columns else 'unknown',
-                    'modes': trips['modes'] if 'modes' in trips.columns else None
+                    'modes': trips['modes'] if 'modes' in trips.columns else None,
+                    'origin_location_type': trips['origin_location_type'] if 'origin_location_type' in trips.columns else 'unknown',
+                    'destination_location_type': trips['destination_location_type'] if 'destination_location_type' in trips.columns else 'unknown',
+                    'location_type': trips['location_type'] if 'location_type' in trips.columns else 'unknown'
                 })
                 
                 # Ensure timezone-naive datetimes for consistent comparison
@@ -709,11 +870,79 @@ class EpisodeProcessor:
                     'reason': f"Error: {str(e)}"
                 }
         
-        return all_mobility_episodes
+        # Process staypoint episodes (stationary periods)
+        all_location_episodes = self.process_staypoint_episodes(all_staypoints_by_day)
+        
+        # Combine location episodes with mobility episodes for all dates
+        all_combined_episodes = {}
+        all_dates = set(all_mobility_episodes.keys()) | set(all_location_episodes.keys())
+        
+        for date in all_dates:
+            mobility_eps = all_mobility_episodes.get(date, pd.DataFrame())
+            location_eps = all_location_episodes.get(date, pd.DataFrame())
+            
+            if not mobility_eps.empty and not location_eps.empty:
+                # Combine both types of episodes
+                combined_eps = pd.concat([mobility_eps, location_eps], ignore_index=True)
+                all_combined_episodes[date] = combined_eps
+            elif not mobility_eps.empty:
+                all_combined_episodes[date] = mobility_eps
+            elif not location_eps.empty:
+                all_combined_episodes[date] = location_eps
+        
+        return all_combined_episodes
+
+    def process_staypoint_episodes(self, staypoints_by_day):
+        """Create location episodes (home vs out_of_home) from staypoints"""
+        location_episodes_by_day = {}
+        
+        for date, staypoints in staypoints_by_day.items():
+            if staypoints.empty:
+                continue
+                
+            # Create episodes from staypoints
+            episodes = []
+            for idx, sp in staypoints.iterrows():
+                # Skip staypoints that are part of trips (but keep activity staypoints)
+                if (pd.notna(sp.get('trip_id')) or 
+                    sp.get('is_activity', False) == False or 
+                    sp.get('activity_flag', False) == False):
+                    continue
+                    
+                episodes.append({
+                    'started_at': sp['started_at'],
+                    'finished_at': sp['finished_at'],
+                    'duration': sp['finished_at'] - sp['started_at'],
+                    'latitude': sp.geometry.y,
+                    'longitude': sp.geometry.x,
+                    'state': 'stationary',
+                    'location_type': sp.get('location_type', 'unknown'),
+                    'primary_mode': 'stationary',
+                    'transport_type': 'stationary'
+                })
+            
+            if episodes:
+                location_episodes = pd.DataFrame(episodes)
+                
+                # Ensure timezone-naive datetimes
+                location_episodes['started_at'] = ensure_tz_naive(location_episodes['started_at'])
+                location_episodes['finished_at'] = ensure_tz_naive(location_episodes['finished_at'])
+                
+                # Log summary
+                home_episodes = location_episodes[location_episodes['location_type'] == 'home']
+                out_episodes = location_episodes[location_episodes['location_type'] == 'out_of_home']
+                
+                self.logger.info(f"Created {len(location_episodes)} location episodes for date {date} " +
+                            f"({len(home_episodes)} home, {len(out_episodes)} out of home)")
+                
+                location_episodes_by_day[date] = location_episodes
+        
+        return location_episodes_by_day
+
     
     def create_daily_timeline(self, digital_episodes: pd.DataFrame, 
-                        mobility_episodes: pd.DataFrame,
-                        overlap_episodes: pd.DataFrame) -> pd.DataFrame:
+                           mobility_episodes: pd.DataFrame,
+                           overlap_episodes: pd.DataFrame) -> pd.DataFrame:
         """Create a chronological timeline of all episodes for a day"""
         # Add episode type column to each DataFrame
         if not digital_episodes.empty:
@@ -722,6 +951,7 @@ class EpisodeProcessor:
             digital_episodes['movement_state'] = None
             digital_episodes['transport_type'] = None
             digital_episodes['primary_mode'] = None
+            digital_episodes['location_type'] = None
             # Add empty location columns if they don't exist
             if 'latitude' not in digital_episodes.columns:
                 digital_episodes['latitude'] = np.nan
@@ -731,12 +961,30 @@ class EpisodeProcessor:
             # Ensure timezone-naive datetimes
             digital_episodes['start_time'] = ensure_tz_naive(digital_episodes['start_time'])
             digital_episodes['end_time'] = ensure_tz_naive(digital_episodes['end_time'])
+            
+            # Try to determine location_type for digital episodes
+            if hasattr(self, 'home_location') and self.home_location[0] is not np.nan:
+                home_lat, home_lon = self.home_location
+                for idx, ep in digital_episodes.iterrows():
+                    if not pd.isna(ep['latitude']) and not pd.isna(ep['longitude']):
+                        distance = self.haversine_distance(ep['latitude'], ep['longitude'], home_lat, home_lon)
+                        digital_episodes.at[idx, 'location_type'] = 'home' if distance <= 100 else 'out_of_home'
         
         if not mobility_episodes.empty:
             mobility_episodes = mobility_episodes.copy()
             mobility_episodes['episode_type'] = 'mobility'
-            mobility_episodes['movement_state'] = mobility_episodes['state']
-            mobility_episodes = mobility_episodes.drop(columns=['state'])
+            
+            if 'state' in mobility_episodes.columns:
+                mobility_episodes['movement_state'] = mobility_episodes['state']
+                
+                # If state is 'stationary', use location_type for movement_state
+                stationary_mask = mobility_episodes['state'] == 'stationary'
+                if stationary_mask.any() and 'location_type' in mobility_episodes.columns:
+                    # Create more descriptive movement state for stationary episodes
+                    mobility_episodes.loc[stationary_mask & (mobility_episodes['location_type'] == 'home'), 'movement_state'] = 'at_home'
+                    mobility_episodes.loc[stationary_mask & (mobility_episodes['location_type'] == 'out_of_home'), 'movement_state'] = 'out_of_home'
+                
+                mobility_episodes = mobility_episodes.drop(columns=['state'])
             
             # Rename columns to match digital_episodes
             mobility_episodes = mobility_episodes.rename(columns={
@@ -753,21 +1001,20 @@ class EpisodeProcessor:
             overlap_episodes['episode_type'] = 'overlap'
             
             # Add transport information to overlap episodes if available in mobility
-            if not mobility_episodes.empty and 'primary_mode' in mobility_episodes.columns:
-                overlap_episodes['transport_type'] = 'unknown'
-                overlap_episodes['primary_mode'] = 'unknown'
-                
-                # Match transport info from mobility episodes to overlaps
-                for idx, overlap in overlap_episodes.iterrows():
-                    # Find mobility episodes that overlap with this overlap episode
-                    for _, mobility in mobility_episodes.iterrows():
-                        # Check if there's an overlap between this mobility episode and the overlap episode
-                        if (max(overlap['start_time'], mobility['start_time']) < 
-                            min(overlap['end_time'], mobility['end_time'])):
-                            # Transfer transport info
-                            overlap_episodes.at[idx, 'transport_type'] = mobility.get('transport_type', 'unknown')
-                            overlap_episodes.at[idx, 'primary_mode'] = mobility.get('primary_mode', 'unknown')
-                            break
+            for field in ['transport_type', 'primary_mode', 'location_type']:
+                if not mobility_episodes.empty and field in mobility_episodes.columns:
+                    overlap_episodes[field] = 'unknown'
+                    
+                    # Match transport info from mobility episodes to overlaps
+                    for idx, overlap in overlap_episodes.iterrows():
+                        # Find mobility episodes that overlap with this overlap episode
+                        for _, mobility in mobility_episodes.iterrows():
+                            # Check if there's an overlap between this mobility episode and the overlap episode
+                            if (max(overlap['start_time'], mobility['start_time']) < 
+                                min(overlap['end_time'], mobility['end_time'])):
+                                # Transfer info
+                                overlap_episodes.at[idx, field] = mobility.get(field, 'unknown')
+                                break
             
             # Ensure timezone-naive datetimes
             overlap_episodes['start_time'] = ensure_tz_naive(overlap_episodes['start_time'])
@@ -775,7 +1022,7 @@ class EpisodeProcessor:
         
         # Combine all episodes
         all_episodes = pd.concat([digital_episodes, mobility_episodes, overlap_episodes], 
-                            ignore_index=True)
+                               ignore_index=True)
         
         # Sort chronologically
         if not all_episodes.empty:
@@ -784,13 +1031,13 @@ class EpisodeProcessor:
             all_episodes['time_since_prev'] = all_episodes['start_time'].diff()
             
             # Select relevant columns
-            cols = ['episode_number', 'episode_type', 'movement_state', 'transport_type', 'primary_mode',
-                'start_time', 'end_time', 'duration', 'time_since_prev',
-                'latitude', 'longitude']
+            cols = ['episode_number', 'episode_type', 'movement_state', 'transport_type', 'primary_mode', 
+                   'location_type', 'start_time', 'end_time', 'duration', 'time_since_prev',
+                   'latitude', 'longitude']
             all_episodes = all_episodes[[c for c in cols if c in all_episodes.columns]]
         
         return all_episodes
-    
+        
     def process_day(self, date: datetime_date, digital_episodes: pd.DataFrame, 
                 mobility_episodes: pd.DataFrame) -> dict:
         """Process a single day and generate statistics"""
@@ -818,25 +1065,70 @@ class EpisodeProcessor:
         active_transport_episodes = 0
         automated_transport_episodes = 0
         
-        if not mobility_episodes.empty and 'transport_type' in mobility_episodes.columns:
-            # Classify episodes by transport type
-            active_mask = mobility_episodes['transport_type'] == 'active'
-            auto_mask = mobility_episodes['transport_type'] == 'automated'
+        # Calculate location type statistics
+        home_duration = 0
+        out_of_home_duration = 0
+        home_episodes = 0
+        out_of_home_episodes = 0
+        
+        if not mobility_episodes.empty:
+            # Transport type stats
+            if 'transport_type' in mobility_episodes.columns:
+                # Classify episodes by transport type
+                active_mask = mobility_episodes['transport_type'] == 'active'
+                auto_mask = mobility_episodes['transport_type'] == 'automated'
+                
+                # Count episodes by type
+                active_transport_episodes = active_mask.sum()
+                automated_transport_episodes = auto_mask.sum()
+                
+                # Calculate durations by type (in minutes)
+                if active_mask.any():
+                    active_transport_duration = mobility_episodes.loc[active_mask, 'duration'].sum().total_seconds() / 60
+                
+                if auto_mask.any():
+                    automated_transport_duration = mobility_episodes.loc[auto_mask, 'duration'].sum().total_seconds() / 60
+                
+                # Log the breakdown for debugging
+                self.logger.info(f"Transport breakdown - Active: {active_transport_episodes} episodes ({active_transport_duration:.1f} min), " +
+                            f"Automated: {automated_transport_episodes} episodes ({automated_transport_duration:.1f} min)")
             
-            # Count episodes by type
-            active_transport_episodes = active_mask.sum()
-            automated_transport_episodes = auto_mask.sum()
+            # Location type stats
+            if 'location_type' in mobility_episodes.columns:
+                # Classify episodes by location type 
+                home_mask = mobility_episodes['location_type'] == 'home'
+                out_mask = mobility_episodes['location_type'] == 'out_of_home'
+                
+                # Count episodes by type
+                home_episodes = home_mask.sum()
+                out_of_home_episodes = out_mask.sum()
+                
+                # Calculate durations by type (in minutes)
+                if home_mask.any():
+                    home_duration = mobility_episodes.loc[home_mask, 'duration'].sum().total_seconds() / 60
+                
+                if out_mask.any():
+                    out_of_home_duration = mobility_episodes.loc[out_mask, 'duration'].sum().total_seconds() / 60
+                
+                # Log the breakdown for debugging
+                self.logger.info(f"Location breakdown - Home: {home_episodes} episodes ({home_duration:.1f} min), " +
+                            f"Out of home: {out_of_home_episodes} episodes ({out_of_home_duration:.1f} min)")
             
-            # Calculate durations by type (in minutes)
-            if active_mask.any():
-                active_transport_duration = mobility_episodes.loc[active_mask, 'duration'].sum().total_seconds() / 60
-            
-            if auto_mask.any():
-                automated_transport_duration = mobility_episodes.loc[auto_mask, 'duration'].sum().total_seconds() / 60
-            
-            # Log the breakdown for debugging
-            self.logger.info(f"Transport breakdown - Active: {active_transport_episodes} episodes ({active_transport_duration:.1f} min), " +
-                        f"Automated: {automated_transport_episodes} episodes ({automated_transport_duration:.1f} min)")
+            # Add statistics for stationary episodes specifically
+            stationary_mask = mobility_episodes['state'] == 'stationary'
+            if stationary_mask.any():
+                stationary_home_mask = stationary_mask & (mobility_episodes['location_type'] == 'home')
+                stationary_out_mask = stationary_mask & (mobility_episodes['location_type'] == 'out_of_home')
+                
+                if stationary_home_mask.any():
+                    home_episodes += stationary_home_mask.sum()
+                    home_duration += mobility_episodes.loc[stationary_home_mask, 'duration'].sum().total_seconds() / 60
+                
+                if stationary_out_mask.any():
+                    out_of_home_episodes += stationary_out_mask.sum()
+                    out_of_home_duration += mobility_episodes.loc[stationary_out_mask, 'duration'].sum().total_seconds() / 60
+                
+                self.logger.info(f"Stationary episodes - Home: {stationary_home_mask.sum()}, Out of home: {stationary_out_mask.sum()}")
         
         day_stats = {
             'user': self.participant_id,
@@ -853,6 +1145,10 @@ class EpisodeProcessor:
             'automated_transport_duration': automated_transport_duration,
             'active_transport_episodes': active_transport_episodes,
             'automated_transport_episodes': automated_transport_episodes,
+            'home_duration': home_duration,
+            'out_of_home_duration': out_of_home_duration,
+            'home_episodes': home_episodes,
+            'out_of_home_episodes': out_of_home_episodes,
             'participant_id_clean': self.participant_id_clean
         }
         
@@ -985,7 +1281,6 @@ class EpisodeProcessor:
                 if date_obj:
                     day_stats = self.process_day(date_obj, digital_eps, mobility_eps)
                     all_stats.append(day_stats)
-                all_stats.append(day_stats)
             
             # Save summary statistics
             if all_stats:
@@ -1108,7 +1403,6 @@ def main():
         except Exception as e:
             logging.error(f"Error processing participant {pid}: {str(e)}")
             failed_count += 1
-    
     # In main() function, update the summary reporting section to include new metrics
     if all_stats:
         # Create overall summary
@@ -1158,19 +1452,36 @@ def main():
                 summary_logger.info(f"    Per Day: {round(avg_count, 1)} episodes ({round(avg_duration, 1)} minutes)")
             
             # Transport mode statistics
-            summary_logger.info("\nTRANSPORT MODE STATISTICS (Valid Days Only):")
-            active_count = valid_days['active_transport_episodes'].sum()
-            active_duration = valid_days['active_transport_duration'].sum()
-            auto_count = valid_days['automated_transport_episodes'].sum()
-            auto_duration = valid_days['automated_transport_duration'].sum()
-            
-            summary_logger.info(f"  Active Transport (Walking, Cycling):")
-            summary_logger.info(f"    Total: {int(active_count)} episodes ({round(active_duration/60, 1)} hours)")
-            summary_logger.info(f"    Per Day: {round(valid_days['active_transport_episodes'].mean(), 1)} episodes ({round(valid_days['active_transport_duration'].mean(), 1)} minutes)")
-            
-            summary_logger.info(f"  Automated Transport (Car, Bus, Train):")
-            summary_logger.info(f"    Total: {int(auto_count)} episodes ({round(auto_duration/60, 1)} hours)")
-            summary_logger.info(f"    Per Day: {round(valid_days['automated_transport_episodes'].mean(), 1)} episodes ({round(valid_days['automated_transport_duration'].mean(), 1)} minutes)")
+            if 'active_transport_episodes' in valid_days.columns:
+                summary_logger.info("\nTRANSPORT MODE STATISTICS (Valid Days Only):")
+                active_count = valid_days['active_transport_episodes'].sum()
+                active_duration = valid_days['active_transport_duration'].sum()
+                auto_count = valid_days['automated_transport_episodes'].sum()
+                auto_duration = valid_days['automated_transport_duration'].sum()
                 
+                summary_logger.info(f"  Active Transport (Walking, Cycling):")
+                summary_logger.info(f"    Total: {int(active_count)} episodes ({round(active_duration/60, 1)} hours)")
+                summary_logger.info(f"    Per Day: {round(valid_days['active_transport_episodes'].mean(), 1)} episodes ({round(valid_days['active_transport_duration'].mean(), 1)} minutes)")
+                
+                summary_logger.info(f"  Automated Transport (Car, Bus, Train):")
+                summary_logger.info(f"    Total: {int(auto_count)} episodes ({round(auto_duration/60, 1)} hours)")
+                summary_logger.info(f"    Per Day: {round(valid_days['automated_transport_episodes'].mean(), 1)} episodes ({round(valid_days['automated_transport_duration'].mean(), 1)} minutes)")
+            
+            # Location type statistics if available
+            if 'home_episodes' in valid_days.columns:
+                summary_logger.info("\nLOCATION STATISTICS (Valid Days Only):")
+                home_count = valid_days['home_episodes'].sum()
+                home_duration = valid_days['home_duration'].sum()
+                out_count = valid_days['out_of_home_episodes'].sum()
+                out_duration = valid_days['out_of_home_duration'].sum()
+                
+                summary_logger.info(f"  At Home:")
+                summary_logger.info(f"    Total: {int(home_count)} episodes ({round(home_duration/60, 1)} hours)")
+                summary_logger.info(f"    Per Day: {round(valid_days['home_episodes'].mean(), 1)} episodes ({round(valid_days['home_duration'].mean(), 1)} minutes)")
+                
+                summary_logger.info(f"  Out of Home:")
+                summary_logger.info(f"    Total: {int(out_count)} episodes ({round(out_duration/60, 1)} hours)")
+                summary_logger.info(f"    Per Day: {round(valid_days['out_of_home_episodes'].mean(), 1)} episodes ({round(valid_days['out_of_home_duration'].mean(), 1)} minutes)")
+
 if __name__ == "__main__":
     main()
