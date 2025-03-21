@@ -18,10 +18,14 @@ import geopandas as gpd
 from shapely.geometry import Point
 import argparse
 import warnings
+import warnings
+
 
 # Suppress pandas FutureWarnings
+pd.options.mode.chained_assignment = None  # default='warn'
 warnings.filterwarnings("ignore", message=".*inplace method.*", category=FutureWarning)
 warnings.filterwarnings("ignore", message=".*Downcasting object dtype arrays.*", category=FutureWarning)
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*observed=False.*")
 
 # Setup logging
 LOG_DIR = Path(__file__).parent.parent / "logs"
@@ -455,7 +459,7 @@ class EpisodeProcessor:
         return episodes_by_day
     
     def process_mobility_episodes(self, positionfixes: ti.Positionfixes) -> Dict[str, pd.DataFrame]:
-        """Process mobility episodes using Trackintel"""
+        """Process mobility episodes using Trackintel with transport mode detection"""
         if positionfixes.empty or len(positionfixes) <= 5:
             self.logger.warning("Insufficient position fixes for mobility processing")
             return {}
@@ -470,12 +474,7 @@ class EpisodeProcessor:
         # Extract date as string for consistent keys
         positionfixes_copy['date'] = positionfixes_copy['tracked_at'].dt.date
         
-        # Log date sample for debugging
-        self.logger.info(f"GPS data date sample: {positionfixes_copy['date'].head(3).tolist()}")
-        self.logger.info(f"GPS date type: {positionfixes_copy['date'].dtype}")
-        
         for date, day_positionfixes in positionfixes_copy.groupby('date'):
-            self.logger.info(f"Assessing GPS quality for date {date}")
             is_valid, quality_stats = self.assess_day_quality(day_positionfixes)
             self.day_processing_status[date] = {
                 'stage': 'data_quality',
@@ -506,10 +505,7 @@ class EpisodeProcessor:
                 
                 # Generate staypoints
                 self.logger.info(f"Generating staypoints with distance={STAYPOINT_DISTANCE_THRESHOLD}m, " +
-                               f"time={STAYPOINT_TIME_THRESHOLD}min, gap={STAYPOINT_GAP_THRESHOLD}min")
-                
-                # Debug log sample positions
-                self.logger.info(f"Sample position data: {day_pfs.head(1)[['tracked_at']].to_string()}")
+                            f"time={STAYPOINT_TIME_THRESHOLD}min, gap={STAYPOINT_GAP_THRESHOLD}min")
                 
                 day_pfs, staypoints = day_pfs.generate_staypoints(
                     method='sliding',
@@ -533,6 +529,42 @@ class EpisodeProcessor:
                 
                 self.logger.info(f"Generated {len(triplegs)} triplegs")
                 
+                # ----------------- TRANSPORT MODE PREDICTION CODE -----------------
+                
+                # Predict transport modes for triplegs
+                try:
+                    self.logger.info("Predicting transport modes for triplegs")
+                    triplegs = triplegs.predict_transport_mode(method="simple-coarse")
+                    
+                    # Add a field to classify as "active" or "automated" transport
+                    if 'mode' in triplegs.columns:
+                        # Define mappings for trackintel modes to our transport types
+                        # The trackintel library uses these specific mode names
+                        mode_to_type = {
+                            'slow_mobility': 'active',       # Walking, cycling
+                            'motorized_mobility': 'automated', # Cars, buses, etc.
+                            'fast_mobility': 'automated'      # High-speed rail, etc.
+                        }
+                        
+                        # Create a new column for transport type
+                        triplegs['transport_type'] = triplegs['mode'].map(mode_to_type).fillna('unknown')
+                        
+                        # Log modes found
+                        mode_counts = triplegs['mode'].value_counts()
+                        self.logger.info(f"Transport modes found: {dict(mode_counts)}")
+                        type_counts = triplegs['transport_type'].value_counts()
+                        self.logger.info(f"Transport types: {dict(type_counts)}")
+                    else:
+                        self.logger.warning("Mode prediction succeeded but 'mode' column not found in triplegs")
+                        triplegs['transport_type'] = 'unknown'
+                except Exception as e:
+                    self.logger.warning(f"Transport mode prediction failed: {str(e)}")
+                    # Create default columns to continue processing
+                    triplegs['mode'] = 'unknown'
+                    triplegs['transport_type'] = 'unknown'
+                
+                # ----------------- END TRANSPORT MODE PREDICTION -----------------
+                
                 # Flag activities and generate trips with stricter parameters
                 staypoints = staypoints.create_activity_flag()
                 staypoints, triplegs, trips = staypoints.generate_trips(
@@ -546,27 +578,47 @@ class EpisodeProcessor:
                 
                 self.logger.info(f"Generated {len(trips)} trips")
                 
-                # Log trip duration stats for debugging
-                trip_durations = (trips['finished_at'] - trips['started_at']).dt.total_seconds() / 60
+                # ----------------- TRANSPORT MODE AGGREGATION CODE -----------------
                 
-                # Calculate and log duration statistics
-                if not trip_durations.empty:
-                    min_duration = trip_durations.min()
-                    max_duration = trip_durations.max()
-                    avg_duration = trip_durations.mean()
-                    self.logger.info(f"Trip durations - Min: {min_duration:.1f}min, Max: {max_duration:.1f}min, Avg: {avg_duration:.1f}min")
+                # Aggregate transport modes at the trip level
+                if 'mode' in triplegs.columns and 'transport_type' in triplegs.columns:
+                    # Create columns for transport info in trips
+                    trips['modes'] = None
+                    trips['primary_mode'] = 'unknown'
+                    trips['transport_type'] = 'unknown'
                     
-                    # Identify suspiciously long trips
-                    long_trips = trips[trip_durations > 120]  # Over 2 hours
-                    if not long_trips.empty:
-                        self.logger.warning(f"Found {len(long_trips)} suspiciously long trips (>2hrs)")
-                        for idx, trip in long_trips.iterrows():
-                            duration_min = (trip['finished_at'] - trip['started_at']).total_seconds() / 60
-                            start_time = trip['started_at'].strftime('%H:%M:%S')
-                            end_time = trip['finished_at'].strftime('%H:%M:%S')
-                            self.logger.warning(f"Long trip: {start_time} - {end_time} ({duration_min:.1f}min)")
+                    # Group triplegs by trip_id and aggregate mode information
+                    for trip_id, trip_row in trips.iterrows():
+                        trip_triplegs = triplegs[triplegs['trip_id'] == trip_id]
+                        
+                        if not trip_triplegs.empty:
+                            # Store all modes used in this trip
+                            all_modes = trip_triplegs['mode'].dropna().unique().tolist()
+                            trips.at[trip_id, 'modes'] = ', '.join(all_modes) if all_modes else 'unknown'
+                            
+                            # Determine primary mode based on longest duration
+                            if len(trip_triplegs) > 0:
+                                # Calculate duration for each tripleg
+                                trip_triplegs['duration'] = (trip_triplegs['finished_at'] - trip_triplegs['started_at']).dt.total_seconds()
+                                
+                                # Group by mode and sum durations
+                                mode_durations = trip_triplegs.groupby('mode')['duration'].sum()
+                                if not mode_durations.empty:
+                                    primary_mode = mode_durations.idxmax()
+                                    trips.at[trip_id, 'primary_mode'] = primary_mode
+                                    
+                                    # Map primary mode to transport type
+                                    mode_to_type = {
+                                        'slow_mobility': 'active',
+                                        'motorized_mobility': 'automated',
+                                        'fast_mobility': 'automated'
+                                    }
+                                    trips.at[trip_id, 'transport_type'] = mode_to_type.get(primary_mode, 'unknown')
+                
+                # ----------------- END TRANSPORT MODE AGGREGATION -----------------
                 
                 # Add trip duration validation and correction
+                trip_durations = (trips['finished_at'] - trips['started_at']).dt.total_seconds() / 60
                 MAX_REASONABLE_TRIP_MINUTES = 120  # 2 hours
                 original_trips_count = len(trips)
                 
@@ -619,12 +671,24 @@ class EpisodeProcessor:
                     'duration': trips['finished_at'] - trips['started_at'],
                     'latitude': trips['latitude'],
                     'longitude': trips['longitude'],
-                    'state': 'mobility'
+                    'state': 'mobility',
+                    'primary_mode': trips['primary_mode'] if 'primary_mode' in trips.columns else 'unknown',
+                    'transport_type': trips['transport_type'] if 'transport_type' in trips.columns else 'unknown',
+                    'modes': trips['modes'] if 'modes' in trips.columns else None
                 })
                 
                 # Ensure timezone-naive datetimes for consistent comparison
                 mobility_episodes['started_at'] = ensure_tz_naive(mobility_episodes['started_at'])
                 mobility_episodes['finished_at'] = ensure_tz_naive(mobility_episodes['finished_at'])
+                
+                # Log transport modes summary
+                if 'transport_type' in mobility_episodes.columns:
+                    type_counts = mobility_episodes['transport_type'].value_counts().to_dict()
+                    self.logger.info(f"Mobility episode transport types: {type_counts}")
+                    
+                    if 'primary_mode' in mobility_episodes.columns:
+                        mode_counts = mobility_episodes['primary_mode'].value_counts().to_dict()
+                        self.logger.info(f"Mobility episode primary modes: {mode_counts}")
                 
                 self.logger.info(f"Created {len(mobility_episodes)} mobility episodes for date {date}")
                 all_mobility_episodes[date] = mobility_episodes
@@ -648,14 +712,16 @@ class EpisodeProcessor:
         return all_mobility_episodes
     
     def create_daily_timeline(self, digital_episodes: pd.DataFrame, 
-                           mobility_episodes: pd.DataFrame,
-                           overlap_episodes: pd.DataFrame) -> pd.DataFrame:
+                        mobility_episodes: pd.DataFrame,
+                        overlap_episodes: pd.DataFrame) -> pd.DataFrame:
         """Create a chronological timeline of all episodes for a day"""
         # Add episode type column to each DataFrame
         if not digital_episodes.empty:
             digital_episodes = digital_episodes.copy()
             digital_episodes['episode_type'] = 'digital'
             digital_episodes['movement_state'] = None
+            digital_episodes['transport_type'] = None
+            digital_episodes['primary_mode'] = None
             # Add empty location columns if they don't exist
             if 'latitude' not in digital_episodes.columns:
                 digital_episodes['latitude'] = np.nan
@@ -686,13 +752,30 @@ class EpisodeProcessor:
             overlap_episodes = overlap_episodes.copy()
             overlap_episodes['episode_type'] = 'overlap'
             
+            # Add transport information to overlap episodes if available in mobility
+            if not mobility_episodes.empty and 'primary_mode' in mobility_episodes.columns:
+                overlap_episodes['transport_type'] = 'unknown'
+                overlap_episodes['primary_mode'] = 'unknown'
+                
+                # Match transport info from mobility episodes to overlaps
+                for idx, overlap in overlap_episodes.iterrows():
+                    # Find mobility episodes that overlap with this overlap episode
+                    for _, mobility in mobility_episodes.iterrows():
+                        # Check if there's an overlap between this mobility episode and the overlap episode
+                        if (max(overlap['start_time'], mobility['start_time']) < 
+                            min(overlap['end_time'], mobility['end_time'])):
+                            # Transfer transport info
+                            overlap_episodes.at[idx, 'transport_type'] = mobility.get('transport_type', 'unknown')
+                            overlap_episodes.at[idx, 'primary_mode'] = mobility.get('primary_mode', 'unknown')
+                            break
+            
             # Ensure timezone-naive datetimes
             overlap_episodes['start_time'] = ensure_tz_naive(overlap_episodes['start_time'])
             overlap_episodes['end_time'] = ensure_tz_naive(overlap_episodes['end_time'])
         
         # Combine all episodes
         all_episodes = pd.concat([digital_episodes, mobility_episodes, overlap_episodes], 
-                               ignore_index=True)
+                            ignore_index=True)
         
         # Sort chronologically
         if not all_episodes.empty:
@@ -701,17 +784,17 @@ class EpisodeProcessor:
             all_episodes['time_since_prev'] = all_episodes['start_time'].diff()
             
             # Select relevant columns
-            cols = ['episode_number', 'episode_type', 'movement_state', 
-                   'start_time', 'end_time', 'duration', 'time_since_prev',
-                   'latitude', 'longitude']
+            cols = ['episode_number', 'episode_type', 'movement_state', 'transport_type', 'primary_mode',
+                'start_time', 'end_time', 'duration', 'time_since_prev',
+                'latitude', 'longitude']
             all_episodes = all_episodes[[c for c in cols if c in all_episodes.columns]]
         
         return all_episodes
     
     def process_day(self, date: datetime_date, digital_episodes: pd.DataFrame, 
-                   mobility_episodes: pd.DataFrame) -> dict:
+                mobility_episodes: pd.DataFrame) -> dict:
         """Process a single day and generate statistics"""
-        self.logger.info(f"Processing day {date} (type: {type(date)})")
+        self.logger.info(f"Processing day {date}")
         
         # Find overlaps between digital and mobility
         overlap_episodes = self._find_overlaps(digital_episodes, mobility_episodes)
@@ -729,6 +812,32 @@ class EpisodeProcessor:
         day_status = self.day_processing_status.get(date, {'valid': False, 'reason': 'Unknown'})
         processing_method = day_status.get('method', 'unknown')
         
+        # Calculate transport type statistics
+        active_transport_duration = 0
+        automated_transport_duration = 0
+        active_transport_episodes = 0
+        automated_transport_episodes = 0
+        
+        if not mobility_episodes.empty and 'transport_type' in mobility_episodes.columns:
+            # Classify episodes by transport type
+            active_mask = mobility_episodes['transport_type'] == 'active'
+            auto_mask = mobility_episodes['transport_type'] == 'automated'
+            
+            # Count episodes by type
+            active_transport_episodes = active_mask.sum()
+            automated_transport_episodes = auto_mask.sum()
+            
+            # Calculate durations by type (in minutes)
+            if active_mask.any():
+                active_transport_duration = mobility_episodes.loc[active_mask, 'duration'].sum().total_seconds() / 60
+            
+            if auto_mask.any():
+                automated_transport_duration = mobility_episodes.loc[auto_mask, 'duration'].sum().total_seconds() / 60
+            
+            # Log the breakdown for debugging
+            self.logger.info(f"Transport breakdown - Active: {active_transport_episodes} episodes ({active_transport_duration:.1f} min), " +
+                        f"Automated: {automated_transport_episodes} episodes ({automated_transport_duration:.1f} min)")
+        
         day_stats = {
             'user': self.participant_id,
             'date': date,
@@ -740,6 +849,10 @@ class EpisodeProcessor:
             'digital_duration': digital_episodes['duration'].sum().total_seconds() / 60 if not digital_episodes.empty else 0,
             'mobility_duration': mobility_episodes['duration'].sum().total_seconds() / 60 if not mobility_episodes.empty else 0,
             'overlap_duration': overlap_episodes['duration'].sum().total_seconds() / 60 if not overlap_episodes.empty else 0,
+            'active_transport_duration': active_transport_duration,
+            'automated_transport_duration': automated_transport_duration,
+            'active_transport_episodes': active_transport_episodes,
+            'automated_transport_episodes': automated_transport_episodes,
             'participant_id_clean': self.participant_id_clean
         }
         
