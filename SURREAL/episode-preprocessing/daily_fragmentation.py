@@ -305,160 +305,251 @@ class EpisodeFragmentationAnalyzer:
         if reason not in self.failure_reasons[episode_type]:
             self.failure_reasons[episode_type][reason] = 0
         self.failure_reasons[episode_type][reason] += 1
-
+        
     def process_daily_episodes(self, participant_dir: Path, date_str: str, participant_id: str) -> Optional[Dict]:
-        """Process episodes for a single day for one participant"""
-        try:
-            # Look for digital episode file
-            digital_pattern = f"{date_str}_digital_episodes.csv"
-            digital_pattern2 = f"digital_episodes_{date_str}.csv"
-            digital_file = next((f for f in participant_dir.glob(f"*{digital_pattern}*")), None)
-            if not digital_file:
-                digital_file = next((f for f in participant_dir.glob(f"*{digital_pattern2}*")), None)
-            
-            # Look for mobility/movement episode file
-            mobility_pattern = f"{date_str}_mobility_episodes.csv"
-            mobility_pattern2 = f"mobility_episodes_{date_str}.csv"
-            movement_pattern = f"{date_str}_movement_episodes.csv"
-            movement_pattern2 = f"movement_episodes_{date_str}.csv"
-            
-            mobility_file = next((f for f in participant_dir.glob(f"*{mobility_pattern}*")), None)
-            if not mobility_file:
-                mobility_file = next((f for f in participant_dir.glob(f"*{mobility_pattern2}*")), None)
-            if not mobility_file:
-                mobility_file = next((f for f in participant_dir.glob(f"*{movement_pattern}*")), None)
-            if not mobility_file:
-                mobility_file = next((f for f in participant_dir.glob(f"*{movement_pattern2}*")), None)
-            
-            # Look for overlap episode file
-            overlap_pattern = f"{date_str}_overlap_episodes.csv"
-            overlap_pattern2 = f"overlap_episodes_{date_str}.csv"
-            overlap_file = next((f for f in participant_dir.glob(f"*{overlap_pattern}*")), None)
-            if not overlap_file:
-                overlap_file = next((f for f in participant_dir.glob(f"*{overlap_pattern2}*")), None)
-            
-            # Only log in debug mode - less verbose
-            if self.debug_mode:
-                log_message = f"Participant {participant_id}, Date {date_str} - Files found: "
-                log_message += f"Digital: {'Yes' if digital_file else 'No'}, "
-                log_message += f"Mobility/Movement: {'Yes' if mobility_file else 'No'}, "
-                log_message += f"Overlap: {'Yes' if overlap_file else 'No'}"
-                self.logger.debug(log_message)
-            
-            if not digital_file and not mobility_file and not overlap_file:
-                self.logger.warning(f"Missing all required episode files for {participant_id} on {date_str}")
-                return None
-            
-            # Read episode data if files exist
-            digital_episodes = pd.read_csv(digital_file) if digital_file else pd.DataFrame()
-            mobility_episodes = pd.read_csv(mobility_file) if mobility_file else pd.DataFrame()
-            overlap_episodes = pd.read_csv(overlap_file) if overlap_file else pd.DataFrame()
-            
-            # Display column names only in debug mode
-            if self.debug_mode:
-                if not digital_episodes.empty:
-                    self.logger.debug(f"Digital episode columns: {digital_episodes.columns.tolist()}")
+            """Process episodes for a single day for one participant"""
+            try:
+                # Look for digital episode file
+                digital_pattern = f"{date_str}_digital_episodes.csv"
+                digital_pattern2 = f"digital_episodes_{date_str}.csv"
+                digital_file = next((f for f in participant_dir.glob(f"*{digital_pattern}*")), None)
+                if not digital_file:
+                    digital_file = next((f for f in participant_dir.glob(f"*{digital_pattern2}*")), None)
+                
+                # Look for mobility/movement episode file
+                mobility_pattern = f"{date_str}_mobility_episodes.csv"
+                mobility_pattern2 = f"mobility_episodes_{date_str}.csv"
+                movement_pattern = f"{date_str}_movement_episodes.csv"
+                movement_pattern2 = f"movement_episodes_{date_str}.csv"
+                
+                mobility_file = next((f for f in participant_dir.glob(f"*{mobility_pattern}*")), None)
+                if not mobility_file:
+                    mobility_file = next((f for f in participant_dir.glob(f"*{mobility_pattern2}*")), None)
+                if not mobility_file:
+                    mobility_file = next((f for f in participant_dir.glob(f"*{movement_pattern}*")), None)
+                if not mobility_file:
+                    mobility_file = next((f for f in participant_dir.glob(f"*{movement_pattern2}*")), None)
+                
+                # Look for overlap episode file
+                overlap_pattern = f"{date_str}_overlap_episodes.csv"
+                overlap_pattern2 = f"overlap_episodes_{date_str}.csv"
+                overlap_file = next((f for f in participant_dir.glob(f"*{overlap_pattern}*")), None)
+                if not overlap_file:
+                    overlap_file = next((f for f in participant_dir.glob(f"*{overlap_pattern2}*")), None)
+                
+                # Look for location episode file
+                location_pattern = f"{date_str}_location_episodes.csv"
+                location_pattern2 = f"location_episodes_{date_str}.csv"
+                location_file = next((f for f in participant_dir.glob(f"*{location_pattern}*")), None)
+                if not location_file:
+                    location_file = next((f for f in participant_dir.glob(f"*{location_pattern2}*")), None)
+                
+                # Only log in debug mode - less verbose
+                if self.debug_mode:
+                    log_message = f"Participant {participant_id}, Date {date_str} - Files found: "
+                    log_message += f"Digital: {'Yes' if digital_file else 'No'}, "
+                    log_message += f"Mobility/Movement: {'Yes' if mobility_file else 'No'}, "
+                    log_message += f"Location: {'Yes' if location_file else 'No'}, "
+                    log_message += f"Overlap: {'Yes' if overlap_file else 'No'}"
+                    self.logger.debug(log_message)
+                
+                if not digital_file and not mobility_file and not overlap_file and not location_file:
+                    self.logger.warning(f"Missing all required episode files for {participant_id} on {date_str}")
+                    return None
+                
+                # Read episode data if files exist
+                digital_episodes = pd.read_csv(digital_file) if digital_file else pd.DataFrame()
+                mobility_episodes = pd.read_csv(mobility_file) if mobility_file else pd.DataFrame()
+                location_episodes = pd.read_csv(location_file) if location_file else pd.DataFrame()
+                overlap_episodes = pd.read_csv(overlap_file) if overlap_file else pd.DataFrame()
+                
+                # Initialize transport and location durations
+                active_transport_duration = 0
+                automated_transport_duration = 0
+                home_duration = 0
+                out_of_home_duration = 0
+                
+                # Calculate transport durations from mobility episodes
+                if not mobility_episodes.empty and 'transport_type' in mobility_episodes.columns and 'duration' in mobility_episodes.columns:
+                    # Parse duration
+                    try:
+                        mobility_episodes['duration_mins'] = mobility_episodes['duration'].apply(self.parse_duration_string)
+                    except Exception as e:
+                        self.logger.warning(f"Error parsing duration in mobility episodes: {str(e)}")
+                        # Fallback: try to convert to numeric directly
+                        try:
+                            mobility_episodes['duration_mins'] = pd.to_numeric(mobility_episodes['duration'], errors='coerce')
+                        except:
+                            self.logger.warning("Error converting duration to numeric, skipping duration calculations")
+                            mobility_episodes['duration_mins'] = 0
+                    
+                    # Calculate active transport duration
+                    active_mask = mobility_episodes['transport_type'] == 'active'
+                    if active_mask.any():
+                        active_transport_duration = mobility_episodes.loc[active_mask, 'duration_mins'].sum()
+                    
+                    # Calculate automated transport duration
+                    auto_mask = mobility_episodes['transport_type'] == 'automated'
+                    if auto_mask.any():
+                        automated_transport_duration = mobility_episodes.loc[auto_mask, 'duration_mins'].sum()
+                
+                # Calculate location durations from mobility episodes
+                if not mobility_episodes.empty and 'location_type' in mobility_episodes.columns:
+                    if 'duration_mins' not in mobility_episodes.columns:
+                        try:
+                            mobility_episodes['duration_mins'] = mobility_episodes['duration'].apply(self.parse_duration_string)
+                        except Exception as e:
+                            self.logger.warning(f"Error parsing duration for location calculation: {str(e)}")
+                    
+                    # Calculate home duration
+                    home_mask = mobility_episodes['location_type'] == 'home'
+                    if home_mask.any() and 'duration_mins' in mobility_episodes.columns:
+                        home_duration += mobility_episodes.loc[home_mask, 'duration_mins'].sum()
+                    
+                    # Calculate out of home duration
+                    out_mask = mobility_episodes['location_type'] == 'out_of_home'
+                    if out_mask.any() and 'duration_mins' in mobility_episodes.columns:
+                        out_of_home_duration += mobility_episodes.loc[out_mask, 'duration_mins'].sum()
+                
+                # Calculate location durations from location episodes
+                if not location_episodes.empty and 'location_type' in location_episodes.columns and 'duration' in location_episodes.columns:
+                    # Parse duration
+                    try:
+                        location_episodes['duration_mins'] = location_episodes['duration'].apply(self.parse_duration_string)
+                    except Exception as e:
+                        self.logger.warning(f"Error parsing duration in location episodes: {str(e)}")
+                        # Fallback: try to convert to numeric directly
+                        try:
+                            location_episodes['duration_mins'] = pd.to_numeric(location_episodes['duration'], errors='coerce')
+                        except:
+                            self.logger.warning("Error converting duration to numeric, skipping location duration calculations")
+                            location_episodes['duration_mins'] = 0
+                    
+                    # Calculate home duration
+                    home_mask = location_episodes['location_type'] == 'home'
+                    if home_mask.any() and 'duration_mins' in location_episodes.columns:
+                        home_duration += location_episodes.loc[home_mask, 'duration_mins'].sum()
+                    
+                    # Calculate out of home duration
+                    out_mask = location_episodes['location_type'] == 'out_of_home'
+                    if out_mask.any() and 'duration_mins' in location_episodes.columns:
+                        out_of_home_duration += location_episodes.loc[out_mask, 'duration_mins'].sum()
+                
+                # Display column names only in debug mode
+                if self.debug_mode:
+                    if not digital_episodes.empty:
+                        self.logger.debug(f"Digital episode columns: {digital_episodes.columns.tolist()}")
+                    if not mobility_episodes.empty:
+                        self.logger.debug(f"Mobility episode columns: {mobility_episodes.columns.tolist()}")
+                    if not overlap_episodes.empty:
+                        self.logger.debug(f"Overlap episode columns: {overlap_episodes.columns.tolist()}")
+                    if not location_episodes.empty:
+                        self.logger.debug(f"Location episode columns: {location_episodes.columns.tolist()}")
+                
+                # Check if we have enough data to calculate anything
+                if (digital_episodes.empty and mobility_episodes.empty and overlap_episodes.empty):
+                    logging.warning(f"All episode files for {participant_id} on {date_str} are empty")
+                    return None
+                
+                # Standardize column names for mobility episodes
                 if not mobility_episodes.empty:
-                    self.logger.debug(f"Mobility episode columns: {mobility_episodes.columns.tolist()}")
+                    # Map different column names to standard format
+                    col_mapping = {
+                        'started_at': 'start_time',
+                        'finished_at': 'end_time'
+                    }
+                    mobility_episodes = mobility_episodes.rename(columns={k: v for k, v in col_mapping.items() if k in mobility_episodes.columns})
+                    
+                    # Verify required columns exist after standardization
+                    if 'start_time' not in mobility_episodes.columns or 'end_time' not in mobility_episodes.columns:
+                        self.logger.warning(f"Missing required time columns in mobility file for {participant_id} on {date_str}")
+                        self.stats['mobility']['column_mismatch'] = self.stats['mobility'].get('column_mismatch', 0) + 1
+                        self._update_failure_reason('mobility', 'column_mismatch')
+                        mobility_episodes = pd.DataFrame()  # Empty it so we don't try to process it
+                
+                # Standardize column names for overlap episodes
                 if not overlap_episodes.empty:
-                    self.logger.debug(f"Overlap episode columns: {overlap_episodes.columns.tolist()}")
-            
-            # Check if we have enough data to calculate anything
-            if (digital_episodes.empty and mobility_episodes.empty and overlap_episodes.empty):
-                logging.warning(f"All episode files for {participant_id} on {date_str} are empty")
-                return None
-            
-            # Standardize column names for mobility episodes
-            if not mobility_episodes.empty:
-                # Map different column names to standard format
-                col_mapping = {
-                    'started_at': 'start_time',
-                    'finished_at': 'end_time'
+                    # Check/fix columns if needed
+                    if 'started_at' in overlap_episodes.columns and 'start_time' not in overlap_episodes.columns:
+                        overlap_episodes = overlap_episodes.rename(columns={'started_at': 'start_time', 'finished_at': 'end_time'})
+                    
+                    # Verify required columns exist after standardization
+                    if 'start_time' not in overlap_episodes.columns or 'end_time' not in overlap_episodes.columns:
+                        self.logger.warning(f"Missing required time columns in overlap file for {participant_id} on {date_str}")
+                        self.stats['overlap']['column_mismatch'] = self.stats['overlap'].get('column_mismatch', 0) + 1
+                        self._update_failure_reason('overlap', 'column_mismatch')
+                        overlap_episodes = pd.DataFrame()  # Empty it
+                
+                # Only log in debug mode
+                if self.debug_mode:
+                    logging.debug(f"Digital episodes: {len(digital_episodes)}, "
+                                f"Mobility episodes: {len(mobility_episodes)}, "
+                                f"Overlap episodes: {len(overlap_episodes)}")
+                
+                # Convert time columns to datetime
+                for df, name in [(digital_episodes, 'digital'), (mobility_episodes, 'mobility'), (overlap_episodes, 'overlap')]:
+                    if not df.empty:
+                        for col in ['start_time', 'end_time']:
+                            if col in df.columns:
+                                df[col] = pd.to_datetime(df[col], errors='coerce')
+                                
+                                # Only log in warning cases
+                                nat_count = df[col].isna().sum()
+                                if nat_count > 0:
+                                    self.logger.warning(f"{nat_count} NaT values after datetime conversion in {name} {col}")
+                
+                # Calculate fragmentation metrics for each episode type
+                digital_metrics = self.calculate_fragmentation_index(
+                    digital_episodes, 'digital', participant_id, date_str
+                )
+                mobility_metrics = self.calculate_fragmentation_index(
+                    mobility_episodes, 'mobility', participant_id, date_str
+                )
+                overlap_metrics = self.calculate_fragmentation_index(
+                    overlap_episodes, 'overlap', participant_id, date_str
+                ) if not overlap_episodes.empty else {
+                    'fragmentation_index': np.nan,
+                    'episode_count': 0,
+                    'total_duration': 0,
+                    'status': 'no_overlap_episodes'
                 }
-                mobility_episodes = mobility_episodes.rename(columns={k: v for k, v in col_mapping.items() if k in mobility_episodes.columns})
                 
-                # Verify required columns exist after standardization
-                if 'start_time' not in mobility_episodes.columns or 'end_time' not in mobility_episodes.columns:
-                    self.logger.warning(f"Missing required time columns in mobility file for {participant_id} on {date_str}")
-                    self.stats['mobility']['column_mismatch'] = self.stats['mobility'].get('column_mismatch', 0) + 1
-                    self._update_failure_reason('mobility', 'column_mismatch')
-                    mobility_episodes = pd.DataFrame()  # Empty it so we don't try to process it
-            
-            # Standardize column names for overlap episodes
-            if not overlap_episodes.empty:
-                # Check/fix columns if needed
-                if 'started_at' in overlap_episodes.columns and 'start_time' not in overlap_episodes.columns:
-                    overlap_episodes = overlap_episodes.rename(columns={'started_at': 'start_time', 'finished_at': 'end_time'})
+                # Add identifying prefixes to metrics keys
+                digital_metrics_prefixed = {f"digital_{k}": v for k, v in digital_metrics.items()}
+                mobility_metrics_prefixed = {f"mobility_{k}": v for k, v in mobility_metrics.items()}
+                overlap_metrics_prefixed = {f"overlap_{k}": v for k, v in overlap_metrics.items()}
                 
-                # Verify required columns exist after standardization
-                if 'start_time' not in overlap_episodes.columns or 'end_time' not in overlap_episodes.columns:
-                    self.logger.warning(f"Missing required time columns in overlap file for {participant_id} on {date_str}")
-                    self.stats['overlap']['column_mismatch'] = self.stats['overlap'].get('column_mismatch', 0) + 1
-                    self._update_failure_reason('overlap', 'column_mismatch')
-                    overlap_episodes = pd.DataFrame()  # Empty it
-            
-            # Only log in debug mode
-            if self.debug_mode:
-                logging.debug(f"Digital episodes: {len(digital_episodes)}, "
-                            f"Mobility episodes: {len(mobility_episodes)}, "
-                            f"Overlap episodes: {len(overlap_episodes)}")
-            
-            # Convert time columns to datetime
-            for df, name in [(digital_episodes, 'digital'), (mobility_episodes, 'mobility'), (overlap_episodes, 'overlap')]:
-                if not df.empty:
-                    for col in ['start_time', 'end_time']:
-                        if col in df.columns:
-                            df[col] = pd.to_datetime(df[col], errors='coerce')
-                            
-                            # Only log in warning cases
-                            nat_count = df[col].isna().sum()
-                            if nat_count > 0:
-                                self.logger.warning(f"{nat_count} NaT values after datetime conversion in {name} {col}")
-            
-            # Calculate fragmentation metrics for each episode type
-            digital_metrics = self.calculate_fragmentation_index(
-                digital_episodes, 'digital', participant_id, date_str
-            )
-            mobility_metrics = self.calculate_fragmentation_index(
-                mobility_episodes, 'mobility', participant_id, date_str
-            )
-            overlap_metrics = self.calculate_fragmentation_index(
-                overlap_episodes, 'overlap', participant_id, date_str
-            ) if not overlap_episodes.empty else {
-                'fragmentation_index': np.nan,
-                'episode_count': 0,
-                'total_duration': 0,
-                'status': 'no_overlap_episodes'
-            }
-            
-            # Add identifying prefixes to metrics keys
-            digital_metrics_prefixed = {f"digital_{k}": v for k, v in digital_metrics.items()}
-            mobility_metrics_prefixed = {f"mobility_{k}": v for k, v in mobility_metrics.items()}
-            overlap_metrics_prefixed = {f"overlap_{k}": v for k, v in overlap_metrics.items()}
-            
-            # Add cleaned ID to result
-            result = {
-                'participant_id': participant_id,
-                'date': date_str,
-                **digital_metrics_prefixed,
-                **mobility_metrics_prefixed,
-                **overlap_metrics_prefixed
-            }
-            
-            # Only log detailed metrics in debug mode
-            if self.debug_mode:
-                self.logger.debug(f"Calculated metrics for {participant_id} on {date_str}: "
-                               f"Digital: {digital_metrics.get('fragmentation_index', 'N/A')}, "
-                               f"Mobility: {mobility_metrics.get('fragmentation_index', 'N/A')}, "
-                               f"Overlap: {overlap_metrics.get('fragmentation_index', 'N/A')}")
-            
-            return result
-            
-        except Exception as e:
-            self.logger.error(f"Error processing episodes for {participant_id} on {date_str}: {str(e)}")
-            import traceback
-            self.logger.error(traceback.format_exc())
-            return None
+                # Add cleaned ID and transport/location metrics to result
+                result = {
+                    'participant_id': participant_id,
+                    'date': date_str,
+                    'active_transport_duration': active_transport_duration,
+                    'automated_transport_duration': automated_transport_duration,
+                    'home_duration': home_duration,
+                    'out_of_home_duration': out_of_home_duration,
+                    **digital_metrics_prefixed,
+                    **mobility_metrics_prefixed,
+                    **overlap_metrics_prefixed
+                }
+                
+                # Only log detailed metrics in debug mode
+                if self.debug_mode:
+                    self.logger.debug(f"Calculated metrics for {participant_id} on {date_str}: "
+                                f"Digital: {digital_metrics.get('fragmentation_index', 'N/A')}, "
+                                f"Mobility: {mobility_metrics.get('fragmentation_index', 'N/A')}, "
+                                f"Overlap: {overlap_metrics.get('fragmentation_index', 'N/A')}, "
+                                f"Active transport: {active_transport_duration:.1f} mins, "
+                                f"Automated transport: {automated_transport_duration:.1f} mins, "
+                                f"Home: {home_duration:.1f} mins, "
+                                f"Out of home: {out_of_home_duration:.1f} mins")
+                
+                return result
+                
+            except Exception as e:
+                self.logger.error(f"Error processing episodes for {participant_id} on {date_str}: {str(e)}")
+                import traceback
+                self.logger.error(traceback.format_exc())
+                return None
 
     def print_failure_summary(self):
         """Print a summary of failure reasons"""
@@ -545,8 +636,6 @@ class EpisodeFragmentationAnalyzer:
             plt.close()
         else:
             self.logger.warning("No valid fragmentation index data for distribution plot")
-
-        # Add similar checks for other plots...
 
 def process_episodes_data(
     episode_dir: Path,
