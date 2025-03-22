@@ -1291,7 +1291,139 @@ class EpisodeProcessor:
             all_episodes = all_episodes[[c for c in cols if c in all_episodes.columns]]
         
         return all_episodes
+
+    def filter_episodes_to_waking_hours(self, episodes_df, start_hour=5):
+        """Filter episodes to only include those during waking hours (starting at 5 AM)"""
+        if episodes_df.empty:
+            return episodes_df
+            
+        # Create a copy to avoid modifying the original
+        episodes_df = episodes_df.copy()
         
+        # Determine which datetime column to use based on available columns
+        start_col = 'start_time' if 'start_time' in episodes_df.columns else 'started_at'
+        end_col = 'end_time' if 'end_time' in episodes_df.columns else 'finished_at'
+        
+        # Ensure timezone-naive datetimes for consistent comparison
+        episodes_df[start_col] = ensure_tz_naive(episodes_df[start_col])
+        episodes_df[end_col] = ensure_tz_naive(episodes_df[end_col])
+        
+        # Get the dates from the start times
+        episodes_df['date'] = episodes_df[start_col].dt.date
+        
+        # For each date, calculate the 5 AM timestamp
+        filtered_episodes = []
+        for date, day_eps in episodes_df.groupby('date'):
+            # Create 5 AM timestamp for this date
+            waking_hour_start = pd.Timestamp(date).replace(hour=start_hour, minute=0, second=0)
+            next_day_start = pd.Timestamp(date) + pd.Timedelta(days=1)
+            next_day_waking_hour = next_day_start.replace(hour=start_hour, minute=0, second=0)
+            
+            # Log the filtering
+            self.logger.info(f"Filtering episodes for date {date} to start at {waking_hour_start}")
+            
+            # Filter episodes that start or end after waking hour
+            for idx, ep in day_eps.iterrows():
+                ep_start = ep[start_col]
+                ep_end = ep[end_col]
+                
+                # Skip episodes that end before waking hour
+                if ep_end < waking_hour_start:
+                    continue
+                    
+                # Truncate episodes that start before waking hour
+                if ep_start < waking_hour_start:
+                    # Modify the start time to be waking hour
+                    ep[start_col] = waking_hour_start
+                    # Recalculate duration if the column exists
+                    if 'duration' in episodes_df.columns:
+                        ep['duration'] = ep[end_col] - ep[start_col]
+                
+                # Also filter episodes that start after the next day's waking hour
+                if ep_start >= next_day_waking_hour:
+                    continue
+                    
+                # Truncate episodes that end after the next day's waking hour
+                if ep_end > next_day_waking_hour:
+                    ep[end_col] = next_day_waking_hour
+                    # Recalculate duration if the column exists
+                    if 'duration' in episodes_df.columns:
+                        ep['duration'] = ep[end_col] - ep[start_col]
+                
+                # Add to filtered list
+                filtered_episodes.append(ep)
+        
+        # Create a new DataFrame from filtered episodes
+        result = pd.DataFrame(filtered_episodes) if filtered_episodes else pd.DataFrame(columns=episodes_df.columns)
+        
+        # Drop the temporary date column
+        if 'date' in result.columns:
+            result = result.drop(columns=['date'])
+            
+        self.logger.info(f"Filtered {len(episodes_df)} episodes to {len(result)} episodes during waking hours")
+        return result
+
+    def add_location_to_digital_episodes(self, digital_episodes, location_episodes):
+        """Add location information (home/not home) to digital episodes based on overlap with location data"""
+        if digital_episodes.empty or location_episodes.empty:
+            return digital_episodes
+        
+        # Create a copy to avoid modifying the original
+        digital_episodes = digital_episodes.copy()
+        
+        # Add location_type column with default value
+        digital_episodes['location_type'] = 'unknown'
+        
+        # Ensure consistent column names
+        location_eps = location_episodes.copy()
+        if 'started_at' in location_eps.columns and 'start_time' not in location_eps.columns:
+            location_eps = location_eps.rename(columns={'started_at': 'start_time', 'finished_at': 'end_time'})
+        
+        # Ensure timezone-naive datetimes for consistent comparison
+        digital_episodes['start_time'] = ensure_tz_naive(digital_episodes['start_time'])
+        digital_episodes['end_time'] = ensure_tz_naive(digital_episodes['end_time'])
+        location_eps['start_time'] = ensure_tz_naive(location_eps['start_time'])
+        location_eps['end_time'] = ensure_tz_naive(location_eps['end_time'])
+        
+        # For each digital episode, find overlapping location episodes
+        for idx, digital_ep in digital_episodes.iterrows():
+            d_start = digital_ep['start_time']
+            d_end = digital_ep['end_time']
+            
+            # Find overlapping location episodes
+            overlaps = []
+            overlap_durations = []
+            
+            for _, loc_ep in location_eps.iterrows():
+                l_start = loc_ep['start_time']
+                l_end = loc_ep['end_time']
+                
+                # Calculate overlap
+                overlap_start = max(d_start, l_start)
+                overlap_end = min(d_end, l_end)
+                
+                if overlap_start < overlap_end:  # There is an overlap
+                    overlap_duration = (overlap_end - overlap_start).total_seconds()
+                    overlaps.append(loc_ep)
+                    overlap_durations.append(overlap_duration)
+            
+            # If we found overlaps, determine the primary location type
+            if overlaps:
+                # Find the location type with the longest overlap duration
+                max_duration_idx = overlap_durations.index(max(overlap_durations))
+                primary_location = overlaps[max_duration_idx]
+                
+                # Assign the location type to the digital episode
+                if 'location_type' in primary_location:
+                    digital_episodes.at[idx, 'location_type'] = primary_location['location_type']
+        
+        # Log the result
+        location_counts = digital_episodes['location_type'].value_counts().to_dict()
+        self.logger.info(f"Added location types to {len(digital_episodes)} digital episodes: {location_counts}")
+        
+        return digital_episodes
+
+    # Modify the process_day method to apply these filters
     def process_day(self, date: datetime_date, digital_episodes: pd.DataFrame, 
                 mobility_episodes: pd.DataFrame, location_episodes: pd.DataFrame = None) -> dict:
         """Process a single day and generate statistics"""
@@ -1333,6 +1465,16 @@ class EpisodeProcessor:
             except Exception as e:
                 self.logger.error(f"Error generating default location timeline: {str(e)}")
         
+        # MODIFICATION 1: Filter episodes to start from 5 AM
+        self.logger.info("Filtering episodes to only include waking hours (5 AM onwards)")
+        digital_episodes = self.filter_episodes_to_waking_hours(digital_episodes)
+        mobility_episodes = self.filter_episodes_to_waking_hours(mobility_episodes)
+        location_episodes = self.filter_episodes_to_waking_hours(location_episodes)
+        
+        # MODIFICATION 2: Add location information to digital episodes
+        self.logger.info("Adding location information to digital episodes")
+        digital_episodes = self.add_location_to_digital_episodes(digital_episodes, location_episodes)
+        
         # Find overlaps between digital and mobility
         overlap_episodes = self._find_overlaps(digital_episodes, mobility_episodes)
         
@@ -1349,6 +1491,9 @@ class EpisodeProcessor:
         # Calculate statistics
         day_status = self.day_processing_status.get(date, {'valid': False, 'reason': 'Unknown'})
         processing_method = day_status.get('method', 'unknown')
+        
+        # The rest of the method remains the same...
+        # [Original statistics calculation code continues here]
         
         # Calculate transport type statistics
         active_transport_duration = 0
@@ -1432,6 +1577,38 @@ class EpisodeProcessor:
             self.logger.info(f"Location episodes - Home: {loc_home_episodes} episodes ({loc_home_duration:.1f} min), " +
                         f"Out of home: {loc_out_episodes} episodes ({loc_out_duration:.1f} min)")
         
+        # Add digital episode location statistics for the new feature
+        digital_home_episodes = 0
+        digital_out_episodes = 0
+        digital_unknown_episodes = 0
+        digital_home_duration = 0
+        digital_out_duration = 0
+        digital_unknown_duration = 0
+        
+        if not digital_episodes.empty and 'location_type' in digital_episodes.columns:
+            digital_home_mask = digital_episodes['location_type'] == 'home'
+            digital_out_mask = digital_episodes['location_type'] == 'out_of_home'
+            digital_unknown_mask = digital_episodes['location_type'] == 'unknown'
+            
+            # Count episodes by location
+            digital_home_episodes = digital_home_mask.sum()
+            digital_out_episodes = digital_out_mask.sum()
+            digital_unknown_episodes = digital_unknown_mask.sum()
+            
+            # Calculate durations by location
+            if digital_home_mask.any():
+                digital_home_duration = digital_episodes.loc[digital_home_mask, 'duration'].sum().total_seconds() / 60
+            
+            if digital_out_mask.any():
+                digital_out_duration = digital_episodes.loc[digital_out_mask, 'duration'].sum().total_seconds() / 60
+                
+            if digital_unknown_mask.any():
+                digital_unknown_duration = digital_episodes.loc[digital_unknown_mask, 'duration'].sum().total_seconds() / 60
+            
+            self.logger.info(f"Digital episodes by location - Home: {digital_home_episodes} episodes ({digital_home_duration:.1f} min), " +
+                        f"Out of home: {digital_out_episodes} episodes ({digital_out_duration:.1f} min), " +
+                        f"Unknown: {digital_unknown_episodes} episodes ({digital_unknown_duration:.1f} min)")
+        
         day_stats = {
             'user': self.participant_id,
             'date': date,
@@ -1453,6 +1630,12 @@ class EpisodeProcessor:
             'out_of_home_duration': out_of_home_duration,
             'home_episodes': home_episodes,
             'out_of_home_episodes': out_of_home_episodes,
+            'digital_home_episodes': digital_home_episodes,
+            'digital_out_episodes': digital_out_episodes,
+            'digital_unknown_episodes': digital_unknown_episodes,
+            'digital_home_duration': digital_home_duration,
+            'digital_out_duration': digital_out_duration,
+            'digital_unknown_duration': digital_unknown_duration,
             'participant_id_clean': self.participant_id_clean
         }
         
@@ -1641,12 +1824,16 @@ class EpisodeProcessor:
             return []
 
 def main():
-    """Main execution function"""
+    """Main execution function with updated summary reporting"""
     # Parse command line arguments for optional preprocessing
     parser = argparse.ArgumentParser(description='Episode detection with optional preprocessing')
     parser.add_argument('--preprocess', action='store_true', help='Run preprocessing before episode detection')
     parser.add_argument('--participant', type=str, help='Process a specific participant ID')
+    parser.add_argument('--waking-hour', type=int, default=5, help='Starting hour for waking time filter (default: 5)')
     args = parser.parse_args()
+    
+    # Log the waking hour setting
+    logging.info(f"Using waking hour filter starting at {args.waking_hour}:00 AM")
     
     # Find valid participants
     if args.preprocess:
@@ -1708,6 +1895,12 @@ def main():
         try:
             # Create processor with preprocess flag
             processor = EpisodeProcessor(pid, preprocess_data=args.preprocess)
+            
+            # Set the waking hour filter before processing
+            # Note: This is assuming we've added a waking_hour attribute to the EpisodeProcessor class
+            # If not, you would need to modify the filter_episodes_to_waking_hours method to accept this parameter
+            processor.waking_hour = args.waking_hour
+            
             participant_stats = processor.process()
             
             if participant_stats:
@@ -1732,6 +1925,13 @@ def main():
                     'avg_overlap_mins': participant_df['overlap_duration'].mean(),
                 }
                 
+                # Add digital location statistics if available
+                if 'digital_home_episodes' in participant_df.columns:
+                    participant_summary['avg_digital_home_episodes'] = participant_df['digital_home_episodes'].mean()
+                    participant_summary['avg_digital_out_episodes'] = participant_df['digital_out_episodes'].mean()
+                    participant_summary['avg_digital_home_mins'] = participant_df['digital_home_duration'].mean()
+                    participant_summary['avg_digital_out_mins'] = participant_df['digital_out_duration'].mean()
+                
                 # Count processing methods
                 if 'processing_method' in participant_df.columns:
                     method_counts = participant_df['processing_method'].value_counts().to_dict()
@@ -1747,7 +1947,7 @@ def main():
         except Exception as e:
             logging.error(f"Error processing participant {pid}: {str(e)}")
             failed_count += 1
-    # In main() function, update the summary reporting section to include new metrics
+    
     if all_stats:
         # Create overall summary
         all_summary = pd.DataFrame(all_stats)
@@ -1761,7 +1961,7 @@ def main():
         
         # Log summary information
         summary_logger.info("\n" + "="*60)
-        summary_logger.info(f"MOBILITY DETECTION SUMMARY")
+        summary_logger.info(f"MOBILITY DETECTION SUMMARY (Waking hours starting at {args.waking_hour}:00 AM)")
         summary_logger.info("="*60)
         summary_logger.info(f"Successfully processed {processed_count}/{len(common_ids)} participants")
         summary_logger.info(f"Failed to process {failed_count} participants")
@@ -1826,6 +2026,40 @@ def main():
                 summary_logger.info(f"  Out of Home:")
                 summary_logger.info(f"    Total: {int(out_count)} episodes ({round(out_duration/60, 1)} hours)")
                 summary_logger.info(f"    Per Day: {round(valid_days['out_of_home_episodes'].mean(), 1)} episodes ({round(valid_days['out_of_home_duration'].mean(), 1)} minutes)")
+            
+            # NEW: Digital episode location statistics
+            if 'digital_home_episodes' in valid_days.columns:
+                summary_logger.info("\nDIGITAL EPISODE LOCATION STATISTICS (Valid Days Only):")
+                dig_home_count = valid_days['digital_home_episodes'].sum()
+                dig_home_duration = valid_days['digital_home_duration'].sum()
+                dig_out_count = valid_days['digital_out_episodes'].sum()
+                dig_out_duration = valid_days['digital_out_duration'].sum()
+                dig_unknown_count = valid_days['digital_unknown_episodes'].sum()
+                dig_unknown_duration = valid_days['digital_unknown_duration'].sum()
+                
+                summary_logger.info(f"  Digital Use At Home:")
+                summary_logger.info(f"    Total: {int(dig_home_count)} episodes ({round(dig_home_duration/60, 1)} hours)")
+                summary_logger.info(f"    Per Day: {round(valid_days['digital_home_episodes'].mean(), 1)} episodes ({round(valid_days['digital_home_duration'].mean(), 1)} minutes)")
+                
+                summary_logger.info(f"  Digital Use Out of Home:")
+                summary_logger.info(f"    Total: {int(dig_out_count)} episodes ({round(dig_out_duration/60, 1)} hours)")
+                summary_logger.info(f"    Per Day: {round(valid_days['digital_out_episodes'].mean(), 1)} episodes ({round(valid_days['digital_out_duration'].mean(), 1)} minutes)")
+                
+                if dig_unknown_count > 0:
+                    summary_logger.info(f"  Digital Use Unknown Location:")
+                    summary_logger.info(f"    Total: {int(dig_unknown_count)} episodes ({round(dig_unknown_duration/60, 1)} hours)")
+                    summary_logger.info(f"    Per Day: {round(valid_days['digital_unknown_episodes'].mean(), 1)} episodes ({round(valid_days['digital_unknown_duration'].mean(), 1)} minutes)")
+                
+                # Calculate and report percentages
+                total_digital_count = dig_home_count + dig_out_count + dig_unknown_count
+                total_digital_duration = dig_home_duration + dig_out_duration + dig_unknown_duration
+                
+                if total_digital_count > 0:
+                    summary_logger.info(f"\n  Digital Use Distribution:")
+                    summary_logger.info(f"    At Home: {round(100*dig_home_count/total_digital_count, 1)}% of episodes, {round(100*dig_home_duration/total_digital_duration, 1)}% of duration")
+                    summary_logger.info(f"    Out of Home: {round(100*dig_out_count/total_digital_count, 1)}% of episodes, {round(100*dig_out_duration/total_digital_duration, 1)}% of duration")
+                    if dig_unknown_count > 0:
+                        summary_logger.info(f"    Unknown: {round(100*dig_unknown_count/total_digital_count, 1)}% of episodes, {round(100*dig_unknown_duration/total_digital_duration, 1)}% of duration")
 
 if __name__ == "__main__":
     main()
