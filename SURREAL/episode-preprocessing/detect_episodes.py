@@ -174,6 +174,8 @@ class EpisodeProcessor:
         self.output_dir = EPISODE_OUTPUT_DIR / participant_id
         self.preprocess_data = preprocess_data
         self.home_location = (np.nan, np.nan)  # Initialize home location
+        self.all_staypoints_by_day = {}  # Store staypoints by day for later use
+        self.day_positionfixes = {}  # Store positionfixes by day for location timeline
         
         # Skip creation if the path is a macOS hidden file
         if '._' in str(self.output_dir):
@@ -391,14 +393,238 @@ class EpisodeProcessor:
                 home_lat, home_lon
             )
             
-            # Classify based on distance (100m threshold)
-            if distance <= 100:
+            # Classify based on distance (50m threshold instead of 100m)
+            if distance <= 50:
                 staypoints.at[idx, 'location_type'] = 'home'
             else:
                 staypoints.at[idx, 'location_type'] = 'out_of_home'
         
         return staypoints
     
+    def generate_location_timeline(self, staypoints, positionfixes, date):
+        """Generate a full-day timeline of home vs out-of-home episodes"""
+        # Start with midnight and end with midnight the next day
+        if isinstance(date, str):
+            date = datetime.strptime(date, '%Y-%m-%d').date()
+        
+        day_start = pd.Timestamp(date).replace(hour=0, minute=0, second=0)
+        day_end = day_start + pd.Timedelta(days=1)
+        
+        # Extract home vs out-of-home episodes from staypoints
+        location_episodes = []
+        
+        # First handle the case where staypoints is empty - create a default timeline
+        if staypoints.empty:
+            # Determine default location from positionfixes
+            default_location = 'unknown'
+            if not positionfixes.empty and hasattr(self, 'home_location') and not np.isnan(self.home_location[0]):
+                home_lat, home_lon = self.home_location
+                
+                # Check if any positions are near home
+                for _, pos in positionfixes.iterrows():
+                    distance = self.haversine_distance(
+                        pos.geometry.y, pos.geometry.x, 
+                        home_lat, home_lon
+                    )
+                    
+                    if distance <= 50:  # Using 50m threshold
+                        default_location = 'home'
+                        break
+                        
+                if default_location != 'home':
+                    default_location = 'out_of_home'
+                    
+            # Create a single episode for the whole day
+            location_episodes.append({
+                'started_at': day_start,
+                'finished_at': day_end,
+                'state': 'location',
+                'location_type': default_location,
+                'latitude': self.home_location[0] if default_location == 'home' else np.nan,
+                'longitude': self.home_location[1] if default_location == 'home' else np.nan,
+                'duration': day_end - day_start
+            })
+        else:
+            # Create episodes from staypoints
+            for idx, sp in staypoints.iterrows():
+                # Ensure timezone-naive for consistent comparison
+                started_at = sp['started_at'].tz_localize(None) if sp['started_at'].tzinfo else sp['started_at']
+                finished_at = sp['finished_at'].tz_localize(None) if sp['finished_at'].tzinfo else sp['finished_at']
+                
+                # Only include staypoints from this day
+                if started_at.date() == date or finished_at.date() == date:
+                    # Trim to day boundaries
+                    if started_at < day_start:
+                        started_at = day_start
+                    if finished_at > day_end:
+                        finished_at = day_end
+                    
+                    if started_at < finished_at:  # Only include valid episodes
+                        location_episodes.append({
+                            'started_at': started_at,
+                            'finished_at': finished_at,
+                            'state': 'location',
+                            'location_type': sp.get('location_type', 'unknown'),
+                            'latitude': sp.geometry.y,
+                            'longitude': sp.geometry.x,
+                            'duration': finished_at - started_at
+                        })
+        
+        # Create a DataFrame and sort by start time
+        timeline = pd.DataFrame(location_episodes).sort_values('started_at') if location_episodes else pd.DataFrame()
+        
+        # Ensure positionfixes have timezone-naive datetimes for consistent comparison
+        if not positionfixes.empty:
+            positionfixes = positionfixes.copy()
+            positionfixes['tracked_at'] = ensure_tz_naive(positionfixes['tracked_at'])
+        
+        # Fill gaps in the timeline to ensure continuous coverage
+        timeline = self._fill_location_timeline_gaps(timeline, positionfixes, day_start, day_end)
+        
+        return timeline
+
+    def _fill_location_timeline_gaps(self, timeline, positionfixes, day_start, day_end):
+        """Fill gaps in the location timeline ensuring all times are timezone-naive"""
+        home_lat, home_lon = self.home_location
+        
+        # Ensure day boundaries are timezone-naive
+        day_start = day_start.tz_localize(None) if hasattr(day_start, 'tzinfo') and day_start.tzinfo else day_start
+        day_end = day_end.tz_localize(None) if hasattr(day_end, 'tzinfo') and day_end.tzinfo else day_end
+        
+        # Convert to a list for easier manipulation
+        episodes = timeline.to_dict('records') if not timeline.empty else []
+        filled_episodes = []
+        
+        # Handle gap at the beginning of day
+        if not episodes or episodes[0]['started_at'] > day_start:
+            # Find the first known location
+            if episodes:
+                first_location = episodes[0]['location_type']
+            else:
+                # Use positionfixes around this time to determine location
+                first_location = self._determine_location_from_positions(positionfixes, day_start, home_lat, home_lon)
+                
+            filled_episodes.append({
+                'started_at': day_start,
+                'finished_at': episodes[0]['started_at'] if episodes else day_end,
+                'state': 'location',
+                'location_type': first_location,
+                'latitude': home_lat if first_location == 'home' else np.nan,
+                'longitude': home_lon if first_location == 'home' else np.nan,
+                'duration': (episodes[0]['started_at'] if episodes else day_end) - day_start
+            })
+        
+        # Fill gaps between episodes
+        for i in range(len(episodes)):
+            filled_episodes.append(episodes[i])
+            
+            if i < len(episodes) - 1:
+                current_end = episodes[i]['finished_at']
+                next_start = episodes[i+1]['started_at']
+                
+                if current_end < next_start:
+                    # Gap detected, determine location for this gap
+                    gap_location = self._determine_location_from_positions(
+                        positionfixes, current_end, home_lat, home_lon)
+                    
+                    filled_episodes.append({
+                        'started_at': current_end,
+                        'finished_at': next_start,
+                        'state': 'location',
+                        'location_type': gap_location,
+                        'latitude': home_lat if gap_location == 'home' else np.nan,
+                        'longitude': home_lon if gap_location == 'home' else np.nan,
+                        'duration': next_start - current_end
+                    })
+        
+        # Handle gap at the end of day
+        if not filled_episodes or filled_episodes[-1]['finished_at'] < day_end:
+            last_location = filled_episodes[-1]['location_type'] if filled_episodes else 'unknown'
+            
+            filled_episodes.append({
+                'started_at': filled_episodes[-1]['finished_at'] if filled_episodes else day_start,
+                'finished_at': day_end,
+                'state': 'location',
+                'location_type': last_location,
+                'latitude': home_lat if last_location == 'home' else np.nan,
+                'longitude': home_lon if last_location == 'home' else np.nan,
+                'duration': day_end - (filled_episodes[-1]['finished_at'] if filled_episodes else day_start)
+            })
+        
+        # Create a dataframe from the filled episodes
+        result = pd.DataFrame(filled_episodes)
+        
+        if not result.empty:
+            # Add a movement_state column based on location_type for better visualization
+            result['movement_state'] = result['location_type'].map({
+                'home': 'at_home',
+                'out_of_home': 'out_of_home',
+                'unknown': 'unknown'
+            })
+        
+        return result
+
+    def _determine_location_from_positions(self, positionfixes, timestamp, home_lat, home_lon):
+        """Determine location type from nearby positionfixes"""
+        # Ensure timestamp is timezone-naive for consistent comparison
+        timestamp = timestamp.tz_localize(None) if hasattr(timestamp, 'tzinfo') and timestamp.tzinfo else timestamp
+        
+        # If home location is unknown, return unknown
+        if np.isnan(home_lat) or np.isnan(home_lon):
+            return 'unknown'
+        
+        # Find positions within 30 minutes of the timestamp
+        window_start = timestamp - pd.Timedelta(minutes=30)
+        window_end = timestamp + pd.Timedelta(minutes=30)
+        
+        if positionfixes.empty:
+            # Default to unknown if no position data
+            return 'unknown'
+        
+        nearby_positions = positionfixes[
+            (positionfixes['tracked_at'] >= window_start) & 
+            (positionfixes['tracked_at'] <= window_end)
+        ]
+        
+        if nearby_positions.empty:
+            # If no nearby positions, check all positions for the day
+            day_start = pd.Timestamp(timestamp.date())
+            day_end = day_start + pd.Timedelta(days=1)
+            
+            day_positions = positionfixes[
+                (positionfixes['tracked_at'] >= day_start) & 
+                (positionfixes['tracked_at'] <= day_end)
+            ]
+            
+            if day_positions.empty:
+                return 'unknown'
+            
+            # Find closest position in time
+            closest_idx = (day_positions['tracked_at'] - timestamp).abs().idxmin()
+            closest_pos = day_positions.loc[closest_idx]
+            
+            # Check if this position is near home
+            distance = self.haversine_distance(
+                closest_pos.geometry.y, closest_pos.geometry.x, 
+                home_lat, home_lon
+            )
+            
+            return 'home' if distance <= 50 else 'out_of_home'
+        
+        # Check if any of the nearby positions are at home
+        for _, pos in nearby_positions.iterrows():
+            distance = self.haversine_distance(
+                pos.geometry.y, pos.geometry.x, 
+                home_lat, home_lon
+            )
+            
+            if distance <= 50:  # Using 50m threshold
+                return 'home'
+        
+        # If no nearby position is at home, the person is out
+        return 'out_of_home'
+
+
     def load_gps_data(self) -> Optional[ti.Positionfixes]:
         """Load GPS data with validation or trigger preprocessing if needed"""
         gps_path = GPS_PREP_DIR / f'{self.participant_id}_processed_gps.csv'
@@ -620,6 +846,8 @@ class EpisodeProcessor:
             if is_valid:
                 self.logger.info(f"Date {date} passed quality checks: {len(day_positionfixes)} points")
                 pfs_by_day[date] = day_positionfixes
+                # Store positionfixes by day for location timeline creation
+                self.day_positionfixes[date] = day_positionfixes
             else:
                 self.logger.warning(f"Date {date} failed quality checks: {quality_stats['failure_reason']}")
         
@@ -629,7 +857,7 @@ class EpisodeProcessor:
         
         # Process each day with trackintel
         all_mobility_episodes = {}
-        all_staypoints_by_day = {}  # Store staypoints by day for location analysis
+        self.all_staypoints_by_day = {}  # Store staypoints by day for location analysis
         
         for date, day_positionfixes in pfs_by_day.items():
             try:
@@ -660,7 +888,7 @@ class EpisodeProcessor:
                 staypoints = self.process_staypoints_with_location(staypoints, home_location)
                 
                 # Store staypoints for later use
-                all_staypoints_by_day[date] = staypoints
+                self.all_staypoints_by_day[date] = staypoints
                 
                 # Generate triplegs (movement segments)
                 day_pfs, triplegs = day_pfs.generate_triplegs(staypoints, gap_threshold=STAYPOINT_GAP_THRESHOLD)
@@ -842,6 +1070,15 @@ class EpisodeProcessor:
                 mobility_episodes['started_at'] = ensure_tz_naive(mobility_episodes['started_at'])
                 mobility_episodes['finished_at'] = ensure_tz_naive(mobility_episodes['finished_at'])
                 
+                # IMPORTANT CHANGE: Filter out mobility episodes that happen at home
+                if not mobility_episodes.empty and 'location_type' in mobility_episodes.columns:
+                    original_count = len(mobility_episodes)
+                    mobility_episodes = mobility_episodes[
+                        mobility_episodes['location_type'] != 'home'
+                    ].reset_index(drop=True)
+                    filtered_count = original_count - len(mobility_episodes)
+                    self.logger.info(f"Filtered out {filtered_count} home mobility episodes, remaining: {len(mobility_episodes)}")
+                
                 # Log transport modes summary
                 if 'transport_type' in mobility_episodes.columns:
                     type_counts = mobility_episodes['transport_type'].value_counts().to_dict()
@@ -871,7 +1108,7 @@ class EpisodeProcessor:
                 }
         
         # Process staypoint episodes (stationary periods)
-        all_location_episodes = self.process_staypoint_episodes(all_staypoints_by_day)
+        all_location_episodes = self.process_staypoint_episodes(self.all_staypoints_by_day)
         
         # Combine location episodes with mobility episodes for all dates
         all_combined_episodes = {}
@@ -938,10 +1175,10 @@ class EpisodeProcessor:
                 location_episodes_by_day[date] = location_episodes
         
         return location_episodes_by_day
-
     
     def create_daily_timeline(self, digital_episodes: pd.DataFrame, 
                            mobility_episodes: pd.DataFrame,
+                           location_episodes: pd.DataFrame,
                            overlap_episodes: pd.DataFrame) -> pd.DataFrame:
         """Create a chronological timeline of all episodes for a day"""
         # Add episode type column to each DataFrame
@@ -968,7 +1205,7 @@ class EpisodeProcessor:
                 for idx, ep in digital_episodes.iterrows():
                     if not pd.isna(ep['latitude']) and not pd.isna(ep['longitude']):
                         distance = self.haversine_distance(ep['latitude'], ep['longitude'], home_lat, home_lon)
-                        digital_episodes.at[idx, 'location_type'] = 'home' if distance <= 100 else 'out_of_home'
+                        digital_episodes.at[idx, 'location_type'] = 'home' if distance <= 50 else 'out_of_home'
         
         if not mobility_episodes.empty:
             mobility_episodes = mobility_episodes.copy()
@@ -996,6 +1233,23 @@ class EpisodeProcessor:
             mobility_episodes['start_time'] = ensure_tz_naive(mobility_episodes['start_time'])
             mobility_episodes['end_time'] = ensure_tz_naive(mobility_episodes['end_time'])
         
+        if not location_episodes.empty:
+            location_episodes = location_episodes.copy()
+            location_episodes['episode_type'] = 'location'
+            location_episodes['movement_state'] = location_episodes['location_type']
+            location_episodes['transport_type'] = None
+            location_episodes['primary_mode'] = None
+            
+            # Rename columns to match others
+            location_episodes = location_episodes.rename(columns={
+                'started_at': 'start_time',
+                'finished_at': 'end_time'
+            })
+            
+            # Ensure timezone-naive datetimes
+            location_episodes['start_time'] = ensure_tz_naive(location_episodes['start_time'])
+            location_episodes['end_time'] = ensure_tz_naive(location_episodes['end_time'])
+        
         if not overlap_episodes.empty:
             overlap_episodes = overlap_episodes.copy()
             overlap_episodes['episode_type'] = 'overlap'
@@ -1021,7 +1275,7 @@ class EpisodeProcessor:
             overlap_episodes['end_time'] = ensure_tz_naive(overlap_episodes['end_time'])
         
         # Combine all episodes
-        all_episodes = pd.concat([digital_episodes, mobility_episodes, overlap_episodes], 
+        all_episodes = pd.concat([digital_episodes, mobility_episodes, location_episodes, overlap_episodes], 
                                ignore_index=True)
         
         # Sort chronologically
@@ -1039,15 +1293,52 @@ class EpisodeProcessor:
         return all_episodes
         
     def process_day(self, date: datetime_date, digital_episodes: pd.DataFrame, 
-                mobility_episodes: pd.DataFrame) -> dict:
+                mobility_episodes: pd.DataFrame, location_episodes: pd.DataFrame = None) -> dict:
         """Process a single day and generate statistics"""
         self.logger.info(f"Processing day {date}")
+        
+        # If location_episodes is not provided, use an empty DataFrame
+        if location_episodes is None:
+            location_episodes = pd.DataFrame()
+        
+        # Create comprehensive location timeline if staypoints are available
+        if date in self.all_staypoints_by_day and date in self.day_positionfixes:
+            try:
+                location_timeline = self.generate_location_timeline(
+                    self.all_staypoints_by_day[date], 
+                    self.day_positionfixes[date],
+                    date
+                )
+                if not location_timeline.empty:
+                    # Replace current location_episodes with more comprehensive timeline
+                    location_episodes = location_timeline
+                    self.logger.info(f"Created comprehensive location timeline with {len(location_episodes)} episodes")
+            except Exception as e:
+                self.logger.error(f"Error generating location timeline: {str(e)}")
+                self.logger.error(traceback.format_exc())
+        
+        # If we still don't have location episodes, create a default timeline
+        if location_episodes.empty and hasattr(self, 'home_location') and not np.isnan(self.home_location[0]):
+            try:
+                # Create a basic home/away timeline using any available position fixes for the day
+                day_positionfixes = self.day_positionfixes.get(date, None)
+                location_timeline = self.generate_location_timeline(
+                    gpd.GeoDataFrame(),  # Empty staypoints
+                    day_positionfixes if day_positionfixes is not None else gpd.GeoDataFrame(),
+                    date
+                )
+                if not location_timeline.empty:
+                    location_episodes = location_timeline
+                    self.logger.info(f"Created default location timeline with {len(location_episodes)} episodes")
+            except Exception as e:
+                self.logger.error(f"Error generating default location timeline: {str(e)}")
         
         # Find overlaps between digital and mobility
         overlap_episodes = self._find_overlaps(digital_episodes, mobility_episodes)
         
         # Create daily timeline
-        daily_timeline = self.create_daily_timeline(digital_episodes, mobility_episodes, overlap_episodes)
+        daily_timeline = self.create_daily_timeline(
+            digital_episodes, mobility_episodes, location_episodes, overlap_episodes)
         
         # Save daily timeline
         if not daily_timeline.empty:
@@ -1071,6 +1362,7 @@ class EpisodeProcessor:
         home_episodes = 0
         out_of_home_episodes = 0
         
+        # Process mobility episodes statistics
         if not mobility_episodes.empty:
             # Transport type stats
             if 'transport_type' in mobility_episodes.columns:
@@ -1111,24 +1403,34 @@ class EpisodeProcessor:
                     out_of_home_duration = mobility_episodes.loc[out_mask, 'duration'].sum().total_seconds() / 60
                 
                 # Log the breakdown for debugging
-                self.logger.info(f"Location breakdown - Home: {home_episodes} episodes ({home_duration:.1f} min), " +
+                self.logger.info(f"Location breakdown from mobility - Home: {home_episodes} episodes ({home_duration:.1f} min), " +
                             f"Out of home: {out_of_home_episodes} episodes ({out_of_home_duration:.1f} min)")
+        
+        # Process location episodes statistics - combine with existing stats
+        if not location_episodes.empty and 'location_type' in location_episodes.columns:
+            home_mask_loc = location_episodes['location_type'] == 'home'
+            out_mask_loc = location_episodes['location_type'] == 'out_of_home'
             
-            # Add statistics for stationary episodes specifically
-            stationary_mask = mobility_episodes['state'] == 'stationary'
-            if stationary_mask.any():
-                stationary_home_mask = stationary_mask & (mobility_episodes['location_type'] == 'home')
-                stationary_out_mask = stationary_mask & (mobility_episodes['location_type'] == 'out_of_home')
-                
-                if stationary_home_mask.any():
-                    home_episodes += stationary_home_mask.sum()
-                    home_duration += mobility_episodes.loc[stationary_home_mask, 'duration'].sum().total_seconds() / 60
-                
-                if stationary_out_mask.any():
-                    out_of_home_episodes += stationary_out_mask.sum()
-                    out_of_home_duration += mobility_episodes.loc[stationary_out_mask, 'duration'].sum().total_seconds() / 60
-                
-                self.logger.info(f"Stationary episodes - Home: {stationary_home_mask.sum()}, Out of home: {stationary_out_mask.sum()}")
+            # Count additional episodes
+            loc_home_episodes = home_mask_loc.sum()
+            loc_out_episodes = out_mask_loc.sum()
+            
+            # Calculate durations 
+            loc_home_duration = 0
+            loc_out_duration = 0
+            
+            if home_mask_loc.any():
+                loc_home_duration = location_episodes.loc[home_mask_loc, 'duration'].sum().total_seconds() / 60
+                home_duration += loc_home_duration
+                home_episodes += loc_home_episodes
+            
+            if out_mask_loc.any():
+                loc_out_duration = location_episodes.loc[out_mask_loc, 'duration'].sum().total_seconds() / 60
+                out_of_home_duration += loc_out_duration
+                out_of_home_episodes += loc_out_episodes
+            
+            self.logger.info(f"Location episodes - Home: {loc_home_episodes} episodes ({loc_home_duration:.1f} min), " +
+                        f"Out of home: {loc_out_episodes} episodes ({loc_out_duration:.1f} min)")
         
         day_stats = {
             'user': self.participant_id,
@@ -1137,9 +1439,11 @@ class EpisodeProcessor:
             'processing_method': processing_method,
             'digital_episodes': len(digital_episodes),
             'mobility_episodes': len(mobility_episodes) if not mobility_episodes.empty else 0,
+            'location_episodes': len(location_episodes) if not location_episodes.empty else 0,
             'overlap_episodes': len(overlap_episodes),
             'digital_duration': digital_episodes['duration'].sum().total_seconds() / 60 if not digital_episodes.empty else 0,
             'mobility_duration': mobility_episodes['duration'].sum().total_seconds() / 60 if not mobility_episodes.empty else 0,
+            'location_duration': location_episodes['duration'].sum().total_seconds() / 60 if not location_episodes.empty else 0,
             'overlap_duration': overlap_episodes['duration'].sum().total_seconds() / 60 if not overlap_episodes.empty else 0,
             'active_transport_duration': active_transport_duration,
             'automated_transport_duration': automated_transport_duration,
@@ -1160,6 +1464,7 @@ class EpisodeProcessor:
         for ep_type, episodes in [
             ('digital', digital_episodes),
             ('mobility', mobility_episodes),
+            ('location', location_episodes),
             ('overlap', overlap_episodes)
         ]:
             if len(episodes) > 0:
@@ -1168,6 +1473,7 @@ class EpisodeProcessor:
                 self.logger.info(f"Saved {len(episodes)} {ep_type} episodes to {output_file}")
         
         return day_stats
+    
     
     def process(self) -> List[dict]:
         """Main processing pipeline"""
@@ -1190,6 +1496,22 @@ class EpisodeProcessor:
             digital_episodes = self.process_digital_episodes(app_df)
             mobility_episodes = self.process_mobility_episodes(positionfixes)
             
+            # Generate location episodes timeline
+            location_episodes = {}
+            for date in self.all_staypoints_by_day.keys():
+                if date in self.day_positionfixes:
+                    date_staypoints = self.all_staypoints_by_day[date]
+                    date_positionfixes = self.day_positionfixes[date]
+                    
+                    try:
+                        location_timeline = self.generate_location_timeline(
+                            date_staypoints, date_positionfixes, date)
+                        if not location_timeline.empty:
+                            location_episodes[str(date)] = location_timeline
+                            self.logger.info(f"Created location timeline for date {date} with {len(location_timeline)} episodes")
+                    except Exception as e:
+                        self.logger.error(f"Error generating location timeline for date {date}: {str(e)}")
+            
             # Process each day - ensure consistent key types (convert all to string)
             all_stats = []
             
@@ -1200,6 +1522,10 @@ class EpisodeProcessor:
                 
             self.logger.info("Debugging mobility_episodes keys types:")
             for key in mobility_episodes.keys():
+                self.logger.info(f"Key: {key}, Type: {type(key)}")
+            
+            self.logger.info("Debugging location_episodes keys types:")
+            for key in location_episodes.keys():
                 self.logger.info(f"Key: {key}, Type: {type(key)}")
             
             # Convert all keys to strings for consistent comparison
@@ -1223,7 +1549,17 @@ class EpisodeProcessor:
                     self.logger.warning(f"Unexpected key type in mobility_episodes: {type(key)}")
                     mobility_dates.add(str(key))
             
-            all_dates = sorted(digital_dates | mobility_dates)
+            location_dates = set()
+            for key in location_episodes.keys():
+                if isinstance(key, datetime_date):
+                    location_dates.add(str(key))
+                elif isinstance(key, str):
+                    location_dates.add(key)
+                else:
+                    self.logger.warning(f"Unexpected key type in location_episodes: {type(key)}")
+                    location_dates.add(str(key))
+            
+            all_dates = sorted(digital_dates | mobility_dates | location_dates)
             
             self.logger.info(f"Processing {len(all_dates)} days of data")
             
@@ -1262,6 +1598,7 @@ class EpisodeProcessor:
                 # Get episodes using date object or string, depending on what's in the dictionaries
                 digital_eps = pd.DataFrame()
                 mobility_eps = pd.DataFrame()
+                location_eps = pd.DataFrame()
                 
                 # Try multiple key formats for maximum compatibility
                 for key_format in [date_obj, date_str, str(date_obj) if date_obj else None]:
@@ -1278,8 +1615,15 @@ class EpisodeProcessor:
                         mobility_eps = mobility_episodes[key_format]
                         break
                 
+                for key_format in [date_obj, date_str, str(date_obj) if date_obj else None]:
+                    if key_format is None:
+                        continue
+                    if key_format in location_episodes:
+                        location_eps = location_episodes[key_format]
+                        break
+                
                 if date_obj:
-                    day_stats = self.process_day(date_obj, digital_eps, mobility_eps)
+                    day_stats = self.process_day(date_obj, digital_eps, mobility_eps, location_eps)
                     all_stats.append(day_stats)
             
             # Save summary statistics
