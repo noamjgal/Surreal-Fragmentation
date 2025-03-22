@@ -11,7 +11,8 @@ from collections import Counter
 class EpisodeDetector:
     def __init__(self, 
                  digital_settings: Dict = None,
-                 moving_settings: Dict = None):
+                 moving_settings: Dict = None,
+                 home_settings: Dict = None):
         """Initialize episode detector with configurable settings"""
         self.digital_settings = digital_settings or {
             'min_duration': timedelta(seconds=20),
@@ -24,6 +25,15 @@ class EpisodeDetector:
             'merge_gap': timedelta(minutes=1),
             'max_gap': timedelta(minutes=5)
         }
+        
+        self.home_settings = home_settings or {
+            'min_duration': timedelta(minutes=5),
+            'merge_gap': timedelta(minutes=5),
+            'max_gap': timedelta(minutes=15)
+        }
+        
+        self.active_transport_types = ['AT', 'Walking']
+        self.mechanized_transport_types = ['PT']
         
         logging.basicConfig(
             level=logging.INFO,
@@ -45,6 +55,12 @@ class EpisodeDetector:
             # Extract moving episodes from Travel_mode
             moving_episodes, travel_modes = self._extract_moving_episodes(df)
             
+            # Extract active and mechanized transport episodes
+            active_transport_episodes, mechanized_transport_episodes = self._categorize_transport_episodes(df, moving_episodes)
+            
+            # Extract home episodes from is_home
+            home_episodes = self._extract_home_episodes(df)
+            
             # Find overlaps
             overlap_episodes = self._find_overlaps(digital_episodes, moving_episodes)
             
@@ -55,13 +71,17 @@ class EpisodeDetector:
             if verbose:
                 self._log_processing_stats(filename, df, digital_episodes, 
                                         moving_episodes, overlap_episodes,
-                                        travel_modes)
+                                        home_episodes, active_transport_episodes,
+                                        mechanized_transport_episodes, travel_modes)
             
             return {
                 'user': user_id,
                 'date': date_str,
                 'digital_episodes': digital_episodes,
                 'moving_episodes': moving_episodes,
+                'home_episodes': home_episodes,
+                'active_transport_episodes': active_transport_episodes,
+                'mechanized_transport_episodes': mechanized_transport_episodes,
                 'overlap_episodes': overlap_episodes,
                 'first_timestamp': df['Timestamp'].min(),
                 'last_timestamp': df['Timestamp'].max(),
@@ -204,15 +224,80 @@ class EpisodeDetector:
         
         return merged
 
+    def _extract_home_episodes(self, df: pd.DataFrame) -> List[Tuple]:
+        """Extract episodes when a user is at home based on is_home flag"""
+        episodes = []
+        start_time = None
+        in_home = False
+        
+        for idx, row in df.iterrows():
+            timestamp = row['Timestamp']
+            
+            # Check if the point is flagged as home
+            is_home = row.get('is_home', False)
+            
+            # Handle transitions
+            if is_home and not in_home:
+                start_time = timestamp
+            elif not is_home and in_home and start_time is not None:
+                duration = timestamp - start_time
+                if duration >= self.home_settings['min_duration']:
+                    episodes.append((start_time, timestamp))
+                start_time = None
+            
+            in_home = is_home
+        
+        # Handle any unclosed episode at the end
+        if in_home and start_time is not None:
+            duration = df['Timestamp'].iloc[-1] - start_time
+            if duration >= self.home_settings['min_duration']:
+                episodes.append((start_time, df['Timestamp'].iloc[-1]))
+        
+        return self._merge_episodes(episodes, self.home_settings['merge_gap'])
+
+    def _categorize_transport_episodes(self, df: pd.DataFrame, moving_episodes: List[Tuple]) -> Tuple[List[Tuple], List[Tuple]]:
+        """Categorize moving episodes into active and mechanized transport"""
+        active_transport_episodes = []
+        mechanized_transport_episodes = []
+        
+        for start_time, end_time in moving_episodes:
+            # Get data points within this episode
+            episode_data = df[(df['Timestamp'] >= start_time) & (df['Timestamp'] <= end_time)]
+            
+            # Count points by transport mode
+            active_points = 0
+            mechanized_points = 0
+            
+            for _, row in episode_data.iterrows():
+                travel_mode = row.get('Travel_mode', 'Missing')
+                if travel_mode in self.active_transport_types:
+                    active_points += 1
+                elif travel_mode in self.mechanized_transport_types:
+                    mechanized_points += 1
+            
+            # Categorize based on majority of points
+            if active_points > mechanized_points:
+                active_transport_episodes.append((start_time, end_time))
+            elif mechanized_points > 0:
+                mechanized_transport_episodes.append((start_time, end_time))
+            # If neither has points, we don't categorize the episode
+        
+        return active_transport_episodes, mechanized_transport_episodes
+
     def _log_processing_stats(self, filename: str, df: pd.DataFrame, 
                             digital_episodes: List, moving_episodes: List,
-                            overlap_episodes: List, travel_modes: Counter):
+                            overlap_episodes: List, home_episodes: List,
+                            active_transport_episodes: List, mechanized_transport_episodes: List,
+                            travel_modes: Counter):
         """Log detailed processing statistics"""
         self.logger.info(f"\nProcessing file: {filename}")
         self.logger.info(f"Time range: {df['Timestamp'].min()} to {df['Timestamp'].max()}")
         self.logger.info(f"Total points: {len(df)}")
         self.logger.info(f"Digital episodes: {len(digital_episodes)}")
         self.logger.info(f"Moving episodes: {len(moving_episodes)}")
+        self.logger.info(f"Home episodes: {len(home_episodes)}")
+        self.logger.info(f"Active transport episodes: {len(active_transport_episodes)}")
+        self.logger.info(f"Mechanized transport episodes: {len(mechanized_transport_episodes)}")
         self.logger.info(f"Overlap episodes: {len(overlap_episodes)}")
         
         # Log travel modes found in mobility episodes
@@ -224,6 +309,9 @@ class EpisodeDetector:
         for ep_type, episodes in [
             ('Digital', digital_episodes),
             ('Moving', moving_episodes),
+            ('Home', home_episodes),
+            ('Active Transport', active_transport_episodes),
+            ('Mechanized Transport', mechanized_transport_episodes),
             ('Overlap', overlap_episodes)
         ]:
             if episodes:
@@ -266,8 +354,8 @@ def main():
             # Update travel modes counter
             all_travel_modes.update(day_results['travel_modes'])
             
-            # Process all episode types
-            for episode_type in ['digital', 'moving', 'overlap']:
+            # Process all episode types including new ones
+            for episode_type in ['digital', 'moving', 'home', 'active_transport', 'mechanized_transport', 'overlap']:
                 episodes = day_results[f'{episode_type}_episodes']
                 if episodes:
                     episodes_df = pd.DataFrame(episodes, columns=['start_time', 'end_time'])
@@ -312,7 +400,7 @@ def main():
         for mode, count in all_travel_modes.most_common():
             logging.info(f"  {mode}: {count} points")
         
-        for episode_type in ['digital', 'moving', 'overlap']:
+        for episode_type in ['digital', 'moving', 'home', 'active_transport', 'mechanized_transport', 'overlap']:
             type_stats = summary_df[summary_df['episode_type'] == episode_type]
             logging.info(f"\n{episode_type.title()} Episodes:")
             logging.info(f"  Total episodes: {type_stats['num_episodes'].sum()}")
