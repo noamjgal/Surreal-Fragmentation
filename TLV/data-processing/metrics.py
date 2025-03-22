@@ -30,6 +30,10 @@ class MetricsProcessor:
             'min_overlap_episodes': 1
         }
         
+        # Define transport mode mappings
+        self.active_transport_types = ['AT', 'Walking']
+        self.mechanized_transport_types = ['PT']
+        
         self._setup_logging()
         
     def _setup_logging(self):
@@ -118,6 +122,126 @@ class MetricsProcessor:
         
         return df[cols_to_keep]
 
+    def calculate_location_durations(self, episode_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Calculate total durations for home and other location types based on episode data.
+        
+        Args:
+            episode_df: DataFrame containing episode information
+            
+        Returns:
+            DataFrame with additional location duration columns
+        """
+        # Create a copy to avoid modifying the original
+        df = episode_df.copy()
+        
+        try:
+            # Check if episode_type column exists
+            if 'episode_type' not in df.columns:
+                self.logger.warning("episode_type column not found in episode data")
+                return pd.DataFrame(columns=['user', 'date', 'home_duration'])
+                
+            # Create a user-date index for grouping
+            df['user_date'] = df['user'].astype(str) + '_' + df['date'].astype(str)
+            
+            # Calculate location durations by type
+            location_durations = {}
+            
+            # Process each user-date combination
+            for user_date in df['user_date'].unique():
+                user_date_df = df[df['user_date'] == user_date]
+                
+                # Extract home durations
+                home_df = user_date_df[user_date_df['episode_type'] == 'home']
+                home_duration = home_df['total_duration_minutes'].sum() if not home_df.empty else 0
+                
+                # Store the results
+                location_durations[user_date] = {
+                    'home_duration': home_duration,
+                }
+            
+            # Convert the dictionary to a DataFrame
+            location_df = pd.DataFrame.from_dict(location_durations, orient='index')
+            location_df.index.name = 'user_date'
+            location_df = location_df.reset_index()
+            
+            # Split user_date back to separate columns
+            location_df[['user', 'date']] = location_df['user_date'].str.split('_', n=1, expand=True)
+            location_df = location_df.drop(columns=['user_date'])
+            
+            # Log some sample calculations
+            self.logger.info("\nSample location duration calculations:")
+            self.logger.info(location_df.head())
+            
+            return location_df
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating location durations: {str(e)}", exc_info=True)
+            # Return empty DataFrame with necessary columns
+            return pd.DataFrame(columns=['user', 'date', 'home_duration'])
+            
+    def calculate_transport_durations(self, episode_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Calculate total durations for active and mechanized transport based on episode data.
+        
+        Args:
+            episode_df: DataFrame containing episode information
+            
+        Returns:
+            DataFrame with additional transport duration columns
+        """
+        # Create a copy to avoid modifying the original
+        df = episode_df.copy()
+        
+        try:
+            # Check if episode_type column exists
+            if 'episode_type' not in df.columns:
+                self.logger.warning("episode_type column not found in episode data")
+                return pd.DataFrame(columns=['user', 'date', 'active_transport_duration', 'mechanized_transport_duration'])
+                
+            # Create a user-date index for grouping
+            df['user_date'] = df['user'].astype(str) + '_' + df['date'].astype(str)
+            
+            # Calculate transport durations by type
+            transport_durations = {}
+            
+            # Process each user-date combination
+            for user_date in df['user_date'].unique():
+                user_date_df = df[df['user_date'] == user_date]
+                
+                # Extract active and mechanized transport directly from episode types
+                active_df = user_date_df[user_date_df['episode_type'] == 'active_transport']
+                mechanized_df = user_date_df[user_date_df['episode_type'] == 'mechanized_transport']
+                
+                active_duration = active_df['total_duration_minutes'].sum() if not active_df.empty else 0
+                mechanized_duration = mechanized_df['total_duration_minutes'].sum() if not mechanized_df.empty else 0
+                
+                # Store the results
+                transport_durations[user_date] = {
+                    'active_transport_duration': active_duration,
+                    'mechanized_transport_duration': mechanized_duration
+                }
+            
+            # Convert the dictionary to a DataFrame
+            transport_df = pd.DataFrame.from_dict(transport_durations, orient='index')
+            transport_df.index.name = 'user_date'
+            transport_df = transport_df.reset_index()
+            
+            # Split user_date back to separate columns
+            transport_df[['user', 'date']] = transport_df['user_date'].str.split('_', n=1, expand=True)
+            transport_df = transport_df.drop(columns=['user_date'])
+            
+            # Log some sample calculations
+            self.logger.info("\nSample transport duration calculations:")
+            self.logger.info(transport_df.head())
+            
+            return transport_df
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating transport durations: {str(e)}", exc_info=True)
+            # Return empty DataFrame with necessary columns
+            return pd.DataFrame(columns=['user', 'date', 'active_transport_duration', 'mechanized_transport_duration'])
+
     def combine_metrics(self) -> pd.DataFrame:
         """
         Combine all metrics using data_quality_summary as the backbone
@@ -130,6 +254,12 @@ class MetricsProcessor:
             episode_df = pd.read_csv(self.base_dir / 'episodes/episode_summary.csv')
             
             self.logger.info("Loaded all input datasets")
+            
+            # Ensure consistent data types for merge columns
+            # Convert 'user' columns to string in all dataframes
+            quality_df['user'] = quality_df['user'].astype(str)
+            frag_df['participant_id'] = frag_df['participant_id'].astype(str)
+            episode_df['user'] = episode_df['user'].astype(str)
             
             # Process EMA scores first
             processed_ema = self.process_ema_scores(ema_df)
@@ -160,6 +290,16 @@ class MetricsProcessor:
             
             episode_df = episode_df.drop_duplicates(subset=['unique_id', 'num_episodes', 'total_duration_minutes', 'mean_duration_minutes'])
             
+            # Calculate transport durations using updated method that reads from active/mechanized episode types
+            transport_durations = self.calculate_transport_durations(episode_df)
+            
+            # Calculate home durations
+            home_durations = self.calculate_location_durations(episode_df)
+            
+            # Make sure user column is string type in transport and home dataframes
+            transport_durations['user'] = transport_durations['user'].astype(str)
+            home_durations['user'] = home_durations['user'].astype(str)
+            
             # Create separate pivots for each metric
             episode_metrics = ['num_episodes', 'total_duration_minutes', 'mean_duration_minutes']
             pivoted_dfs = []
@@ -180,6 +320,9 @@ class MetricsProcessor:
             # Combine all pivoted metrics
             episode_pivot = pd.concat(pivoted_dfs, axis=1).reset_index()
             
+            # Convert user column to string in the pivot dataframe
+            episode_pivot['user'] = episode_pivot['user'].astype(str)
+            
             # Merge episode data
             merged_df = pd.merge(
                 merged_df,
@@ -190,7 +333,44 @@ class MetricsProcessor:
                 suffixes=('', '_episode')
             )
             
+            # Log merge operations for debugging
+            self.logger.info(f"After episode merge: {len(merged_df)} rows")
+            
+            # Merge transport durations
+            merged_df = pd.merge(
+                merged_df,
+                transport_durations,
+                left_on=['user', 'associated_data_date'],
+                right_on=['user', 'date'],
+                how='left',
+                suffixes=('', '_transport')
+            )
+            
+            self.logger.info(f"After transport merge: {len(merged_df)} rows")
+            
+            # Merge home durations
+            merged_df = pd.merge(
+                merged_df,
+                home_durations,
+                left_on=['user', 'associated_data_date'],
+                right_on=['user', 'date'],
+                how='left',
+                suffixes=('', '_location')
+            )
+            
+            self.logger.info(f"After home duration merge: {len(merged_df)} rows")
+            
+            # Fill NaN values in duration columns with 0
+            duration_columns = ['active_transport_duration', 'mechanized_transport_duration', 'home_duration']
+            for col in duration_columns:
+                if col in merged_df.columns:
+                    missing_count = merged_df[col].isna().sum()
+                    if missing_count > 0:
+                        self.logger.warning(f"Filling {missing_count} missing values in {col} with 0")
+                    merged_df[col] = merged_df[col].fillna(0)
+            
             # Merge EMA data
+            processed_ema['Participant_ID'] = processed_ema['Participant_ID'].astype(str)
             merged_df = pd.merge(
                 merged_df,
                 processed_ema,
@@ -201,7 +381,7 @@ class MetricsProcessor:
             
             # Clean up redundant columns
             cols_to_drop = [
-                'date_episode', 'participant_id', 'Participant_ID',
+                'date_episode', 'date_transport', 'date_location', 'participant_id', 'Participant_ID',
                 'StartDate', 'EndDate'
             ]
             merged_df = merged_df.drop(columns=[
@@ -215,13 +395,19 @@ class MetricsProcessor:
             # Apply data quality validation
             merged_df = self._validate_data_quality(merged_df)
             
-            # Calculate z-scores for key metrics
+            # Log column names to verify home_duration is included
+            self.logger.info(f"Columns in final dataframe: {merged_df.columns.tolist()}")
+            
+            # Calculate z-scores for key metrics including the new ones
             metric_cols = [
                 'digital_fragmentation_index',
                 'mobility_fragmentation_index',
                 'overlap_fragmentation_index',
                 'digital_total_duration',
                 'mobility_total_duration',
+                'active_transport_duration',
+                'mechanized_transport_duration',
+                'home_duration',  # Added
                 'STAI6_score'
             ]
             
@@ -246,6 +432,9 @@ class MetricsProcessor:
             
             self.logger.info(f"Successfully combined and filtered metrics. Saved to {output_path}")
             self.logger.info(f"Final dataset contains {len(merged_df)} rows")
+            self.logger.info(f"Transport metrics: active_transport_duration mean={merged_df['active_transport_duration'].mean():.2f}, " +
+                           f"mechanized_transport_duration mean={merged_df['mechanized_transport_duration'].mean():.2f}")
+            self.logger.info(f"Home duration mean={merged_df['home_duration'].mean():.2f} minutes")
             
             return merged_df
             
@@ -273,6 +462,11 @@ class MetricsProcessor:
         stats['coverage_quality'] = df['data_quality'].value_counts()
         stats['coverage_hours'] = df['coverage_hours'].describe()
         
+        # Transport and location statistics
+        stats['transport_location_duration'] = df[['active_transport_duration', 
+                                                 'mechanized_transport_duration',
+                                                 'home_duration']].describe()
+        
         # Save statistics to Excel
         with pd.ExcelWriter(self.output_dir / 'metrics_summary.xlsx') as writer:
             for name, stat_df in stats.items():
@@ -284,6 +478,9 @@ class MetricsProcessor:
         self.logger.info(f"Total days: {len(df)}")
         self.logger.info(f"Days with good quality data: {(df['data_quality'] == 'good').sum()}")
         self.logger.info(f"Early morning responses: {df['is_early_morning'].sum()}")
+        self.logger.info(f"Average active transport duration: {df['active_transport_duration'].mean():.2f} minutes")
+        self.logger.info(f"Average mechanized transport duration: {df['mechanized_transport_duration'].mean():.2f} minutes")
+        self.logger.info(f"Average home duration: {df['home_duration'].mean():.2f} minutes")
 
    
 def main():
