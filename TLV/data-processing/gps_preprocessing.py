@@ -27,6 +27,10 @@ class GPSPreprocessor:
         self.output_dir = Path(output_dir)
         self.early_morning_cutoff = early_morning_cutoff
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Define home location patterns - expand this list based on your data
+        self.home_patterns = ['Home', '~Home', 'home', 'HOME', 'House', 'Residence']
+        
         self._setup_logging()
 
     def _setup_logging(self):
@@ -61,6 +65,9 @@ class GPSPreprocessor:
         # Sort GPS data by timestamp
         self.raw_gps = self.raw_gps.sort_values('Timestamp')
         
+        # Add home location flag with broader pattern matching
+        self._process_home_locations()
+        
         # Prepare EMA data
         self.ema_data['timestamp'] = pd.to_datetime(self.ema_data['StartDate'])
         self.ema_data['response_time'] = pd.to_datetime(self.ema_data['EndDate'])
@@ -83,6 +90,30 @@ class GPSPreprocessor:
         self.logger.info(f"Found {early_morning_count} early morning responses")
         self.logger.info(f"GPS data date range: {min(self.raw_gps['calendar_date'])} to {max(self.raw_gps['calendar_date'])}")
         self.logger.info(f"EMA data date range: {min(self.ema_data['calendar_date'])} to {max(self.ema_data['calendar_date'])}")
+
+    def _process_home_locations(self):
+        """Process home location data and ensure proper flag is created"""
+        # Check which columns contain location information
+        location_cols = [col for col in self.raw_gps.columns if col in ['LU_na', 'place_type', 'location', 'type_of_place']]
+        
+        if 'LU_na' in location_cols:
+            # Check unique values in location column to help with debugging
+            unique_locations = self.raw_gps['LU_na'].dropna().unique()
+            self.logger.info(f"Unique location values in LU_na: {unique_locations[:20]}")
+            
+            # Create is_home flag with broader pattern matching
+            self.raw_gps['is_home'] = self.raw_gps['LU_na'].fillna('').astype(str).apply(
+                lambda x: any(pattern.lower() in x.lower() for pattern in self.home_patterns)
+            )
+        else:
+            self.logger.warning(f"No recognized location column found. Available columns: {self.raw_gps.columns.tolist()}")
+            # Create a default is_home column
+            self.raw_gps['is_home'] = False
+        
+        # Log statistics about home locations
+        home_count = self.raw_gps['is_home'].sum()
+        total_count = len(self.raw_gps)
+        self.logger.info(f"Identified {home_count} points ({home_count/total_count*100:.1f}%) as home locations")
 
     def _create_ema_summary(self) -> pd.DataFrame:
         """Create summary of EMA responses with unique IDs"""
@@ -180,6 +211,20 @@ class GPSPreprocessor:
                     # Sort by timestamp
                     day_data = day_data.sort_values('Timestamp')
                     
+                    # Ensure is_home flag exists and is boolean
+                    if 'is_home' not in day_data.columns:
+                        self.logger.warning(f"is_home flag missing for user {ema_row['user']} on {ema_row['associated_data_date']}")
+                        day_data['is_home'] = False
+                    
+                    # Convert is_home to boolean if not already
+                    day_data['is_home'] = day_data['is_home'].astype(bool)
+                    
+                    # Log home location statistics for this day
+                    home_points = day_data['is_home'].sum()
+                    day_points = len(day_data)
+                    self.logger.info(f"User {ema_row['user']} on {ema_row['associated_data_date']}: "
+                                   f"{home_points}/{day_points} points ({home_points/day_points*100:.1f}%) at home")
+                    
                     # Add EMA linking information
                     day_data['ema_id'] = ema_row['ema_id']
                     day_data['ema_response_time'] = ema_row['response_time']
@@ -227,6 +272,15 @@ class GPSPreprocessor:
                         f"{ema_row['ema_id'][:8]}.csv"
                     )
                     output_file = preprocess_dir / output_filename
+                    
+                    # Ensure these essential columns are included
+                    essential_columns = ['user', 'Timestamp', 'is_home', 'speed', 'Travel_mode']
+                    missing_columns = [col for col in essential_columns if col not in day_data.columns]
+                    if missing_columns:
+                        for col in missing_columns:
+                            self.logger.warning(f"Adding missing column {col}")
+                            day_data[col] = None if col != 'is_home' else False
+                    
                     day_data.to_csv(output_file, index=False)
                     
                     if ema_row['is_early_morning']:
@@ -297,7 +351,7 @@ class GPSPreprocessor:
                     summary['has_morning_data'] and 
                     summary['has_evening_data'] and 
                     summary['coverage_hours'] >= 5 and
-                    summary['max_gap_minutes'] <= 120  # 2-hour max gap
+                    summary['max_gap_minutes'] <= 240  # 4-hour max gap
                 ) else 'partial'
                 
                 quality_summary.append(summary)
