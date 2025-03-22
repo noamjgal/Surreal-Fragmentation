@@ -34,7 +34,7 @@ def combine_date_time(row):
 @timer
 def preprocess_and_clean_data(input_path, output_dir):
     print("Loading and preprocessing data...")
-    columns_to_read = ['user', 'date', 'time', 'speed', 'indoors', 'isapp', 'type', 'Travel_mode', 'long', 'lat', 'school_n', 'sex']
+    columns_to_read = ['user', 'date', 'time', 'speed', 'indoors', 'isapp', 'type', 'Travel_mode', 'long', 'lat', 'school_n', 'sex', 'LU_na']
     
     try:
         df = pd.read_excel(input_path, sheet_name='gpsappS_8', usecols=columns_to_read)
@@ -62,6 +62,7 @@ def preprocess_and_clean_data(input_path, output_dir):
     # Create new boolean columns
     df['is_digital'] = df['type'].isin(['Social', 'Productive', 'Process', 'Settings', 'School', 'Spatial', 'Screen on/off/lock'])
     df['is_moving'] = df['Travel_mode'].isin(['AT', 'PT', 'Walking'])
+    df['is_home'] = df['LU_na'].isin(['Home', '~Home'])
 
     # Drop rows with NaT timestamps
     df_cleaned = df.dropna(subset=['Timestamp'])
@@ -84,7 +85,7 @@ def preprocess_and_clean_data(input_path, output_dir):
     print(participant_info.head())
 
     # Split data by date and user
-    columns_to_save = ['user', 'Timestamp', 'speed', 'indoors', 'is_digital', 'is_moving', 'long', 'lat']
+    columns_to_save = ['user', 'Timestamp', 'speed', 'indoors', 'is_digital', 'is_moving', 'is_home', 'long', 'lat']
     problematic_days = []
     for (date, user), group in df_cleaned.groupby([df_cleaned['Timestamp'].dt.date, 'user']):
         filename = f"{date}_{user}.csv"
