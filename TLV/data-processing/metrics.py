@@ -64,7 +64,7 @@ class MetricsProcessor:
             (df['mobility_episode_count'] >= self.quality_thresholds['min_mobility_episodes']) &
             (df['digital_total_duration'] >= self.quality_thresholds['min_digital_duration']) &
             (df['coverage_hours'] >= self.quality_thresholds['min_coverage_hours']) &
-            (df['overlap_num_episodes'] >= self.quality_thresholds['min_overlap_episodes'])  # new condition
+            (df['overlap_episode_count'] >= self.quality_thresholds['min_overlap_episodes'])
         )
         
         # Log excluded data
@@ -75,7 +75,7 @@ class MetricsProcessor:
             self.logger.warning(f"Low mobility episodes: {(df['mobility_episode_count'] < self.quality_thresholds['min_mobility_episodes']).sum()}")
             self.logger.warning(f"Low digital duration: {(df['digital_total_duration'] < self.quality_thresholds['min_digital_duration']).sum()}")
             self.logger.warning(f"Low coverage hours: {(df['coverage_hours'] < self.quality_thresholds['min_coverage_hours']).sum()}")
-            self.logger.warning(f"Low overlap episodes: {(df['overlap_num_episodes'] < self.quality_thresholds['min_overlap_episodes']).sum()}")  # new log
+            self.logger.warning(f"Low overlap episodes: {(df['overlap_episode_count'] < self.quality_thresholds['min_overlap_episodes']).sum()}")
             
             # Save excluded data for analysis
             excluded_df = df[excluded].copy()
@@ -403,11 +403,13 @@ class MetricsProcessor:
                 'digital_fragmentation_index',
                 'mobility_fragmentation_index',
                 'overlap_fragmentation_index',
+                'digital_home_fragmentation_index',
+                'digital_home_mobility_delta',
                 'digital_total_duration',
                 'mobility_total_duration',
                 'active_transport_duration',
                 'mechanized_transport_duration',
-                'home_duration',  # Added
+                'home_duration',
                 'STAI6_score'
             ]
             
@@ -435,6 +437,12 @@ class MetricsProcessor:
             self.logger.info(f"Transport metrics: active_transport_duration mean={merged_df['active_transport_duration'].mean():.2f}, " +
                            f"mechanized_transport_duration mean={merged_df['mechanized_transport_duration'].mean():.2f}")
             self.logger.info(f"Home duration mean={merged_df['home_duration'].mean():.2f} minutes")
+            
+            # Log new metrics if available
+            if 'digital_home_fragmentation_index' in merged_df.columns:
+                self.logger.info(f"Digital home fragmentation mean={merged_df['digital_home_fragmentation_index'].mean():.4f}")
+            if 'digital_home_mobility_delta' in merged_df.columns:
+                self.logger.info(f"Digital home-mobility delta mean={merged_df['digital_home_mobility_delta'].mean():.4f}")
             
             return merged_df
             
@@ -467,6 +475,15 @@ class MetricsProcessor:
                                                  'mechanized_transport_duration',
                                                  'home_duration']].describe()
         
+        # NEW: Add fragmentation metrics statistics
+        fragmentation_cols = [col for col in df.columns if 'fragmentation' in col]
+        if fragmentation_cols:
+            stats['fragmentation_metrics'] = df[fragmentation_cols].describe()
+        
+        # NEW: Add delta metric statistics if available
+        if 'digital_home_mobility_delta' in df.columns:
+            stats['digital_home_mobility_delta'] = df[['digital_home_mobility_delta']].describe()
+        
         # Save statistics to Excel
         with pd.ExcelWriter(self.output_dir / 'metrics_summary.xlsx') as writer:
             for name, stat_df in stats.items():
@@ -481,6 +498,19 @@ class MetricsProcessor:
         self.logger.info(f"Average active transport duration: {df['active_transport_duration'].mean():.2f} minutes")
         self.logger.info(f"Average mechanized transport duration: {df['mechanized_transport_duration'].mean():.2f} minutes")
         self.logger.info(f"Average home duration: {df['home_duration'].mean():.2f} minutes")
+        
+        # NEW: Log the new metrics
+        if 'digital_home_fragmentation_index' in df.columns:
+            valid_dhf = df['digital_home_fragmentation_index'].dropna()
+            if len(valid_dhf) > 0:
+                self.logger.info(f"Average digital-home fragmentation: {valid_dhf.mean():.4f}")
+                self.logger.info(f"Valid digital-home fragmentation measurements: {len(valid_dhf)}/{len(df)} ({len(valid_dhf)/len(df)*100:.1f}%)")
+        
+        if 'digital_home_mobility_delta' in df.columns:
+            valid_delta = df['digital_home_mobility_delta'].dropna()
+            if len(valid_delta) > 0:
+                self.logger.info(f"Average digital home-mobility delta: {valid_delta.mean():.4f}")
+                self.logger.info(f"Valid delta measurements: {len(valid_delta)}/{len(df)} ({len(valid_delta)/len(df)*100:.1f}%)")
 
    
 def main():
