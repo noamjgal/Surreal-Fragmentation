@@ -45,7 +45,9 @@ class ImprovedMultilevelAnalysis:
         self.fragmentation_predictors = [
             'digital_fragmentation', 
             'mobility_fragmentation', 
-            'overlap_fragmentation'
+            'overlap_fragmentation',
+            'digital_home_fragmentation',  # NEW: Digital fragmentation during home periods
+            'digital_home_mobility_delta'  # NEW: Delta between home and mobility fragmentation
         ]
         
         # Define outcome variables
@@ -157,6 +159,10 @@ class ImprovedMultilevelAnalysis:
             # Create decomposition of predictors (within and between components)
             self.logger.info("Decomposing fragmentation metrics into within and between-person components")
             for predictor in self.fragmentation_predictors:
+                if predictor not in df.columns:
+                    self.logger.warning(f"Predictor {predictor} not found in data, will be skipped in analysis")
+                    continue
+                    
                 # Calculate person mean (between-person component) using the new unique IDs
                 df[f'{predictor}_between'] = df.groupby('participant_id')[predictor].transform('mean')
                 
@@ -704,7 +710,6 @@ class ImprovedMultilevelAnalysis:
                 # Log key results
                 self.logger.info(f"Subgroup results for {moderator_var}={value}:")
                 self.logger.info(f"  Within-person effect: {within_coef:.4f}, p={within_pval:.4f} {within_sig}")
-                self.logger.info(f"  Between-person effect: {between_coef:.4f}, p={between_pval:.4f} {between_sig}")
                 
                 # Store results
                 subgroup_results[str(value)] = group_results
@@ -730,59 +735,168 @@ class ImprovedMultilevelAnalysis:
                     # Calculate z-score for difference in within-person effects
                     # Formula: z = (b1 - b2) / sqrt(SE1^2 + SE2^2)
                     # We approximate SE from p-values and coefficients
-                    within_diff = result1['within_coef'] - result2['within_coef']
+                    from scipy import stats
                     
-                    # Only compare if we have valid coefficients and p-values
-                    if (not np.isnan(result1['within_coef']) and not np.isnan(result2['within_coef']) and
-                        not np.isnan(result1['within_pval']) and not np.isnan(result2['within_pval'])):
+                    def approx_se(b, p):
+                        # Return a conservative estimate of SE based on p-value
+                        if p >= 1:
+                            return abs(b)  # Maximum uncertainty
+                        if p <= 0:
+                            return 0.0001 * abs(b)  # Minimum uncertainty
                         
-                        # Approximate standard errors
-                        # For a two-tailed t-test with large df, p = 2*Phi(-|t|), so |t| = -Phi^{-1}(p/2)
-                        # Since t = b/SE, SE = b/t
-                        from scipy import stats
+                        # Get t-value from p-value (two-tailed test with large df)
+                        t = abs(stats.norm.ppf(p/2))
+                        if t == 0:
+                            return abs(b)
+                        return abs(b/t)
+                    
+                    se1 = approx_se(result1['within_coef'], result1['within_pval'])
+                    se2 = approx_se(result2['within_coef'], result2['within_pval'])
+                    
+                    # Calculate z-score
+                    pooled_se = np.sqrt(se1**2 + se2**2)
+                    if pooled_se > 0:
+                        z_score = (result1['within_coef'] - result2['within_coef']) / pooled_se
+                        p_value = 2 * (1 - stats.norm.cdf(abs(z_score)))
                         
-                        def approx_se(b, p):
-                            # Return a conservative estimate of SE based on p-value
-                            if p >= 1:
-                                return abs(b)  # Maximum uncertainty
-                            if p <= 0:
-                                return 0.0001 * abs(b)  # Minimum uncertainty
-                            
-                            # Get t-value from p-value (two-tailed test with large df)
-                            t = abs(stats.norm.ppf(p/2))
-                            if t == 0:
-                                return abs(b)
-                            return abs(b/t)
+                        sig_diff = '***' if p_value < 0.001 else '**' if p_value < 0.01 else '*' if p_value < 0.05 else ''
                         
-                        se1 = approx_se(result1['within_coef'], result1['within_pval'])
-                        se2 = approx_se(result2['within_coef'], result2['within_pval'])
+                        comparison = {
+                            'group1': value1,
+                            'group2': value2,
+                            'within_diff': result1['within_coef'] - result2['within_coef'],
+                            'z_score': z_score,
+                            'p_value': p_value,
+                            'sig_diff': sig_diff
+                        }
                         
-                        # Calculate z-score
-                        pooled_se = np.sqrt(se1**2 + se2**2)
-                        if pooled_se > 0:
-                            z_score = within_diff / pooled_se
-                            p_value = 2 * (1 - stats.norm.cdf(abs(z_score)))
-                            
-                            sig_diff = '***' if p_value < 0.001 else '**' if p_value < 0.01 else '*' if p_value < 0.05 else ''
-                            
-                            comparison = {
-                                'group1': value1,
-                                'group2': value2,
-                                'within_diff': within_diff,
-                                'z_score': z_score,
-                                'p_value': p_value,
-                                'sig_diff': sig_diff
-                            }
-                            
-                            subgroup_comparisons.append(comparison)
-                            
-                            self.logger.info(f"Comparison of {value1} vs {value2}:")
-                            self.logger.info(f"  Within-effect difference: {within_diff:.4f}, z={z_score:.2f}, p={p_value:.4f} {sig_diff}")
+                        subgroup_comparisons.append(comparison)
+                        
+                        self.logger.info(f"Comparison of {value1} vs {value2}:")
+                        self.logger.info(f"  Within-effect difference: {result1['within_coef'] - result2['within_coef']:.4f}, z={z_score:.2f}, p={p_value:.4f} {sig_diff}")
             
             if subgroup_comparisons:
                 subgroup_results['comparisons'] = subgroup_comparisons
         
         return subgroup_results if subgroup_results else None
+    
+    def run_home_mobility_comparison(self, df, outcome_var):
+        """Run a dedicated analysis comparing digital fragmentation at home vs. during mobility.
+        
+        Args:
+            df (DataFrame): Dataset with within/between decomposition
+            outcome_var (str): Outcome variable name
+            
+        Returns:
+            dict: Model results
+        """
+        self.logger.info(f"Running home vs. mobility fragmentation comparison for {outcome_var}")
+        
+        # We need all three metrics for this analysis
+        digital_home = 'digital_home_fragmentation'
+        overlap = 'overlap_fragmentation'
+        
+        model_vars = [outcome_var, f'{digital_home}_within', f'{digital_home}_between',
+                      f'{overlap}_within', f'{overlap}_between', 'participant_id']
+        
+        # Add control variables
+        for control_var in self.control_variables.values():
+            model_vars.append(control_var)
+        
+        model_data = df[model_vars].dropna()
+        
+        if len(model_data) < 20:
+            self.logger.warning(f"Not enough valid data for home vs. mobility comparison (n={len(model_data)})")
+            return None
+        
+        try:
+            # Build model formula with location controls
+            control_terms = [control_var for control_var in self.control_variables.values()]
+            control_formula = " + " + " + ".join(control_terms) if control_terms else ""
+            
+            # The model includes both fragmentation types
+            model_formula = (f"{outcome_var} ~ {digital_home}_within + {digital_home}_between + "
+                            f"{overlap}_within + {overlap}_between{control_formula}")
+            
+            self.logger.info(f"Fitting home vs. mobility comparison model: {model_formula}")
+            model = smf.mixedlm(
+                formula=model_formula,
+                data=model_data,
+                groups=model_data["participant_id"],
+                re_formula="~1"  # Random intercepts only
+            )
+            
+            # Try to fit with restricted maximum likelihood
+            try:
+                result = model.fit(reml=True)
+                method = "REML"
+            except:
+                self.logger.warning(f"REML fitting failed, trying ML estimation")
+                result = model.fit(reml=False) 
+                method = "ML"
+            
+            # Extract key parameters
+            params = result.params
+            pvalues = result.pvalues
+            conf_int = result.conf_int()
+            
+            # Create results dictionary with coefficients for both predictors
+            model_results = {
+                'outcome': outcome_var,
+                'model_type': 'Home-Mobility Comparison',
+                'n_obs': len(model_data),
+                'n_participants': model_data['participant_id'].nunique(),
+                'method': method,
+                'aic': result.aic,
+                'bic': result.bic
+            }
+            
+            # Extract and format coefficients for both predictors
+            for prefix, name in [(digital_home, 'Home'), (overlap, 'Mobility')]:
+                within_var = f"{prefix}_within"
+                between_var = f"{prefix}_between"
+                
+                within_coef = params.get(within_var, np.nan)
+                within_pval = pvalues.get(within_var, np.nan)
+                within_sig = '***' if within_pval < 0.001 else '**' if within_pval < 0.01 else '*' if within_pval < 0.05 else ''
+                
+                between_coef = params.get(between_var, np.nan)
+                between_pval = pvalues.get(between_var, np.nan)
+                between_sig = '***' if between_pval < 0.001 else '**' if between_pval < 0.01 else '*' if between_pval < 0.05 else ''
+                
+                # Get confidence intervals if available
+                within_ci_low = conf_int.loc[within_var, 0] if within_var in conf_int.index else np.nan
+                within_ci_high = conf_int.loc[within_var, 1] if within_var in conf_int.index else np.nan
+                
+                between_ci_low = conf_int.loc[between_var, 0] if between_var in conf_int.index else np.nan
+                between_ci_high = conf_int.loc[between_var, 1] if between_var in conf_int.index else np.nan
+                
+                # Store values in results dictionary with location-specific keys
+                model_results[f'{name}_within_coef'] = within_coef
+                model_results[f'{name}_within_pval'] = within_pval
+                model_results[f'{name}_within_sig'] = within_sig
+                model_results[f'{name}_within_ci_low'] = within_ci_low
+                model_results[f'{name}_within_ci_high'] = within_ci_high
+                
+                model_results[f'{name}_between_coef'] = between_coef
+                model_results[f'{name}_between_pval'] = between_pval
+                model_results[f'{name}_between_sig'] = between_sig
+                model_results[f'{name}_between_ci_low'] = between_ci_low
+                model_results[f'{name}_between_ci_high'] = between_ci_high
+            
+            # Log key results
+            self.logger.info(f"Home-Mobility comparison for {outcome_var}:")
+            self.logger.info(f"  Home within-effect: {model_results['Home_within_coef']:.4f}, p={model_results['Home_within_pval']:.4f} {model_results['Home_within_sig']}")
+            self.logger.info(f"  Mobility within-effect: {model_results['Mobility_within_coef']:.4f}, p={model_results['Mobility_within_pval']:.4f} {model_results['Mobility_within_sig']}")
+            
+            return model_results
+            
+        except Exception as e:
+            self.logger.error(f"Error in home-mobility comparison: {str(e)}")
+            if self.debug:
+                import traceback
+                self.logger.error(traceback.format_exc())
+            return None
     
     def run_multilevel_analysis(self, df):
         """Run full multilevel analysis for all outcomes and predictors.
@@ -802,6 +916,7 @@ class ImprovedMultilevelAnalysis:
         controlled_models = {}     # Models with demographic controls
         cross_frag_models = {}     # Digital vs. mobility fragmentation models
         moderation_analyses = {}   # Subgroup analyses
+        home_mobility_comparisons = {}  # NEW: Home vs. mobility comparisons
         successful_models = 0
         
         # 1. Run basic multilevel models (without controls)
@@ -835,18 +950,45 @@ class ImprovedMultilevelAnalysis:
         for outcome_var in self.outcome_variables:
             outcome_models = {}
             
-            # Run digital controlling for mobility
+            # Original cross-fragmentation models
             model_result = self.run_cross_fragmentation_model(
                 df, outcome_var, 'digital_fragmentation', 'mobility_fragmentation')
             if model_result:
                 outcome_models['digital_controlling_for_mobility'] = model_result
                 successful_models += 1
             
-            # Run mobility controlling for digital
             model_result = self.run_cross_fragmentation_model(
                 df, outcome_var, 'mobility_fragmentation', 'digital_fragmentation')
             if model_result:
                 outcome_models['mobility_controlling_for_digital'] = model_result
+                successful_models += 1
+            
+            # NEW: Digital home fragmentation controlling for mobility
+            model_result = self.run_cross_fragmentation_model(
+                df, outcome_var, 'digital_home_fragmentation', 'mobility_fragmentation')
+            if model_result:
+                outcome_models['digital_home_controlling_for_mobility'] = model_result
+                successful_models += 1
+            
+            # NEW: Digital home fragmentation controlling for digital during mobility
+            model_result = self.run_cross_fragmentation_model(
+                df, outcome_var, 'digital_home_fragmentation', 'overlap_fragmentation')
+            if model_result:
+                outcome_models['digital_home_controlling_for_overlap'] = model_result
+                successful_models += 1
+            
+            # NEW: Digital-mobility delta controlling for mobility 
+            model_result = self.run_cross_fragmentation_model(
+                df, outcome_var, 'digital_home_mobility_delta', 'mobility_fragmentation')
+            if model_result:
+                outcome_models['home_mobility_delta_controlling_for_mobility'] = model_result
+                successful_models += 1
+            
+            # NEW: Digital-mobility delta controlling for digital
+            model_result = self.run_cross_fragmentation_model(
+                df, outcome_var, 'digital_home_mobility_delta', 'digital_fragmentation')
+            if model_result:
+                outcome_models['home_mobility_delta_controlling_for_digital'] = model_result
                 successful_models += 1
             
             if outcome_models:
@@ -874,11 +1016,20 @@ class ImprovedMultilevelAnalysis:
             if outcome_moderations:
                 moderation_analyses[outcome_var] = outcome_moderations
         
+        # 5. Run special home-mobility comparisons
+        self.logger.info("Running special home-mobility comparisons")
+        for outcome_var in self.outcome_variables:
+            result = self.run_home_mobility_comparison(df, outcome_var)
+            if result:
+                home_mobility_comparisons[outcome_var] = result
+                successful_models += 1
+        
         # Store all results
         self.model_results['basic_models'] = basic_models
         self.model_results['controlled_models'] = controlled_models
         self.model_results['cross_frag_models'] = cross_frag_models
         self.model_results['moderation_analyses'] = moderation_analyses
+        self.model_results['home_mobility_comparisons'] = home_mobility_comparisons  # NEW
         
         self.logger.info(f"Completed multilevel analysis with {successful_models} successful models")
         
@@ -901,7 +1052,7 @@ class ImprovedMultilevelAnalysis:
             moderation_summary = []
             comparison_summary = []
             
-                            # Process basic models (without controls)
+            # Process basic models (without controls)
             for outcome_var, outcome_models in self.model_results.get('basic_models', {}).items():
                 for predictor, model_result in outcome_models.items():
                     # Create CI strings for cleaner presentation
@@ -1073,6 +1224,28 @@ class ImprovedMultilevelAnalysis:
                                     'Significance': comparison.get('sig_diff', '')
                                 })
             
+            # Process home-mobility comparison results
+            home_mobility_summary = []
+            for outcome_var, result in self.model_results.get('home_mobility_comparisons', {}).items():
+                home_mobility_summary.append({
+                    'Outcome': outcome_var,
+                    'Model Type': 'Home-Mobility Comparison',
+                    'Home Within-Effect': result.get('Home_within_coef', np.nan),
+                    'Home Within-P': result.get('Home_within_pval', np.nan),
+                    'Home Within-Sig': result.get('Home_within_sig', ''),
+                    'Home Within-CI Low': result.get('Home_within_ci_low', np.nan),
+                    'Home Within-CI High': result.get('Home_within_ci_high', np.nan),
+                    'Mobility Within-Effect': result.get('Mobility_within_coef', np.nan),
+                    'Mobility Within-P': result.get('Mobility_within_pval', np.nan),
+                    'Mobility Within-Sig': result.get('Mobility_within_sig', ''),
+                    'Mobility Within-CI Low': result.get('Mobility_within_ci_low', np.nan),
+                    'Mobility Within-CI High': result.get('Mobility_within_ci_high', np.nan),
+                    'N': result.get('n_obs', 0),
+                    'Participants': result.get('n_participants', 0),
+                    'AIC': result.get('aic', np.nan),
+                    'BIC': result.get('bic', np.nan)
+                })
+            
             # Convert to dataframes
             basic_df = pd.DataFrame(basic_summary) if basic_summary else pd.DataFrame()
             controlled_df = pd.DataFrame(controlled_summary) if controlled_summary else pd.DataFrame()
@@ -1080,9 +1253,10 @@ class ImprovedMultilevelAnalysis:
             moderation_df = pd.DataFrame(moderation_summary) if moderation_summary else pd.DataFrame()
             comparison_df = pd.DataFrame(comparison_summary) if comparison_summary else pd.DataFrame()
             control_var_df = pd.DataFrame(control_var_effects) if control_var_effects else pd.DataFrame()
+            home_mobility_df = pd.DataFrame(home_mobility_summary) if home_mobility_summary else pd.DataFrame()
             
             # Round numeric columns
-            for df in [basic_df, controlled_df, cross_frag_df, moderation_df, comparison_df, control_var_df]:
+            for df in [basic_df, controlled_df, cross_frag_df, moderation_df, comparison_df, control_var_df, home_mobility_df]:
                 if not df.empty:
                     numeric_cols = df.select_dtypes(include=[np.number]).columns
                     df[numeric_cols] = df[numeric_cols].round(4)
@@ -1195,6 +1369,10 @@ class ImprovedMultilevelAnalysis:
                             if len(sheet_name) > 30:  # Excel sheet name limit
                                 sheet_name = sheet_name[:30]
                             control_specific.to_excel(writer, sheet_name=sheet_name, index=False)
+                
+                # Save home-mobility comparison results
+                if not home_mobility_df.empty:
+                    home_mobility_df.to_excel(writer, sheet_name='Home-Mobility Comparison', index=False)
             
             self.logger.info(f"Saved multilevel model results to {output_path}")
             return output_path
