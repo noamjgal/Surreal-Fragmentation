@@ -62,12 +62,15 @@ class PooledSTAIAnalysis:
                 'fragmentation': {
                     'digital': 'frag_digital_fragmentation_index',
                     'mobility': 'frag_mobility_fragmentation_index',
-                    'overlap': 'frag_overlap_fragmentation_index'
+                    'overlap': 'frag_overlap_fragmentation_index',
+                    'digital_home': 'frag_digital_home_fragmentation_index',
+                    'digital_home_mobility_delta': 'frag_digital_home_mobility_delta'
                 },
                 'duration': {
                     'digital': 'frag_digital_total_duration',
                     'mobility': 'frag_mobility_total_duration',
-                    'overlap': 'frag_overlap_total_duration'
+                    'overlap': 'frag_overlap_total_duration',
+                    'digital_home': 'frag_digital_home_total_duration'
                 }
             },
             'tlv': {
@@ -79,12 +82,15 @@ class PooledSTAIAnalysis:
                 'fragmentation': {
                     'digital': 'digital_fragmentation_index',
                     'mobility': 'moving_fragmentation_index',
-                    'overlap': 'digital_frag_during_mobility'
+                    'overlap': 'digital_frag_during_mobility',
+                    'digital_home': 'digital_home_fragmentation_index',
+                    'digital_home_mobility_delta': 'digital_home_mobility_delta'
                 },
                 'duration': {
                     'digital': 'digital_total_duration_minutes',
                     'mobility': 'moving_total_duration_minutes',
-                    'overlap': 'overlap_total_duration_minutes'
+                    'overlap': 'overlap_total_duration_minutes',
+                    'digital_home': 'digital_home_total_duration'
                 }
             },
             'standardized': {
@@ -100,12 +106,15 @@ class PooledSTAIAnalysis:
                 'fragmentation': {
                     'digital': 'digital_fragmentation',
                     'mobility': 'mobility_fragmentation',
-                    'overlap': 'overlap_fragmentation'
+                    'overlap': 'overlap_fragmentation',
+                    'digital_home': 'digital_home_fragmentation',
+                    'digital_home_mobility_delta': 'digital_home_mobility_delta'
                 },
                 'duration': {
                     'digital': 'digital_total_duration',
                     'mobility': 'mobility_total_duration',
-                    'overlap': 'overlap_total_duration'
+                    'overlap': 'overlap_total_duration',
+                    'digital_home': 'digital_home_total_duration'
                 }
             }
         }
@@ -558,6 +567,10 @@ class PooledSTAIAnalysis:
             duration_cols = [col for col in self.pooled_data.columns 
                             if col in self.variable_mappings['standardized']['duration'].values()]
             
+            # Get fragmentation column names
+            frag_cols = [col for col in self.pooled_data.columns
+                        if col in self.variable_mappings['standardized']['fragmentation'].values()]
+            
             # Check 1: Missing values in key variables
             missing_report = {
                 col: self.pooled_data[col].isna().sum() 
@@ -634,7 +647,65 @@ class PooledSTAIAnalysis:
                                 ds_corr = valid_ds_data.corr().iloc[0, 1]
                                 self.logger.info(f"    {dataset}: r = {ds_corr:.3f} (n={len(valid_ds_data)})")
             
-            # Rest of the existing checks continue below...
+            # NEW: Add specific checks for the new digital home metrics
+            digital_home_frag = self.variable_mappings['standardized']['fragmentation']['digital_home']
+            digital_home_mobility_delta = self.variable_mappings['standardized']['fragmentation']['digital_home_mobility_delta']
+            
+            if digital_home_frag in self.pooled_data.columns:
+                valid_home_frag = self.pooled_data[digital_home_frag].dropna()
+                if len(valid_home_frag) > 0:
+                    self.logger.info(f"\nDigital Home Fragmentation Statistics:")
+                    self.logger.info(f"  Mean: {valid_home_frag.mean():.4f}")
+                    self.logger.info(f"  Median: {valid_home_frag.median():.4f}")
+                    self.logger.info(f"  Std: {valid_home_frag.std():.4f}")
+                    self.logger.info(f"  Valid values: {len(valid_home_frag)} ({len(valid_home_frag)/len(self.pooled_data):.1%})")
+                    
+                    # Check by dataset
+                    for dataset in self.pooled_data[std_dataset].unique():
+                        dataset_data = self.pooled_data[self.pooled_data[std_dataset] == dataset]
+                        valid_ds_vals = dataset_data[digital_home_frag].dropna()
+                        if len(valid_ds_vals) > 0:
+                            self.logger.info(f"    {dataset.upper()}:")
+                            self.logger.info(f"      Mean: {valid_ds_vals.mean():.4f}")
+                            self.logger.info(f"      Median: {valid_ds_vals.median():.4f}")
+                            self.logger.info(f"      Valid values: {len(valid_ds_vals)} ({len(valid_ds_vals)/len(dataset_data):.1%})")
+            
+            if digital_home_mobility_delta in self.pooled_data.columns:
+                valid_delta = self.pooled_data[digital_home_mobility_delta].dropna()
+                if len(valid_delta) > 0:
+                    self.logger.info(f"\nDigital Home-Mobility Delta Statistics:")
+                    self.logger.info(f"  Mean: {valid_delta.mean():.4f}")
+                    self.logger.info(f"  Median: {valid_delta.median():.4f}")
+                    self.logger.info(f"  Std: {valid_delta.std():.4f}")
+                    self.logger.info(f"  Positive values (home > mobility): {(valid_delta > 0).sum()} ({(valid_delta > 0).sum()/len(valid_delta):.1%})")
+                    self.logger.info(f"  Negative values (mobility > home): {(valid_delta < 0).sum()} ({(valid_delta < 0).sum()/len(valid_delta):.1%})")
+                    
+                    # Check by dataset
+                    for dataset in self.pooled_data[std_dataset].unique():
+                        dataset_data = self.pooled_data[self.pooled_data[std_dataset] == dataset]
+                        valid_ds_vals = dataset_data[digital_home_mobility_delta].dropna()
+                        if len(valid_ds_vals) > 0:
+                            self.logger.info(f"    {dataset.upper()}:")
+                            self.logger.info(f"      Mean: {valid_ds_vals.mean():.4f}")
+                            self.logger.info(f"      Median: {valid_ds_vals.median():.4f}")
+                            self.logger.info(f"      Valid values: {len(valid_ds_vals)} ({len(valid_ds_vals)/len(dataset_data):.1%})")
+            
+            # NEW: Check relationship between digital home and overlap fragmentation
+            if digital_home_frag in self.pooled_data.columns and 'overlap_fragmentation' in self.pooled_data.columns:
+                valid_data = self.pooled_data[[digital_home_frag, 'overlap_fragmentation']].dropna()
+                if len(valid_data) > 5:
+                    corr = valid_data.corr().iloc[0, 1]
+                    self.logger.info(f"\nCorrelation between digital home and overlap fragmentation: r = {corr:.3f} (n={len(valid_data)})")
+                    
+                    # Check by dataset
+                    for dataset in self.pooled_data[std_dataset].unique():
+                        dataset_data = self.pooled_data[self.pooled_data[std_dataset] == dataset]
+                        valid_ds_data = dataset_data[[digital_home_frag, 'overlap_fragmentation']].dropna()
+                        if len(valid_ds_data) > 5:
+                            ds_corr = valid_ds_data.corr().iloc[0, 1]
+                            self.logger.info(f"  {dataset}: r = {ds_corr:.3f} (n={len(valid_ds_data)})")
+            
+            # Continue with rest of quality checks...
             
             self.logger.info("Quality checks completed")
             
@@ -716,24 +787,53 @@ class PooledSTAIAnalysis:
             
             # Data completeness
             self.logger.info("\nDATA COMPLETENESS:")
-            frag_types = ['digital', 'mobility', 'overlap']
+            frag_types = ['digital', 'mobility', 'overlap', 'digital_home', 'digital_home_mobility_delta']
             for frag_type in frag_types:
-                col = self.variable_mappings['standardized']['fragmentation'][frag_type]
-                valid = self.pooled_data[col].notna().sum()
-                valid_pct = 100 * valid / total_obs
-                self.logger.info(f"  {frag_type.upper()} FRAGMENTATION: {valid}/{total_obs} ({valid_pct:.1f}%)")
+                if frag_type in self.variable_mappings['standardized']['fragmentation']:
+                    col = self.variable_mappings['standardized']['fragmentation'][frag_type]
+                    if col in self.pooled_data.columns:
+                        valid = self.pooled_data[col].notna().sum()
+                        valid_pct = 100 * valid / total_obs
+                        self.logger.info(f"  {frag_type.upper()} FRAGMENTATION: {valid}/{total_obs} ({valid_pct:.1f}%)")
             
             # Duration completeness
             self.logger.info("\nDURATION COMPLETENESS:")
-            for duration_type in frag_types:
-                col = self.variable_mappings['standardized']['duration'][duration_type]
-                valid = self.pooled_data[col].notna().sum()
-                valid_pct = 100 * valid / total_obs
-                self.logger.info(f"  {duration_type.upper()} DURATION: {valid}/{total_obs} ({valid_pct:.1f}%)")
-                if valid > 0:
-                    self.logger.info(f"    Mean: {self.pooled_data[col].mean():.1f} minutes")
-                    self.logger.info(f"    Min: {self.pooled_data[col].min():.1f} minutes") 
-                    self.logger.info(f"    Max: {self.pooled_data[col].max():.1f} minutes")
+            duration_types = ['digital', 'mobility', 'overlap', 'digital_home']
+            for duration_type in duration_types:
+                if duration_type in self.variable_mappings['standardized']['duration']:
+                    col = self.variable_mappings['standardized']['duration'][duration_type]
+                    if col in self.pooled_data.columns:
+                        valid = self.pooled_data[col].notna().sum()
+                        valid_pct = 100 * valid / total_obs
+                        self.logger.info(f"  {duration_type.upper()} DURATION: {valid}/{total_obs} ({valid_pct:.1f}%)")
+                        if valid > 0:
+                            self.logger.info(f"    Mean: {self.pooled_data[col].mean():.1f} minutes")
+                            self.logger.info(f"    Min: {self.pooled_data[col].min():.1f} minutes") 
+                            self.logger.info(f"    Max: {self.pooled_data[col].max():.1f} minutes")
+            
+            # NEW: Add specific report for digital home metrics
+            self.logger.info("\nDIGITAL HOME FRAGMENTATION METRICS:")
+            digital_home_frag = self.variable_mappings['standardized']['fragmentation']['digital_home']
+            digital_home_mobility_delta = self.variable_mappings['standardized']['fragmentation']['digital_home_mobility_delta']
+            
+            if digital_home_frag in self.pooled_data.columns:
+                valid_vals = self.pooled_data[digital_home_frag].dropna()
+                valid_pct = 100 * len(valid_vals) / total_obs
+                self.logger.info(f"  Available data: {len(valid_vals)}/{total_obs} ({valid_pct:.1f}%)")
+                if len(valid_vals) > 0:
+                    self.logger.info(f"  Mean: {valid_vals.mean():.4f}")
+                    self.logger.info(f"  Median: {valid_vals.median():.4f}")
+            
+            if digital_home_mobility_delta in self.pooled_data.columns:
+                valid_vals = self.pooled_data[digital_home_mobility_delta].dropna()
+                valid_pct = 100 * len(valid_vals) / total_obs
+                self.logger.info(f"\nDIGITAL HOME-MOBILITY DELTA:")
+                self.logger.info(f"  Available data: {len(valid_vals)}/{total_obs} ({valid_pct:.1f}%)")
+                if len(valid_vals) > 0:
+                    self.logger.info(f"  Mean: {valid_vals.mean():.4f}")
+                    self.logger.info(f"  Median: {valid_vals.median():.4f}")
+                    self.logger.info(f"  Positive values (home > mobility): {(valid_vals > 0).sum()} ({(valid_vals > 0).sum()/len(valid_vals):.1%})")
+                    self.logger.info(f"  Negative values (mobility > home): {(valid_vals < 0).sum()} ({(valid_vals < 0).sum()/len(valid_vals):.1%})")
             
             # Anxiety and mood statistics
             self.logger.info("\nANXIETY SCORES:")
