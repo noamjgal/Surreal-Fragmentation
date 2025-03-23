@@ -445,14 +445,16 @@ def merge_ema_and_fragmentation(ema_data, frag_data):
     if column_renames:
         merged_data = merged_data.rename(columns=column_renames)
     
-    # Validate the merged data
+    # Validate the merged data - add the new metrics to validation rules
     validation_rules = {
         'numeric_ranges': {
             'STAI-Y-A-6_zstd': (-5, 5) if 'STAI-Y-A-6_zstd' in merged_data.columns else None,
             'CES-D-8_zstd': (-5, 5) if 'CES-D-8_zstd' in merged_data.columns else None,
             'digital_fragmentation_index': (0, 1) if 'digital_fragmentation_index' in merged_data.columns else None,
             'mobility_fragmentation_index': (0, 1) if 'mobility_fragmentation_index' in merged_data.columns else None,
-            'overlap_fragmentation_index': (0, 1) if 'overlap_fragmentation_index' in merged_data.columns else None
+            'overlap_fragmentation_index': (0, 1) if 'overlap_fragmentation_index' in merged_data.columns else None,
+            'digital_home_fragmentation_index': (0, 1) if 'digital_home_fragmentation_index' in merged_data.columns else None,
+            'digital_home_mobility_delta': (-1, 1) if 'digital_home_mobility_delta' in merged_data.columns else None
         }
     }
     
