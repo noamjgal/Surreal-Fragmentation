@@ -59,12 +59,12 @@ except ImportError:
     logging.warning("Could not import preprocess_gps module. Preprocessing may not be available.")
 
 # Parameters for trackintel processing
-STAYPOINT_DISTANCE_THRESHOLD = 100  # meters (increased from 75m) 
-STAYPOINT_TIME_THRESHOLD = 10.0     # minutes (increased from 5min)
-STAYPOINT_GAP_THRESHOLD = 30.0      # minutes (decreased from 45min)
+STAYPOINT_DISTANCE_THRESHOLD = 75  # meters 
+STAYPOINT_TIME_THRESHOLD = 5.0     # minutes 
+STAYPOINT_GAP_THRESHOLD = 45.0     # minutes 
 LOCATION_EPSILON = 100             # meters 
 MIN_GPS_POINTS_PER_DAY = 5
-MAX_ACCEPTABLE_GAP_PERCENT = 70
+MAX_ACCEPTABLE_GAP_PERCENT = 60
 MIN_TRACK_DURATION_HOURS = 1
 DIGITAL_USE_COL = 'action'         # Column containing screen events
 MAX_REASONABLE_TRIP_DURATION = 120  # Maximum reasonable trip duration in minutes
@@ -1184,12 +1184,11 @@ class EpisodeProcessor:
                 # IMPORTANT CHANGE: Filter out mobility episodes that happen at home
                 if not mobility_episodes.empty and 'location_type' in mobility_episodes.columns:
                     original_count = len(mobility_episodes)
-                    # Comment out the filtering to keep all mobility episodes, including at home
-                    # mobility_episodes = mobility_episodes[
-                    #     mobility_episodes['location_type'] != 'home'
-                    # ].reset_index(drop=True)
-                    # filtered_count = original_count - len(mobility_episodes)
-                    self.logger.info(f"Keeping all {original_count} mobility episodes (including home)")
+                    mobility_episodes = mobility_episodes[
+                        mobility_episodes['location_type'] != 'home'
+                    ].reset_index(drop=True)
+                    filtered_count = original_count - len(mobility_episodes)
+                    self.logger.info(f"Filtered out {filtered_count} home mobility episodes, remaining: {len(mobility_episodes)}")
                 
                 # Log transport modes summary
                 if 'transport_type' in mobility_episodes.columns:
