@@ -314,6 +314,18 @@ def clean_coordinates_sequential(points, max_reasonable_jump_km=50):
         (df['longitude'] <= ISRAEL_BOUNDS['max_lon'])
     )
     
+    # Add a small buffer (0.1 degrees ~ 11km) to Israel's bounds
+    buffer = 0.1
+    flexible_in_bounds = (
+        (df['latitude'] >= ISRAEL_BOUNDS['min_lat'] - buffer) & 
+        (df['latitude'] <= ISRAEL_BOUNDS['max_lat'] + buffer) & 
+        (df['longitude'] >= ISRAEL_BOUNDS['min_lon'] - buffer) & 
+        (df['longitude'] <= ISRAEL_BOUNDS['max_lon'] + buffer)
+    )
+    
+    # Use more flexible bounds for filtering, but mark the buffer zone points
+    df['in_buffer_zone'] = ~in_bounds & flexible_in_bounds
+    
     # Handle out-of-bounds points with possible lat/long swap fix
     out_of_bounds = df[~in_bounds].copy()
     if not out_of_bounds.empty:
@@ -421,8 +433,12 @@ def filter_speed_outliers(points, max_speed_kph=200):
             df.loc[valid_time, 'speed'] = df.loc[valid_time, 'distance'] / df.loc[valid_time, 'time_diff']
             df.loc[valid_time, 'speed_kmh'] = df.loc[valid_time, 'speed'] * 3.6
             
-            # Filter by speed
-            outliers = (df['speed_kmh'] > max_speed_kph) & valid_time
+            # Calculate time-adjusted maximum reasonable distance
+            # For longer time gaps, allow larger jumps proportionally
+            df.loc[valid_time, 'max_reasonable_distance'] = df.loc[valid_time, 'time_diff'] * (max_speed_kph / 3600) * 1000
+            
+            # Filter based on this dynamic threshold rather than a fixed distance
+            outliers = (df['distance'] > df['max_reasonable_distance']) & valid_time
             outlier_count = outliers.sum()
             
             if outlier_count > 0:
