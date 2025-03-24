@@ -31,9 +31,9 @@ warnings.filterwarnings("ignore", category=FutureWarning, message=".*observed=Fa
 LOG_DIR = Path(__file__).parent.parent / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-# Configure loggers
+# Change the main logging configuration from INFO to WARNING
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     handlers=[
         logging.FileHandler(LOG_DIR / 'episode_detection.log'),
         logging.StreamHandler()
@@ -41,7 +41,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# Summary logger for statistics
+# Keep the summary logger at INFO level since you likely want the summary statistics
 summary_logger = logging.getLogger("summary")
 summary_handler = logging.StreamHandler()
 summary_logger.addHandler(summary_handler)
@@ -176,6 +176,7 @@ class EpisodeProcessor:
         self.home_location = (np.nan, np.nan)  # Initialize home location
         self.all_staypoints_by_day = {}  # Store staypoints by day for later use
         self.day_positionfixes = {}  # Store positionfixes by day for location timeline
+        self.HOME_THRESHOLD = 75  # Add class-level constant for home detection threshold
         
         # Skip creation if the path is a macOS hidden file
         if '._' in str(self.output_dir):
@@ -283,7 +284,7 @@ class EpisodeProcessor:
         return True, quality_stats
     
     def identify_home_location(self, positionfixes: ti.Positionfixes) -> Tuple[float, float]:
-        """Identify home location based on 3-6 AM positions"""
+        """Identify home location based on 3-6 AM positions and additional heuristics"""
         if positionfixes.empty:
             return (np.nan, np.nan)
         
@@ -291,67 +292,111 @@ class EpisodeProcessor:
         pfs = positionfixes.copy()
         pfs['hour'] = pfs['tracked_at'].dt.hour
         
-        # Filter for nighttime hours (3-6 AM)
-        night_pfs = pfs[(pfs['hour'] >= 3) & (pfs['hour'] < 6)]
+        # Try multiple approaches, in order of reliability
         
-        if night_pfs.empty:
-            self.logger.warning("No nighttime (3-6 AM) data found for home location detection")
-            # Use most common daytime location as fallback
-            all_pfs = pfs.copy()
-            
-            # Generate staypoints for all data
+        # 1. First try: Nighttime hours (3-6 AM) - most reliable for home detection
+        night_pfs = pfs[(pfs['hour'] >= 1) & (pfs['hour'] < 6)]  # Expanded to 1-6 AM
+        
+        if not night_pfs.empty and len(night_pfs) >= 5:  # Need at least 5 points for reliable detection
             try:
-                _, staypoints = all_pfs.generate_staypoints(
+                # Generate staypoints from nighttime data
+                _, night_staypoints = night_pfs.generate_staypoints(
                     method='sliding',
-                    dist_threshold=STAYPOINT_DISTANCE_THRESHOLD,
-                    time_threshold=STAYPOINT_TIME_THRESHOLD * 2,  # Use longer threshold for home detection
-                    gap_threshold=STAYPOINT_GAP_THRESHOLD
+                    dist_threshold=75,  # Consistent with our 75m threshold
+                    time_threshold=5.0,
+                    gap_threshold=45.0
                 )
                 
-                if staypoints.empty:
-                    self.logger.warning("No staypoints available for home detection")
-                    return (np.nan, np.nan)
+                if not night_staypoints.empty:
+                    # Find the longest staypoint
+                    night_staypoints['duration'] = (night_staypoints['finished_at'] - night_staypoints['started_at']).dt.total_seconds()
+                    longest_staypoint = night_staypoints.loc[night_staypoints['duration'].idxmax()]
+                    home_lat = longest_staypoint.geometry.y
+                    home_lon = longest_staypoint.geometry.x
+                    
+                    self.logger.info(f"Home location determined from nighttime data: {home_lat:.6f}, {home_lon:.6f}")
+                    return (home_lat, home_lon)
+            except Exception as e:
+                self.logger.warning(f"Error in nighttime home detection: {str(e)}")
+        
+        # 2. Second try: Morning hours (6-9 AM)
+        morning_pfs = pfs[(pfs['hour'] >= 6) & (pfs['hour'] < 9)]
+        
+        if not morning_pfs.empty and len(morning_pfs) >= 5:
+            try:
+                # Generate staypoints from morning data
+                _, morning_staypoints = morning_pfs.generate_staypoints(
+                    method='sliding',
+                    dist_threshold=75,
+                    time_threshold=5.0,
+                    gap_threshold=45.0
+                )
                 
-                # Find most common staypoint by duration
-                staypoints['duration'] = (staypoints['finished_at'] - staypoints['started_at']).dt.total_seconds()
-                longest_staypoint = staypoints.loc[staypoints['duration'].idxmax()]
+                if not morning_staypoints.empty:
+                    # Find the first significant staypoint of the day
+                    morning_staypoints['duration'] = (morning_staypoints['finished_at'] - morning_staypoints['started_at']).dt.total_seconds()
+                    morning_staypoints = morning_staypoints[morning_staypoints['duration'] > 300]  # At least 5 minutes
+                    
+                    if not morning_staypoints.empty:
+                        first_sp = morning_staypoints.iloc[0]
+                        home_lat = first_sp.geometry.y
+                        home_lon = first_sp.geometry.x
+                        
+                        self.logger.info(f"Home location determined from morning data: {home_lat:.6f}, {home_lon:.6f}")
+                        return (home_lat, home_lon)
+            except Exception as e:
+                self.logger.warning(f"Error in morning home detection: {str(e)}")
+        
+        # 3. Third try: Evening hours (9 PM - midnight)
+        evening_pfs = pfs[(pfs['hour'] >= 21) & (pfs['hour'] <= 23)]
+        
+        if not evening_pfs.empty and len(evening_pfs) >= 5:
+            try:
+                # Generate staypoints from evening data
+                _, evening_staypoints = evening_pfs.generate_staypoints(
+                    method='sliding',
+                    dist_threshold=75,
+                    time_threshold=5.0,
+                    gap_threshold=45.0
+                )
+                
+                if not evening_staypoints.empty:
+                    # Find the last significant staypoint of the day
+                    evening_staypoints['duration'] = (evening_staypoints['finished_at'] - evening_staypoints['started_at']).dt.total_seconds()
+                    evening_staypoints = evening_staypoints[evening_staypoints['duration'] > 300]  # At least 5 minutes
+                    
+                    if not evening_staypoints.empty:
+                        last_sp = evening_staypoints.iloc[-1]
+                        home_lat = last_sp.geometry.y
+                        home_lon = last_sp.geometry.x
+                        
+                        self.logger.info(f"Home location determined from evening data: {home_lat:.6f}, {home_lon:.6f}")
+                        return (home_lat, home_lon)
+            except Exception as e:
+                self.logger.warning(f"Error in evening home detection: {str(e)}")
+        
+        # 4. Last resort: Use all data and find longest staypoint
+        try:
+            _, all_staypoints = positionfixes.generate_staypoints(
+                method='sliding',
+                dist_threshold=75,
+                time_threshold=15.0,  # Use higher threshold for reliability
+                gap_threshold=45.0
+            )
+            
+            if not all_staypoints.empty:
+                all_staypoints['duration'] = (all_staypoints['finished_at'] - all_staypoints['started_at']).dt.total_seconds()
+                longest_staypoint = all_staypoints.loc[all_staypoints['duration'].idxmax()]
                 home_lat = longest_staypoint.geometry.y
                 home_lon = longest_staypoint.geometry.x
                 
                 self.logger.info(f"Home location determined from longest staypoint: {home_lat:.6f}, {home_lon:.6f}")
                 return (home_lat, home_lon)
-                
-            except Exception as e:
-                self.logger.error(f"Error in home location detection fallback: {str(e)}")
-                return (np.nan, np.nan)
-        
-        # Generate staypoints from nighttime data
-        try:
-            _, night_staypoints = night_pfs.generate_staypoints(
-                method='sliding',
-                dist_threshold=STAYPOINT_DISTANCE_THRESHOLD,
-                time_threshold=STAYPOINT_TIME_THRESHOLD,
-                gap_threshold=STAYPOINT_GAP_THRESHOLD
-            )
-            
-            if night_staypoints.empty:
-                self.logger.warning("No nighttime staypoints found for home location")
-                return (np.nan, np.nan)
-            
-            # Calculate duration for each staypoint
-            night_staypoints['duration'] = (night_staypoints['finished_at'] - night_staypoints['started_at']).dt.total_seconds()
-            
-            # Find the most common nighttime staypoint location (by total duration)
-            longest_staypoint = night_staypoints.loc[night_staypoints['duration'].idxmax()]
-            home_lat = longest_staypoint.geometry.y
-            home_lon = longest_staypoint.geometry.x
-            
-            self.logger.info(f"Home location determined: {home_lat:.6f}, {home_lon:.6f}")
-            return (home_lat, home_lon)
-            
         except Exception as e:
-            self.logger.error(f"Error in nighttime home location detection: {str(e)}")
-            return (np.nan, np.nan)
+            self.logger.error(f"Error in fallback home location detection: {str(e)}")
+        
+        self.logger.warning("Could not determine home location with any method")
+        return (np.nan, np.nan)
 
     def haversine_distance(self, lat1, lon1, lat2, lon2):
         """Calculate haversine distance between two points in meters"""
@@ -393,8 +438,8 @@ class EpisodeProcessor:
                 home_lat, home_lon
             )
             
-            # Classify based on distance (50m threshold instead of 100m)
-            if distance <= 50:
+            # Classify based on distance using self.HOME_THRESHOLD
+            if distance <= self.HOME_THRESHOLD:
                 staypoints.at[idx, 'location_type'] = 'home'
             else:
                 staypoints.at[idx, 'location_type'] = 'out_of_home'
@@ -415,81 +460,134 @@ class EpisodeProcessor:
         
         # First handle the case where staypoints is empty - create a default timeline
         if staypoints.empty:
-            # Determine default location from positionfixes
-            default_location = 'unknown'
-            if not positionfixes.empty and hasattr(self, 'home_location') and not np.isnan(self.home_location[0]):
-                home_lat, home_lon = self.home_location
+            # Make sure positionfixes timestamps are timezone-naive for comparison
+            if not positionfixes.empty:
+                positionfixes_naive = positionfixes.copy()
+                positionfixes_naive['tracked_at'] = ensure_tz_naive(positionfixes_naive['tracked_at'])
+            else:
+                positionfixes_naive = positionfixes
+            
+            # Instead of creating one big episode, let's check each hour
+            hours_to_check = 24
+            for hour in range(hours_to_check):
+                hour_start = day_start + pd.Timedelta(hours=hour)
+                hour_end = day_start + pd.Timedelta(hours=hour+1)
                 
-                # Check if any positions are near home
-                for _, pos in positionfixes.iterrows():
-                    distance = self.haversine_distance(
-                        pos.geometry.y, pos.geometry.x, 
-                        home_lat, home_lon
-                    )
+                # Determine location for this hour using nearby positions
+                location_type = 'out_of_home'  # Default to out_of_home instead of unknown
+                if not positionfixes_naive.empty and hasattr(self, 'home_location') and not np.isnan(self.home_location[0]):
+                    home_lat, home_lon = self.home_location
                     
-                    if distance <= 50:  # Using 50m threshold
-                        default_location = 'home'
-                        break
-                        
-                if default_location != 'home':
-                    default_location = 'out_of_home'
+                    # Get positions for this hour
+                    hour_positions = positionfixes_naive[
+                        (positionfixes_naive['tracked_at'] >= hour_start - pd.Timedelta(minutes=30)) & 
+                        (positionfixes_naive['tracked_at'] <= hour_end + pd.Timedelta(minutes=30))
+                    ]
                     
-            # Create a single episode for the whole day
-            location_episodes.append({
-                'started_at': day_start,
-                'finished_at': day_end,
-                'state': 'location',
-                'location_type': default_location,
-                'latitude': self.home_location[0] if default_location == 'home' else np.nan,
-                'longitude': self.home_location[1] if default_location == 'home' else np.nan,
-                'duration': day_end - day_start
-            })
+                    if not hour_positions.empty:
+                        # Check if any positions are near home
+                        for _, pos in hour_positions.iterrows():
+                            distance = self.haversine_distance(
+                                pos.geometry.y, pos.geometry.x, 
+                                home_lat, home_lon
+                            )
+                            
+                            # Use self.HOME_THRESHOLD consistently
+                            if distance <= self.HOME_THRESHOLD:
+                                location_type = 'home'
+                                break
+                
+                # Create an episode for this hour
+                location_episodes.append({
+                    'started_at': hour_start,
+                    'finished_at': hour_end,
+                    'state': 'location',
+                    'location_type': location_type,
+                    'latitude': self.home_location[0] if location_type == 'home' else np.nan,
+                    'longitude': self.home_location[1] if location_type == 'home' else np.nan,
+                    'duration': hour_end - hour_start
+                })
         else:
+            # Handle non-empty staypoints case
+            # Ensure staypoints timestamps are timezone-naive for consistent comparison
+            staypoints_copy = staypoints.copy()
+            
+            for col in ['started_at', 'finished_at']:
+                if col in staypoints_copy.columns:
+                    staypoints_copy[col] = ensure_tz_naive(staypoints_copy[col])
+            
             # Create episodes from staypoints
-            for idx, sp in staypoints.iterrows():
-                # Ensure timezone-naive for consistent comparison
-                started_at = sp['started_at'].tz_localize(None) if sp['started_at'].tzinfo else sp['started_at']
-                finished_at = sp['finished_at'].tz_localize(None) if sp['finished_at'].tzinfo else sp['finished_at']
-                
-                # Only include staypoints from this day
-                if started_at.date() == date or finished_at.date() == date:
-                    # Trim to day boundaries
-                    if started_at < day_start:
-                        started_at = day_start
-                    if finished_at > day_end:
-                        finished_at = day_end
+            for idx, sp in staypoints_copy.iterrows():
+                # Ensure we have location type
+                if 'location_type' not in sp or pd.isna(sp['location_type']):
+                    # Determine location type based on distance to home
+                    if hasattr(self, 'home_location') and not np.isnan(self.home_location[0]):
+                        home_lat, home_lon = self.home_location
+                        
+                        distance = self.haversine_distance(
+                            sp.geometry.y, sp.geometry.x, 
+                            home_lat, home_lon
+                        )
+                        
+                        location_type = 'home' if distance <= self.HOME_THRESHOLD else 'out_of_home'
+                    else:
+                        location_type = 'out_of_home'
+                else:
+                    location_type = sp['location_type']
                     
-                    if started_at < finished_at:  # Only include valid episodes
+                    # Ensure no 'unknown' locations
+                    if location_type == 'unknown':
+                        location_type = 'out_of_home'
+                
+                # Extract start and end times
+                started_at = sp['started_at']
+                finished_at = sp['finished_at']
+                
+                # Only include staypoints that overlap with this day
+                started_at_day = started_at.date() if hasattr(started_at, 'date') else started_at.to_pydatetime().date()
+                finished_at_day = finished_at.date() if hasattr(finished_at, 'date') else finished_at.to_pydatetime().date()
+                
+                if started_at_day <= date and finished_at_day >= date:
+                    # Trim to day boundaries
+                    episode_start = max(started_at, day_start)
+                    episode_end = min(finished_at, day_end)
+                    
+                    if episode_start < episode_end:  # Valid episode
                         location_episodes.append({
-                            'started_at': started_at,
-                            'finished_at': finished_at,
+                            'started_at': episode_start,
+                            'finished_at': episode_end,
                             'state': 'location',
-                            'location_type': sp.get('location_type', 'unknown'),
+                            'location_type': location_type,
                             'latitude': sp.geometry.y,
                             'longitude': sp.geometry.x,
-                            'duration': finished_at - started_at
+                            'duration': episode_end - episode_start
                         })
+    
+        # Create the location episodes DataFrame
+        location_timeline = pd.DataFrame(location_episodes) if location_episodes else pd.DataFrame()
         
-        # Create a DataFrame and sort by start time
-        timeline = pd.DataFrame(location_episodes).sort_values('started_at') if location_episodes else pd.DataFrame()
+        # Fill gaps in the timeline to ensure complete coverage
+        if not location_timeline.empty:
+            location_timeline = self._fill_location_timeline_gaps(
+                location_timeline, positionfixes, day_start, day_end)
         
-        # Ensure positionfixes have timezone-naive datetimes for consistent comparison
-        if not positionfixes.empty:
-            positionfixes = positionfixes.copy()
-            positionfixes['tracked_at'] = ensure_tz_naive(positionfixes['tracked_at'])
-        
-        # Fill gaps in the timeline to ensure continuous coverage
-        timeline = self._fill_location_timeline_gaps(timeline, positionfixes, day_start, day_end)
-        
-        return timeline
-
+        return location_timeline
+    
     def _fill_location_timeline_gaps(self, timeline, positionfixes, day_start, day_end):
         """Fill gaps in the location timeline ensuring all times are timezone-naive"""
         home_lat, home_lon = self.home_location
+        HOME_THRESHOLD = 75  # Define HOME_THRESHOLD at the beginning
         
         # Ensure day boundaries are timezone-naive
         day_start = day_start.tz_localize(None) if hasattr(day_start, 'tzinfo') and day_start.tzinfo else day_start
         day_end = day_end.tz_localize(None) if hasattr(day_end, 'tzinfo') and day_end.tzinfo else day_end
+        
+        # Make sure positionfixes has timezone-naive timestamps for comparison
+        if not positionfixes.empty:
+            positionfixes_copy = positionfixes.copy()
+            positionfixes_copy['tracked_at'] = ensure_tz_naive(positionfixes_copy['tracked_at'])
+        else:
+            positionfixes_copy = positionfixes
         
         # Convert to a list for easier manipulation
         episodes = timeline.to_dict('records') if not timeline.empty else []
@@ -502,7 +600,10 @@ class EpisodeProcessor:
                 first_location = episodes[0]['location_type']
             else:
                 # Use positionfixes around this time to determine location
-                first_location = self._determine_location_from_positions(positionfixes, day_start, home_lat, home_lon)
+                first_location = self._determine_location_from_positions(positionfixes_copy, day_start, home_lat, home_lon)
+                # Ensure it's never "unknown" - default to "out_of_home" if needed
+                if first_location == 'unknown':
+                    first_location = 'out_of_home'
                 
             filled_episodes.append({
                 'started_at': day_start,
@@ -525,7 +626,11 @@ class EpisodeProcessor:
                 if current_end < next_start:
                     # Gap detected, determine location for this gap
                     gap_location = self._determine_location_from_positions(
-                        positionfixes, current_end, home_lat, home_lon)
+                        positionfixes_copy, current_end, home_lat, home_lon)
+                    
+                    # Ensure it's never "unknown" - default to "out_of_home" if needed
+                    if gap_location == 'unknown':
+                        gap_location = 'out_of_home'
                     
                     filled_episodes.append({
                         'started_at': current_end,
@@ -539,7 +644,7 @@ class EpisodeProcessor:
         
         # Handle gap at the end of day
         if not filled_episodes or filled_episodes[-1]['finished_at'] < day_end:
-            last_location = filled_episodes[-1]['location_type'] if filled_episodes else 'unknown'
+            last_location = filled_episodes[-1]['location_type'] if filled_episodes else 'out_of_home'
             
             filled_episodes.append({
                 'started_at': filled_episodes[-1]['finished_at'] if filled_episodes else day_start,
@@ -559,31 +664,37 @@ class EpisodeProcessor:
             result['movement_state'] = result['location_type'].map({
                 'home': 'at_home',
                 'out_of_home': 'out_of_home',
-                'unknown': 'unknown'
+                'unknown': 'out_of_home'  # Map any remaining unknown to out_of_home
             })
         
         return result
 
     def _determine_location_from_positions(self, positionfixes, timestamp, home_lat, home_lon):
         """Determine location type from nearby positionfixes"""
+        # Use self.HOME_THRESHOLD instead of redefining it
+        
         # Ensure timestamp is timezone-naive for consistent comparison
         timestamp = timestamp.tz_localize(None) if hasattr(timestamp, 'tzinfo') and timestamp.tzinfo else timestamp
         
-        # If home location is unknown, return unknown
+        # If home location is unknown, return out_of_home instead of unknown
         if np.isnan(home_lat) or np.isnan(home_lon):
-            return 'unknown'
+            return 'out_of_home'
+        
+        # Ensure positionfixes has timezone-naive timestamps
+        if not positionfixes.empty:
+            positionfixes_copy = positionfixes.copy()
+            positionfixes_copy['tracked_at'] = ensure_tz_naive(positionfixes_copy['tracked_at'])
+        else:
+            # Default to out_of_home if no position data
+            return 'out_of_home'
         
         # Find positions within 30 minutes of the timestamp
         window_start = timestamp - pd.Timedelta(minutes=30)
         window_end = timestamp + pd.Timedelta(minutes=30)
         
-        if positionfixes.empty:
-            # Default to unknown if no position data
-            return 'unknown'
-        
-        nearby_positions = positionfixes[
-            (positionfixes['tracked_at'] >= window_start) & 
-            (positionfixes['tracked_at'] <= window_end)
+        nearby_positions = positionfixes_copy[
+            (positionfixes_copy['tracked_at'] >= window_start) & 
+            (positionfixes_copy['tracked_at'] <= window_end)
         ]
         
         if nearby_positions.empty:
@@ -591,13 +702,13 @@ class EpisodeProcessor:
             day_start = pd.Timestamp(timestamp.date())
             day_end = day_start + pd.Timedelta(days=1)
             
-            day_positions = positionfixes[
-                (positionfixes['tracked_at'] >= day_start) & 
-                (positionfixes['tracked_at'] <= day_end)
+            day_positions = positionfixes_copy[
+                (positionfixes_copy['tracked_at'] >= day_start) & 
+                (positionfixes_copy['tracked_at'] <= day_end)
             ]
             
             if day_positions.empty:
-                return 'unknown'
+                return 'out_of_home'  # Default to out_of_home instead of unknown
             
             # Find closest position in time
             closest_idx = (day_positions['tracked_at'] - timestamp).abs().idxmin()
@@ -609,7 +720,7 @@ class EpisodeProcessor:
                 home_lat, home_lon
             )
             
-            return 'home' if distance <= 50 else 'out_of_home'
+            return 'home' if distance <= self.HOME_THRESHOLD else 'out_of_home'
         
         # Check if any of the nearby positions are at home
         for _, pos in nearby_positions.iterrows():
@@ -618,7 +729,7 @@ class EpisodeProcessor:
                 home_lat, home_lon
             )
             
-            if distance <= 50:  # Using 50m threshold
+            if distance <= self.HOME_THRESHOLD:
                 return 'home'
         
         # If no nearby position is at home, the person is out
@@ -1365,57 +1476,59 @@ class EpisodeProcessor:
 
     def add_location_to_digital_episodes(self, digital_episodes, location_episodes):
         """Add location information (home/not home) to digital episodes based on overlap with location data"""
-        if digital_episodes.empty or location_episodes.empty:
+        if digital_episodes.empty:
             return digital_episodes
         
         # Create a copy to avoid modifying the original
         digital_episodes = digital_episodes.copy()
         
-        # Add location_type column with default value
-        digital_episodes['location_type'] = 'unknown'
+        # Add location_type column with default value 'out_of_home' instead of 'unknown'
+        # This enforces the binary choice
+        digital_episodes['location_type'] = 'out_of_home'  # Default to out_of_home
         
-        # Ensure consistent column names
-        location_eps = location_episodes.copy()
-        if 'started_at' in location_eps.columns and 'start_time' not in location_eps.columns:
-            location_eps = location_eps.rename(columns={'started_at': 'start_time', 'finished_at': 'end_time'})
-        
-        # Ensure timezone-naive datetimes for consistent comparison
-        digital_episodes['start_time'] = ensure_tz_naive(digital_episodes['start_time'])
-        digital_episodes['end_time'] = ensure_tz_naive(digital_episodes['end_time'])
-        location_eps['start_time'] = ensure_tz_naive(location_eps['start_time'])
-        location_eps['end_time'] = ensure_tz_naive(location_eps['end_time'])
-        
-        # For each digital episode, find overlapping location episodes
-        for idx, digital_ep in digital_episodes.iterrows():
-            d_start = digital_ep['start_time']
-            d_end = digital_ep['end_time']
+        # Only proceed with overlapping if we have location episodes
+        if not location_episodes.empty:
+            # Ensure consistent column names
+            location_eps = location_episodes.copy()
+            if 'started_at' in location_eps.columns and 'start_time' not in location_eps.columns:
+                location_eps = location_eps.rename(columns={'started_at': 'start_time', 'finished_at': 'end_time'})
             
-            # Find overlapping location episodes
-            overlaps = []
-            overlap_durations = []
+            # Ensure timezone-naive datetimes for consistent comparison
+            digital_episodes['start_time'] = ensure_tz_naive(digital_episodes['start_time'])
+            digital_episodes['end_time'] = ensure_tz_naive(digital_episodes['end_time'])
+            location_eps['start_time'] = ensure_tz_naive(location_eps['start_time'])
+            location_eps['end_time'] = ensure_tz_naive(location_eps['end_time'])
             
-            for _, loc_ep in location_eps.iterrows():
-                l_start = loc_ep['start_time']
-                l_end = loc_ep['end_time']
+            # For each digital episode, find overlapping location episodes
+            for idx, digital_ep in digital_episodes.iterrows():
+                d_start = digital_ep['start_time']
+                d_end = digital_ep['end_time']
                 
-                # Calculate overlap
-                overlap_start = max(d_start, l_start)
-                overlap_end = min(d_end, l_end)
+                # Find overlapping location episodes
+                home_overlap_seconds = 0
+                out_overlap_seconds = 0
                 
-                if overlap_start < overlap_end:  # There is an overlap
-                    overlap_duration = (overlap_end - overlap_start).total_seconds()
-                    overlaps.append(loc_ep)
-                    overlap_durations.append(overlap_duration)
-            
-            # If we found overlaps, determine the primary location type
-            if overlaps:
-                # Find the location type with the longest overlap duration
-                max_duration_idx = overlap_durations.index(max(overlap_durations))
-                primary_location = overlaps[max_duration_idx]
+                for _, loc_ep in location_eps.iterrows():
+                    if loc_ep['location_type'] == 'unknown':
+                        continue  # Skip unknown location episodes
+                        
+                    l_start = loc_ep['start_time']
+                    l_end = loc_ep['end_time']
+                    
+                    # Calculate overlap
+                    overlap_start = max(d_start, l_start)
+                    overlap_end = min(d_end, l_end)
+                    
+                    if overlap_start < overlap_end:  # There is an overlap
+                        overlap_duration = (overlap_end - overlap_start).total_seconds()
+                        if loc_ep['location_type'] == 'home':
+                            home_overlap_seconds += overlap_duration
+                        else:
+                            out_overlap_seconds += overlap_duration
                 
-                # Assign the location type to the digital episode
-                if 'location_type' in primary_location:
-                    digital_episodes.at[idx, 'location_type'] = primary_location['location_type']
+                # Assign the primary location type (the one with the most overlap)
+                if home_overlap_seconds > out_overlap_seconds:
+                    digital_episodes.at[idx, 'location_type'] = 'home'
         
         # Log the result
         location_counts = digital_episodes['location_type'].value_counts().to_dict()
@@ -1423,7 +1536,6 @@ class EpisodeProcessor:
         
         return digital_episodes
 
-    # Modify the process_day method to apply these filters
     def process_day(self, date: datetime_date, digital_episodes: pd.DataFrame, 
                 mobility_episodes: pd.DataFrame, location_episodes: pd.DataFrame = None) -> dict:
         """Process a single day and generate statistics"""
@@ -1436,11 +1548,19 @@ class EpisodeProcessor:
         # Create comprehensive location timeline if staypoints are available
         if date in self.all_staypoints_by_day and date in self.day_positionfixes:
             try:
+                # Make a copy of positionfixes and normalize timezone
+                day_positionfixes = self.day_positionfixes[date].copy()
+                day_positionfixes['tracked_at'] = ensure_tz_naive(day_positionfixes['tracked_at'])
+                
                 location_timeline = self.generate_location_timeline(
                     self.all_staypoints_by_day[date], 
-                    self.day_positionfixes[date],
+                    day_positionfixes,
                     date
                 )
+                # Ensure we don't have None - use empty DataFrame as fallback
+                if location_timeline is None:
+                    location_timeline = pd.DataFrame()
+                    
                 if not location_timeline.empty:
                     # Replace current location_episodes with more comprehensive timeline
                     location_episodes = location_timeline
@@ -1454,13 +1574,25 @@ class EpisodeProcessor:
             try:
                 # Create a basic home/away timeline using any available position fixes for the day
                 day_positionfixes = self.day_positionfixes.get(date, None)
-                location_timeline = self.generate_location_timeline(
+                
+                if day_positionfixes is not None:
+                    # Normalize timezone
+                    day_positionfixes_naive = day_positionfixes.copy()
+                    day_positionfixes_naive['tracked_at'] = ensure_tz_naive(day_positionfixes_naive['tracked_at'])
+                else:
+                    day_positionfixes_naive = gpd.GeoDataFrame()
+                    
+                default_timeline = self.generate_location_timeline(
                     gpd.GeoDataFrame(),  # Empty staypoints
-                    day_positionfixes if day_positionfixes is not None else gpd.GeoDataFrame(),
+                    day_positionfixes_naive,
                     date
                 )
-                if not location_timeline.empty:
-                    location_episodes = location_timeline
+                # Again ensure we don't have None
+                if default_timeline is None:
+                    default_timeline = pd.DataFrame()
+                    
+                if not default_timeline.empty:
+                    location_episodes = default_timeline
                     self.logger.info(f"Created default location timeline with {len(location_episodes)} episodes")
             except Exception as e:
                 self.logger.error(f"Error generating default location timeline: {str(e)}")
