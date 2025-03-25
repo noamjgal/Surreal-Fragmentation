@@ -2,8 +2,8 @@
 """
 Pooled Group Comparison Analysis
 
-This script performs t-tests using population-standardized data and correlations using 
-participant-standardized data from the pooled STAI dataset (SURREAL and TLV).
+This script performs t-tests using population-standardized data from the pooled STAI dataset (SURREAL and TLV),
+properly accounting for repeated measurements by aggregating data at the participant level.
 """
 
 import pandas as pd
@@ -73,7 +73,6 @@ class PooledGroupAnalysis:
         
         # Results containers - now with subset tracking
         self.ttest_results = []
-        self.correlation_results = []
         
     def _setup_logging(self):
         """Set up logging configuration"""
@@ -100,7 +99,7 @@ class PooledGroupAnalysis:
         self.logger.info(f"Output directory: {self.output_dir}")
 
     def load_data(self):
-        """Load both population-normalized and participant-normalized pooled data."""
+        """Load population-normalized pooled data."""
         # Load population-normalized data
         self.logger.info(f"Loading population-normalized data from {self.population_file}")
         try:
@@ -110,29 +109,16 @@ class PooledGroupAnalysis:
             self.logger.error(f"Error loading population data: {str(e)}")
             population_df = None
         
-        # Load participant-normalized data
-        self.logger.info(f"Loading participant-normalized data from {self.participant_file}")
-        try:
-            participant_df = pd.read_csv(self.participant_file)
-            self.logger.info(f"Participant data loaded with shape: {participant_df.shape}")
-        except Exception as e:
-            self.logger.error(f"Error loading participant data: {str(e)}")
-            participant_df = None
-        
-        return population_df, participant_df
+        return population_df
     
     def run_analyses(self):
-        """Run t-tests and correlations using appropriate datasets for each."""
-        # Load both datasets
-        population_df, participant_df = self.load_data()
+        """Run t-tests accounting for repeated measurements."""
+        # Load dataset
+        population_df = self.load_data()
         
-        # Validate datasets
+        # Validate dataset
         if population_df is None:
             self.logger.error("Population dataset failed to load, cannot continue with t-tests")
-            return False
-        
-        if participant_df is None:
-            self.logger.error("Participant dataset failed to load, cannot continue with correlations")
             return False
         
         # First run analyses on the full pooled dataset
@@ -143,12 +129,6 @@ class PooledGroupAnalysis:
             self.logger.info("Running t-tests on population-normalized data")
             pop_ttests = self._run_ttests(population_df, subset_name="pooled")
             self.ttest_results.extend(pop_ttests)
-        
-        # Process participant-normalized data for correlations
-        if participant_df is not None:
-            self.logger.info("Running correlations on participant-normalized data")
-            part_correlations = self._run_correlations(participant_df, subset_name="pooled")
-            self.correlation_results.extend(part_correlations)
         
         # Now run analyses on each subset
         for subset in self.subsets:
@@ -172,27 +152,13 @@ class PooledGroupAnalysis:
                         self.logger.warning(f"Insufficient data in {subset_name} population subset ({len(subset_pop_df)} rows)")
                 else:
                     self.logger.warning(f"Filter column {filter_column} not found in population dataset")
-            
-            if participant_df is not None:
-                if filter_column in participant_df.columns:
-                    subset_part_df = participant_df[participant_df[filter_column] == filter_value].copy()
-                    self.logger.info(f"Filtered participant dataset for {subset_name}: {len(subset_part_df)} rows")
-                    
-                    if len(subset_part_df) >= 10:  # Minimum sample size for meaningful analysis
-                        self.logger.info(f"Running correlations on {subset_name} participant-normalized data")
-                        subset_correlations = self._run_correlations(subset_part_df, subset_name=subset_name)
-                        self.correlation_results.extend(subset_correlations)
-                    else:
-                        self.logger.warning(f"Insufficient data in {subset_name} participant subset ({len(subset_part_df)} rows)")
-                else:
-                    self.logger.warning(f"Filter column {filter_column} not found in participant dataset")
         
-        self.logger.info(f"Completed all analyses. Generated {len(self.ttest_results)} t-test results and {len(self.correlation_results)} correlation results.")
+        self.logger.info(f"Completed all analyses. Generated {len(self.ttest_results)} t-test results.")
         
         return True
     
     def _run_ttests(self, df, subset_name="pooled"):
-        """Run t-test comparisons on population-normalized data."""
+        """Run t-test comparisons on population-normalized data, accounting for repeated measurements."""
         results = []
         
         # Define metrics to analyze
@@ -232,7 +198,7 @@ class PooledGroupAnalysis:
                 if demo_var not in df.columns:
                     continue
                     
-                result = self._run_t_test_comparison(df, outcome_var, demo_var)
+                result = self._run_t_test_comparison_aggregated(df, outcome_var, demo_var)
                 if result:
                     # Determine outcome category
                     outcome_category = self._determine_variable_category(outcome_var)
@@ -263,15 +229,25 @@ class PooledGroupAnalysis:
                 if outcome not in df.columns or predictor == outcome:
                     continue
                 
-                # Create median-split group
-                temp_df = df.copy()
-                median_val = temp_df[predictor].median()
-                temp_df[f'{predictor}_group'] = temp_df[predictor].apply(
+                # Create median-split group at participant level
+                # First, aggregate predictor at participant level
+                participant_means = df.groupby('participant_id')[predictor].mean().reset_index()
+                median_val = participant_means[predictor].median()
+                
+                # Create group labels
+                participant_means[f'{predictor}_group'] = participant_means[predictor].apply(
                     lambda x: 'high' if x > median_val else 'low' if pd.notna(x) else np.nan
                 )
                 
+                # Merge back to original data
+                temp_df = df.merge(
+                    participant_means[['participant_id', f'{predictor}_group']], 
+                    on='participant_id', 
+                    how='left'
+                )
+                
                 # Run t-test with median split
-                result = self._run_t_test_comparison(temp_df, outcome, f'{predictor}_group')
+                result = self._run_t_test_comparison_aggregated(temp_df, outcome, f'{predictor}_group')
                 
                 if result:
                     dv_category = 'anxiety' if 'anxiety' in outcome else 'mood'
@@ -289,83 +265,6 @@ class PooledGroupAnalysis:
                         'n_obs': result.get('total_n', 0),
                         **self._extract_t_test_stats(result)
                     })
-        
-        return results
-    
-    def _run_correlations(self, df, subset_name="pooled"):
-        """Run correlation analyses on participant-normalized data."""
-        results = []
-        tested_pairs = set()  # Track which pairs we've already tested
-        
-        # 1. Correlations between fragmentation metrics and emotion metrics
-        for frag_var in self.fragmentation_metrics:
-            if frag_var not in df.columns:
-                continue
-            
-            for emotion_var in self.anxiety_metrics + self.mood_metrics:
-                if emotion_var not in df.columns:
-                    continue
-                
-                # Create a unique pair identifier
-                pair_key = tuple(sorted([frag_var, emotion_var]))
-                if pair_key in tested_pairs:
-                    continue
-                    
-                tested_pairs.add(pair_key)
-                
-                # Run correlation
-                result = self._run_correlation_test(df, frag_var, emotion_var)
-                
-                if result:
-                    # Determine categories
-                    frag_category = 'fragmentation'
-                    emotion_category = 'anxiety' if 'anxiety' in emotion_var else 'mood'
-                    
-                    results.append({
-                        'model_name': f"{subset_name.capitalize()}: {frag_var} ~ {emotion_var}",
-                        'var1': frag_var,
-                        'var1_category': frag_category,
-                        'var2': emotion_var,
-                        'var2_category': emotion_category,
-                        'normalization': 'participant',
-                        'test_type': 'correlation',
-                        'subset': subset_name,
-                        'n': result.get('n', 0),
-                        **self._extract_correlation_stats(result)
-                    })
-        
-        # 2. Correlations between different types of fragmentation metrics
-        fragmentation_pairs = [
-            ('digital_fragmentation', 'mobility_fragmentation'),
-            ('digital_fragmentation', 'overlap_fragmentation'),
-            ('mobility_fragmentation', 'overlap_fragmentation')
-        ]
-        
-        for var1, var2 in fragmentation_pairs:
-            if var1 not in df.columns or var2 not in df.columns:
-                continue
-                
-            pair_key = tuple(sorted([var1, var2]))
-            if pair_key in tested_pairs:
-                continue
-                
-            tested_pairs.add(pair_key)
-            
-            result = self._run_correlation_test(df, var1, var2)
-            
-            if result:
-                results.append({
-                    'model_name': f"{subset_name.capitalize()}: {var1} ~ {var2}",
-                    'var1': var1,
-                    'var1_category': 'fragmentation',
-                    'var2': var2,
-                    'var2_category': 'fragmentation',
-                    'normalization': 'participant',
-                    'test_type': 'correlation',
-                    'subset': subset_name,
-                    'n': result.get('n', 0),
-                    **self._extract_correlation_stats(result)
-                })
         
         return results
     
@@ -408,80 +307,8 @@ class PooledGroupAnalysis:
         
         return stats
     
-    def _extract_correlation_stats(self, result):
-        """Extract statistics from correlation result."""
-        stats = {}
-        
-        # Add correlation statistics
-        stats['correlation'] = result.get('correlation', np.nan)
-        stats['p_value'] = result.get('p_value', np.nan)
-        
-        # Add significance indicator
-        p_val = result.get('p_value', 1.0)
-        stats['sig_level'] = '***' if p_val < 0.001 else '**' if p_val < 0.01 else '*' if p_val < 0.05 else ''
-        
-        # Add effect size interpretation
-        corr = abs(result.get('correlation', 0))
-        if corr < 0.1:
-            effect_size = "Negligible"
-        elif corr < 0.3:
-            effect_size = "Small"
-        elif corr < 0.5:
-            effect_size = "Medium"
-        else:
-            effect_size = "Large"
-        
-        stats['effect_size'] = corr
-        stats['effect_size_type'] = "Pearson's r"
-        stats['effect_interpretation'] = effect_size
-        
-        return stats
-    
-    def _run_correlation_test(self, df, var1, var2):
-        """Run a correlation test between two continuous variables."""
-        try:
-            # Validate columns
-            if var1 not in df.columns or var2 not in df.columns:
-                return None
-            
-            # Get data with common indices
-            data1 = df[var1].dropna()
-            data2 = df[var2].dropna()
-            common_indices = data1.index.intersection(data2.index)
-            data1 = data1.loc[common_indices]
-            data2 = data2.loc[common_indices]
-            
-            # Minimum observations check
-            if len(data1) < 5:
-                self.logger.info(f"Insufficient observations for correlation between {var1} and {var2}")
-                return None
-            
-            # Run correlation test
-            corr, p_val = stats.pearsonr(data1, data2)
-            
-            result = {
-                'correlation': float(corr),
-                'p_value': float(p_val),
-                'n': int(len(data1))
-            }
-            
-            self.logger.info(
-                f"Correlation between {var1} and {var2}: "
-                f"r={corr:.2f}, p={p_val:.4f}, n={len(data1)}"
-            )
-            
-            return result
-                
-        except Exception as e:
-            self.logger.error(f"Error computing correlation between {var1} and {var2}: {str(e)}")
-            if self.debug:
-                import traceback
-                self.logger.error(traceback.format_exc())
-            
-            return None
-    
-    def _run_t_test_comparison(self, df, outcome_var, group_var):
-        """Run a t-test comparison between groups on an outcome variable."""
+    def _run_t_test_comparison_aggregated(self, df, outcome_var, group_var):
+        """Run a t-test comparison between groups on an outcome variable, aggregating by participant."""
         try:
             # Validate columns
             if outcome_var not in df.columns or group_var not in df.columns:
@@ -499,16 +326,28 @@ class PooledGroupAnalysis:
             # For more than 2 groups, use the first two
             if len(groups) > 2:
                 groups = groups[:2]
+                
+            # First aggregate the data by participant to account for repeated measurements
+            self.logger.info(f"Aggregating data by participant for {outcome_var} by {group_var}")
             
-            # Get data for each group
-            g1_data = df[df[group_var] == groups[0]][outcome_var].dropna()
-            g2_data = df[df[group_var] == groups[1]][outcome_var].dropna()
+            # Ensure participant_id is available
+            if 'participant_id' not in df.columns:
+                self.logger.error("participant_id column not found, cannot aggregate data")
+                return None
+                
+            # Aggregate data by participant and group
+            participant_means = df.groupby(['participant_id', group_var])[outcome_var].mean().reset_index()
+            
+            # Get data for each group at the participant level
+            g1_data = participant_means[participant_means[group_var] == groups[0]][outcome_var].dropna()
+            g2_data = participant_means[participant_means[group_var] == groups[1]][outcome_var].dropna()
             
             # Minimum observations check
             if len(g1_data) < 5 or len(g2_data) < 5:
+                self.logger.info(f"Insufficient participants for comparison between {groups[0]} and {groups[1]} groups")
                 return None
             
-            # Run t-test
+            # Run t-test on participant-level means
             t_stat, p_val = stats.ttest_ind(g1_data, g2_data, equal_var=False)
             
             # Calculate effect size (Cohen's d)
@@ -541,7 +380,7 @@ class PooledGroupAnalysis:
             }
             
             self.logger.info(
-                f"Compared {outcome_var} between {group_var} groups: "
+                f"Participant-level comparison of {outcome_var} between {group_var} groups: "
                 f"{groups[0]} (n={len(g1_data)}, mean={g1_mean:.2f}) vs "
                 f"{groups[1]} (n={len(g2_data)}, mean={g2_mean:.2f}), "
                 f"t={t_stat:.2f}, p={p_val:.4f}, d={cohen_d:.2f}"
@@ -558,7 +397,7 @@ class PooledGroupAnalysis:
             return None
     
     def save_results(self):
-        """Save results to separate Excel files for t-tests and correlations"""
+        """Save results to Excel file for t-tests"""
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         
         # Save t-test results
@@ -605,55 +444,6 @@ class PooledGroupAnalysis:
                     top_effects.to_excel(writer, sheet_name='Top Effects', index=False)
             
             self.logger.info(f"Saved {len(ttest_df)} t-test results to {ttest_path}")
-        
-        # Save correlation results
-        if self.correlation_results:
-            corr_df = pd.DataFrame(self.correlation_results)
-            
-            # Round numeric columns
-            numeric_cols = corr_df.select_dtypes(include=[np.number]).columns
-            corr_df[numeric_cols] = corr_df[numeric_cols].round(4)
-            
-            # Save to Excel
-            corr_path = self.output_dir / f'pooled_correlation_results_{timestamp}.xlsx'
-            
-            with pd.ExcelWriter(corr_path) as writer:
-                # All results
-                corr_df.to_excel(writer, sheet_name='All Correlations', index=False)
-                
-                # Filter by subsets
-                for subset in ['pooled'] + [s['name'] for s in self.subsets]:
-                    subset_data = corr_df[corr_df['subset'] == subset]
-                    if not subset_data.empty:
-                        sheet_name = f'{subset.capitalize()} Correlations'
-                        subset_data.to_excel(writer, sheet_name=sheet_name, index=False)
-                
-                # By variable category combinations
-                var_combinations = []
-                for var1_cat in sorted(corr_df['var1_category'].unique()):
-                    for var2_cat in sorted(corr_df['var2_category'].unique()):
-                        var_combinations.append((var1_cat, var2_cat))
-                
-                for var1_cat, var2_cat in var_combinations:
-                    cat_subset = corr_df[
-                        (corr_df['var1_category'] == var1_cat) & 
-                        (corr_df['var2_category'] == var2_cat)
-                    ]
-                    if not cat_subset.empty and len(cat_subset) > 1:
-                        sheet_name = f'{var1_cat[:4]}_{var2_cat[:4]}'
-                        cat_subset.to_excel(writer, sheet_name=sheet_name, index=False)
-                
-                # Significant results
-                sig_results = corr_df[corr_df['p_value'] < 0.05]
-                if not sig_results.empty:
-                    sig_results.to_excel(writer, sheet_name='Significant', index=False)
-                    
-                # Top correlations
-                top_corrs = corr_df.sort_values(by='correlation', key=abs, ascending=False).head(20)
-                if not top_corrs.empty:
-                    top_corrs.to_excel(writer, sheet_name='Top Correlations', index=False)
-            
-            self.logger.info(f"Saved {len(corr_df)} correlation results to {corr_path}")
         
         # Create a summary file
         self._create_summary_file(timestamp)
@@ -717,35 +507,6 @@ class PooledGroupAnalysis:
                             'Significant Count': '',
                             'Significant %': f"d={row['effect_size']:.2f}",
                             'Notes': f"{row['dv']} by {row['predictor']}, p={row['p_value']:.4f}"
-                        })
-            
-            # Correlation summary for this subset
-            if self.correlation_results:
-                corr_df = pd.DataFrame(self.correlation_results)
-                subset_corrs = corr_df[corr_df['subset'] == subset]
-                
-                if not subset_corrs.empty:
-                    total_corrs = len(subset_corrs)
-                    sig_corrs = len(subset_corrs[subset_corrs['p_value'] < 0.05])
-                    sig_percent = sig_corrs / total_corrs * 100 if total_corrs > 0 else 0
-                    
-                    summary_data.append({
-                        'Analysis Type': f'Correlations ({subset})',
-                        'Total Count': total_corrs,
-                        'Significant Count': sig_corrs,
-                        'Significant %': f"{sig_percent:.1f}%",
-                        'Notes': 'Continuous relationships'
-                    })
-                    
-                    # Top correlations for this subset
-                    top_corrs = subset_corrs.sort_values(by='correlation', key=abs, ascending=False).head(3)
-                    for i, row in top_corrs.iterrows():
-                        summary_data.append({
-                            'Analysis Type': f'Top {subset} correlation',
-                            'Total Count': '',
-                            'Significant Count': '',
-                            'Significant %': f"r={row['correlation']:.2f}",
-                            'Notes': f"{row['var1']} ~ {row['var2']}, p={row['p_value']:.4f}"
                         })
         
         # Create summary dataframe
