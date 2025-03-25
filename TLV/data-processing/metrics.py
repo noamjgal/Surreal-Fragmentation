@@ -139,7 +139,7 @@ class MetricsProcessor:
             # Check if episode_type column exists
             if 'episode_type' not in df.columns:
                 self.logger.warning("episode_type column not found in episode data")
-                return pd.DataFrame(columns=['user', 'date', 'home_duration'])
+                return pd.DataFrame(columns=['user', 'date', 'home_duration', 'out_of_home_duration'])
                 
             # Create a user-date index for grouping
             df['user_date'] = df['user'].astype(str) + '_' + df['date'].astype(str)
@@ -155,9 +155,21 @@ class MetricsProcessor:
                 home_df = user_date_df[user_date_df['episode_type'] == 'home']
                 home_duration = home_df['total_duration_minutes'].sum() if not home_df.empty else 0
                 
+                # Calculate total observed time from first and last timestamps
+                if not user_date_df.empty:
+                    first_timestamp = pd.to_datetime(user_date_df['first_timestamp'].iloc[0])
+                    last_timestamp = pd.to_datetime(user_date_df['last_timestamp'].iloc[0])
+                    total_observed_time = (last_timestamp - first_timestamp).total_seconds() / 60
+                    
+                    # Calculate out-of-home duration as total time minus home time
+                    out_of_home_duration = total_observed_time - home_duration
+                else:
+                    out_of_home_duration = 0
+                
                 # Store the results
                 location_durations[user_date] = {
                     'home_duration': home_duration,
+                    'out_of_home_duration': out_of_home_duration
                 }
             
             # Convert the dictionary to a DataFrame
@@ -178,7 +190,7 @@ class MetricsProcessor:
         except Exception as e:
             self.logger.error(f"Error calculating location durations: {str(e)}", exc_info=True)
             # Return empty DataFrame with necessary columns
-            return pd.DataFrame(columns=['user', 'date', 'home_duration'])
+            return pd.DataFrame(columns=['user', 'date', 'home_duration', 'out_of_home_duration'])
             
     def calculate_transport_durations(self, episode_df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -361,7 +373,7 @@ class MetricsProcessor:
             self.logger.info(f"After home duration merge: {len(merged_df)} rows")
             
             # Fill NaN values in duration columns with 0
-            duration_columns = ['active_transport_duration', 'mechanized_transport_duration', 'home_duration']
+            duration_columns = ['active_transport_duration', 'mechanized_transport_duration', 'home_duration', 'out_of_home_duration']
             for col in duration_columns:
                 if col in merged_df.columns:
                     missing_count = merged_df[col].isna().sum()
@@ -410,6 +422,7 @@ class MetricsProcessor:
                 'active_transport_duration',
                 'mechanized_transport_duration',
                 'home_duration',
+                'out_of_home_duration',
                 'STAI6_score'
             ]
             
@@ -437,6 +450,7 @@ class MetricsProcessor:
             self.logger.info(f"Transport metrics: active_transport_duration mean={merged_df['active_transport_duration'].mean():.2f}, " +
                            f"mechanized_transport_duration mean={merged_df['mechanized_transport_duration'].mean():.2f}")
             self.logger.info(f"Home duration mean={merged_df['home_duration'].mean():.2f} minutes")
+            self.logger.info(f"Out of home duration mean={merged_df['out_of_home_duration'].mean():.2f} minutes")
             
             # Log new metrics if available
             if 'digital_home_fragmentation_index' in merged_df.columns:
@@ -473,7 +487,8 @@ class MetricsProcessor:
         # Transport and location statistics
         stats['transport_location_duration'] = df[['active_transport_duration', 
                                                  'mechanized_transport_duration',
-                                                 'home_duration']].describe()
+                                                 'home_duration',
+                                                 'out_of_home_duration']].describe()
         
         # NEW: Add fragmentation metrics statistics
         fragmentation_cols = [col for col in df.columns if 'fragmentation' in col]
@@ -498,6 +513,7 @@ class MetricsProcessor:
         self.logger.info(f"Average active transport duration: {df['active_transport_duration'].mean():.2f} minutes")
         self.logger.info(f"Average mechanized transport duration: {df['mechanized_transport_duration'].mean():.2f} minutes")
         self.logger.info(f"Average home duration: {df['home_duration'].mean():.2f} minutes")
+        self.logger.info(f"Average out of home duration: {df['out_of_home_duration'].mean():.2f} minutes")
         
         # NEW: Log the new metrics
         if 'digital_home_fragmentation_index' in df.columns:
