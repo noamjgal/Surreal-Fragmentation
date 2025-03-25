@@ -144,86 +144,137 @@ class PooledSTAIAnalysis:
         self.logger.info(f"TLV data: {self.tlv_path}")
         self.logger.info(f"Output directory: {self.output_dir}")
 
-    def load_surreal_data(self):
-        """Load SURREAL data and extract relevant variables."""
-        if not self.surreal_path or not self.surreal_path.exists():
-            self.logger.warning("SURREAL data path not provided or file doesn't exist")
-            return None
+def load_surreal_data(self):
+    """Load SURREAL data and extract relevant variables."""
+    if not self.surreal_path or not self.surreal_path.exists():
+        self.logger.warning("SURREAL data path not provided or file doesn't exist")
+        return None
+        
+    try:
+        self.logger.info(f"Loading SURREAL data from {self.surreal_path}")
+        df = pd.read_csv(self.surreal_path)
+        self.logger.info(f"SURREAL data loaded with shape: {df.shape}")
+        
+        # Check for required columns
+        required_cols = [self.variable_mappings['surreal']['id'], 
+                        self.variable_mappings['surreal']['anxiety_raw']]
+        for col in required_cols:
+            if col not in df.columns:
+                self.logger.error(f"Required column '{col}' not found in SURREAL data")
+                return None
+        
+        # Extract participant ID
+        df['participant_id'] = df[self.variable_mappings['surreal']['id']].astype(str)
+        
+        # Extract and restandardize anxiety scores
+        anxiety_raw_col = self.variable_mappings['surreal']['anxiety_raw']
+        df[self.variable_mappings['standardized']['anxiety_raw']] = df[anxiety_raw_col]
+        
+        # Restandardize anxiety scores instead of using pre-standardized values
+        # This is necessary because filtering was done between previous standardization and now
+        self.logger.info("Restandardizing SURREAL anxiety scores")
+        if self.standardization_type == 'participant':
+            # Participant-level standardization
+            participant_groups = df.groupby('participant_id')[anxiety_raw_col]
+            std_scores = []
             
-        try:
-            self.logger.info(f"Loading SURREAL data from {self.surreal_path}")
-            df = pd.read_csv(self.surreal_path)
-            self.logger.info(f"SURREAL data loaded with shape: {df.shape}")
+            for participant_id, group in participant_groups:
+                if len(group) > 1 and group.std() > 0:
+                    # Standardize within participant
+                    std_scores.extend((group - group.mean()) / group.std())
+                else:
+                    # If only one data point, set z-score to 0
+                    std_scores.extend([0] * len(group))
             
-            # Check for required columns
-            required_cols = [self.variable_mappings['surreal']['id'], 
-                            self.variable_mappings['surreal']['anxiety']]
-            for col in required_cols:
-                if col not in df.columns:
-                    self.logger.error(f"Required column '{col}' not found in SURREAL data")
-                    return None
+            df[self.variable_mappings['standardized']['anxiety']] = std_scores
+        else:
+            # Population-level standardization
+            df[self.variable_mappings['standardized']['anxiety']] = stats.zscore(
+                df[anxiety_raw_col], nan_policy='omit'
+            )
+        
+        # Extract and restandardize depression score if available
+        if self.variable_mappings['surreal']['depression_raw'] in df.columns:
+            depression_raw_col = self.variable_mappings['surreal']['depression_raw']
+            df[self.variable_mappings['standardized']['mood_raw']] = df[depression_raw_col]
             
-            # Extract participant ID
-            df['participant_id'] = df[self.variable_mappings['surreal']['id']].astype(str)
-            
-            # Extract anxiety score (already z-standardized in SURREAL)
-            anxiety_col = self.variable_mappings['surreal']['anxiety']
-            anxiety_raw_col = self.variable_mappings['surreal']['anxiety_raw']
-            df[self.variable_mappings['standardized']['anxiety']] = df[anxiety_col]
-            df[self.variable_mappings['standardized']['anxiety_raw']] = df[anxiety_raw_col]
-            
-            # Extract depression score if available
-            if self.variable_mappings['surreal']['depression'] in df.columns:
-                depression_col = self.variable_mappings['surreal']['depression']
-                depression_raw_col = self.variable_mappings['surreal']['depression_raw']
-                df[self.variable_mappings['standardized']['mood']] = df[depression_col]
-                df[self.variable_mappings['standardized']['mood_raw']] = df[depression_raw_col]
-            
-            # Extract gender and standardize
-            if self.variable_mappings['surreal']['gender'] in df.columns:
-                gender_col = self.variable_mappings['surreal']['gender']
-                # Map gender to standardized format (female/male)
-                df[self.variable_mappings['standardized']['gender']] = df[gender_col].apply(
-                    lambda x: 'female' if x.strip().lower() in ['f', 'female', 'נקבה'] else 'male' 
-                    if x.strip().lower() in ['m', 'male', 'זכר'] else 'other'
+            # Restandardize depression scores instead of using pre-standardized values
+            self.logger.info("Restandardizing SURREAL depression scores")
+            if self.standardization_type == 'participant':
+                # Participant-level standardization
+                participant_groups = df.groupby('participant_id')[depression_raw_col]
+                std_scores = []
+                
+                for participant_id, group in participant_groups:
+                    if len(group) > 1 and group.std() > 0:
+                        # Standardize within participant
+                        std_scores.extend((group - group.mean()) / group.std())
+                    else:
+                        # If only one data point, set z-score to 0
+                        std_scores.extend([0] * len(group))
+                
+                df[self.variable_mappings['standardized']['mood']] = std_scores
+            else:
+                # Population-level standardization
+                df[self.variable_mappings['standardized']['mood']] = stats.zscore(
+                    df[depression_raw_col], nan_policy='omit'
                 )
-            
-            # Extract location type and standardize
-            if self.variable_mappings['surreal']['location'] in df.columns:
-                location_col = self.variable_mappings['surreal']['location']
-                # Map location to standardized format (city_center/suburb)
-                df[self.variable_mappings['standardized']['location']] = df[location_col].apply(
-                    lambda x: 'city_center' if x == 'Yes' else 'suburb'
-                )
-            
-            # Add age group (all SURREAL participants are adults)
-            df[self.variable_mappings['standardized']['age_group']] = 'adult'
-            
-            # Extract fragmentation metrics if available
-            for frag_type, col_name in self.variable_mappings['surreal']['fragmentation'].items():
-                if col_name in df.columns:
-                    std_col = self.variable_mappings['standardized']['fragmentation'][frag_type]
-                    df[std_col] = df[col_name]
-            
-            # Extract duration metrics if available
-            for duration_type, col_name in self.variable_mappings['surreal']['duration'].items():
-                if col_name in df.columns:
-                    std_col = self.variable_mappings['standardized']['duration'][duration_type]
-                    df[std_col] = df[col_name]
-            
-            # Add dataset source identifier
-            df[self.variable_mappings['standardized']['dataset']] = 'surreal'
-            
-            # Log statistics
-            self._log_data_stats(df, 'SURREAL')
-            
-            return df
-            
-        except Exception as e:
-            self.logger.error(f"Error loading SURREAL data: {str(e)}")
-            if self.debug:
-                self.logger.exception("Detailed error:")
-            return None
+        
+        # Extract gender and standardize
+        if self.variable_mappings['surreal']['gender'] in df.columns:
+            gender_col = self.variable_mappings['surreal']['gender']
+            # Map gender to standardized format (female/male)
+            df[self.variable_mappings['standardized']['gender']] = df[gender_col].apply(
+                lambda x: 'female' if x.strip().lower() in ['f', 'female', 'נקבה'] else 'male' 
+                if x.strip().lower() in ['m', 'male', 'זכר'] else 'other'
+            )
+        
+        # Extract location type and standardize
+        if self.variable_mappings['surreal']['location'] in df.columns:
+            location_col = self.variable_mappings['surreal']['location']
+            # Map location to standardized format (city_center/suburb)
+            df[self.variable_mappings['standardized']['location']] = df[location_col].apply(
+                lambda x: 'city_center' if x == 'Yes' else 'suburb'
+            )
+        
+        # Add age group (all SURREAL participants are adults)
+        df[self.variable_mappings['standardized']['age_group']] = 'adult'
+        
+        # Extract fragmentation metrics if available
+        for frag_type, col_name in self.variable_mappings['surreal']['fragmentation'].items():
+            if col_name in df.columns:
+                std_col = self.variable_mappings['standardized']['fragmentation'][frag_type]
+                df[std_col] = df[col_name]
+        
+        # Extract duration metrics if available
+        for duration_type, col_name in self.variable_mappings['surreal']['duration'].items():
+            if col_name in df.columns:
+                std_col = self.variable_mappings['standardized']['duration'][duration_type]
+                df[std_col] = df[col_name]
+        
+        # Add dataset source identifier
+        df[self.variable_mappings['standardized']['dataset']] = 'surreal'
+        
+        # Verify standardization worked correctly
+        std_anxiety_mean = df[self.variable_mappings['standardized']['anxiety']].mean()
+        std_anxiety_std = df[self.variable_mappings['standardized']['anxiety']].std()
+        self.logger.info(f"Restandardized SURREAL anxiety: mean={std_anxiety_mean:.4f}, std={std_anxiety_std:.4f}")
+        
+        if self.variable_mappings['standardized']['mood'] in df.columns:
+            std_mood_mean = df[self.variable_mappings['standardized']['mood']].mean()
+            std_mood_std = df[self.variable_mappings['standardized']['mood']].std()
+            self.logger.info(f"Restandardized SURREAL mood: mean={std_mood_mean:.4f}, std={std_mood_std:.4f}")
+        
+        # Log statistics
+        self._log_data_stats(df, 'SURREAL')
+        
+        return df
+        
+    except Exception as e:
+        self.logger.error(f"Error loading SURREAL data: {str(e)}")
+        if self.debug:
+            self.logger.exception("Detailed error:")
+        return None
 
     def load_tlv_data(self):
         """Load TLV data and extract relevant variables."""
