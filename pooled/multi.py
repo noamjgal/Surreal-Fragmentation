@@ -60,7 +60,15 @@ class ImprovedMultilevelAnalysis:
         self.control_variables = {
             'age': 'age_group',
             'gender': 'gender_standardized',
-            'location': 'location_type'
+            'location': 'location_type',
+            'digital_duration': 'digital_total_duration',
+            'mobility_duration': 'mobility_total_duration',
+            'overlap_duration': 'overlap_total_duration',
+            'digital_home_duration': 'digital_home_total_duration',
+            'active_transport_duration': 'active_transport_duration',
+            'mechanized_transport_duration': 'mechanized_transport_duration',
+            'home_duration': 'home_duration',
+            'out_of_home_duration': 'out_of_home_duration'
         }
         
         # Define subset variables for interaction testing (removed dataset since it's identical to age)
@@ -241,10 +249,14 @@ class ImprovedMultilevelAnalysis:
         # Add control variables if requested
         control_terms = []
         if with_controls:
-            for control_var in self.control_variables.values():
-                model_vars.append(control_var)
-                # Add control variable to formula
-                control_terms.append(control_var)
+            for control_name, control_var in self.control_variables.items():
+                if control_var in df.columns:  # Only add if the control variable exists
+                    model_vars.append(control_var)
+                    # Add control variable to formula
+                    control_terms.append(control_var)
+                    self.logger.info(f"Adding control variable: {control_var}")
+                else:
+                    self.logger.warning(f"Control variable {control_var} not found in data, skipping")
         
         model_data = df[model_vars].dropna()
         
@@ -359,6 +371,34 @@ class ImprovedMultilevelAnalysis:
             else:
                 icc = np.nan
             
+            # Calculate AIC and BIC manually if necessary
+            aic = result.aic
+            bic = result.bic
+            
+            # If AIC/BIC are NaN, calculate them manually
+            if np.isnan(aic) or np.isnan(bic):
+                n = len(model_data)  # Sample size
+                k = len(params)  # Number of parameters
+                llf = result.llf  # Log-likelihood
+                
+                if not np.isnan(llf):
+                    # Calculate AIC and BIC
+                    aic = 2 * k - 2 * llf
+                    bic = k * np.log(n) - 2 * llf
+                    self.logger.info(f"Calculated AIC/BIC manually: AIC={aic:.2f}, BIC={bic:.2f}")
+                else:
+                    # If log-likelihood is NaN, try to calculate from deviance
+                    try:
+                        deviance = result.deviance
+                        if not np.isnan(deviance):
+                            # For normal distribution, deviance = -2 * log-likelihood
+                            llf = -deviance / 2
+                            aic = 2 * k - 2 * llf
+                            bic = k * np.log(n) - 2 * llf
+                            self.logger.info(f"Calculated AIC/BIC from deviance: AIC={aic:.2f}, BIC={bic:.2f}")
+                    except:
+                        self.logger.warning("Could not calculate AIC/BIC - both log-likelihood and deviance are NaN")
+            
             # Create results dictionary
             model_results = {
                 'outcome': outcome_var,
@@ -379,10 +419,11 @@ class ImprovedMultilevelAnalysis:
                 'var_intercept': var_intercept,
                 'var_residual': var_residual,
                 'icc': icc,
-                'aic': result.aic,
-                'bic': result.bic,
+                'aic': aic,
+                'bic': bic,
                 'log_likelihood': result.llf,
-                'method': method
+                'method': method,
+                'formula': model_formula  # Add formula to results for reference
             }
             
             # Add control effects if included
@@ -393,7 +434,7 @@ class ImprovedMultilevelAnalysis:
             self.logger.info(f"Model results for {outcome_var} ~ {predictor} ({model_type}):")
             self.logger.info(f"  Within-person effect: {within_coef:.4f}, p={within_pval:.4f} {within_sig}")
             self.logger.info(f"  Between-person effect: {between_coef:.4f}, p={between_pval:.4f} {between_sig}")
-            self.logger.info(f"  ICC: {icc:.4f}, AIC: {result.aic:.1f}")
+            self.logger.info(f"  ICC: {icc:.4f}, AIC: {aic:.1f}")
             
             return model_results
             
@@ -612,22 +653,26 @@ class ImprovedMultilevelAnalysis:
         
         # Results container for each subgroup
         subgroup_results = {}
+        skipped_subgroups = []
         
         # Run separate models for each subgroup
         for value in moderator_values:
             # Filter data for this subgroup
             subgroup_data = df[df[moderator_var] == value]
             
-            if len(subgroup_data) < 20 or subgroup_data['participant_id'].nunique() < 5:
-                self.logger.warning(f"Subgroup {moderator_var}={value} has insufficient data")
+            # Lower threshold to 10 observations and 3 participants (previously 20 and 5)
+            if len(subgroup_data) < 10 or subgroup_data['participant_id'].nunique() < 3:
+                self.logger.warning(f"Subgroup {moderator_var}={value} has insufficient data (n={len(subgroup_data)}, participants={subgroup_data['participant_id'].nunique()})")
+                skipped_subgroups.append(str(value))
                 continue
                 
             # Build dataset for analysis (handle missing values)
             model_vars = [outcome_var, within_pred, between_pred, 'participant_id']
             model_data = subgroup_data[model_vars].dropna()
             
-            if len(model_data) < 20:
-                self.logger.warning(f"Not enough valid data for {outcome_var} ~ {predictor} in subgroup {moderator_var}={value}")
+            if len(model_data) < 10:  # Also lower this threshold
+                self.logger.warning(f"Not enough valid data for {outcome_var} ~ {predictor} in subgroup {moderator_var}={value} (n={len(model_data)})")
+                skipped_subgroups.append(str(value))
                 continue
                 
             try:
@@ -683,6 +728,34 @@ class ImprovedMultilevelAnalysis:
                 else:
                     between_ci_low = between_ci_high = np.nan
                 
+                # Calculate AIC and BIC manually if necessary
+                aic = result.aic
+                bic = result.bic
+                
+                # If AIC/BIC are NaN, calculate them manually
+                if np.isnan(aic) or np.isnan(bic):
+                    n = len(model_data)  # Sample size
+                    k = len(params)  # Number of parameters
+                    llf = result.llf  # Log-likelihood
+                    
+                    if not np.isnan(llf):
+                        # Calculate AIC and BIC
+                        aic = 2 * k - 2 * llf
+                        bic = k * np.log(n) - 2 * llf
+                        self.logger.info(f"Calculated AIC/BIC manually: AIC={aic:.2f}, BIC={bic:.2f}")
+                    else:
+                        # If log-likelihood is NaN, try to calculate from deviance
+                        try:
+                            deviance = result.deviance
+                            if not np.isnan(deviance):
+                                # For normal distribution, deviance = -2 * log-likelihood
+                                llf = -deviance / 2
+                                aic = 2 * k - 2 * llf
+                                bic = k * np.log(n) - 2 * llf
+                                self.logger.info(f"Calculated AIC/BIC from deviance: AIC={aic:.2f}, BIC={bic:.2f}")
+                        except:
+                            self.logger.warning("Could not calculate AIC/BIC - both log-likelihood and deviance are NaN")
+                
                 # Create results dictionary for this subgroup
                 group_results = {
                     'outcome': outcome_var,
@@ -702,9 +775,10 @@ class ImprovedMultilevelAnalysis:
                     'between_sig': between_sig,
                     'between_ci_low': between_ci_low,
                     'between_ci_high': between_ci_high,
-                    'aic': result.aic,
-                    'bic': result.bic,
-                    'method': method
+                    'aic': aic,
+                    'bic': bic,
+                    'method': method,
+                    'formula': model_formula
                 }
                 
                 # Log key results
@@ -716,7 +790,12 @@ class ImprovedMultilevelAnalysis:
                 
             except Exception as e:
                 self.logger.error(f"Error in subgroup model {outcome_var} ~ {predictor} for {moderator_var}={value}: {str(e)}")
+                skipped_subgroups.append(str(value))
                 continue
+        
+        # Log summary of skipped subgroups
+        if skipped_subgroups:
+            self.logger.warning(f"Skipped subgroups for {outcome_var} ~ {predictor} by {moderator_var}: {', '.join(skipped_subgroups)}")
         
         # Compare coefficients across subgroups if we have multiple valid models
         if len(subgroup_results) >= 2:
@@ -777,6 +856,10 @@ class ImprovedMultilevelAnalysis:
             
             if subgroup_comparisons:
                 subgroup_results['comparisons'] = subgroup_comparisons
+        elif len(subgroup_results) == 1:
+            self.logger.warning(f"Only one subgroup ({list(subgroup_results.keys())[0]}) had sufficient data for {outcome_var} ~ {predictor} by {moderator_var}")
+        elif len(subgroup_results) == 0:
+            self.logger.warning(f"No subgroups had sufficient data for {outcome_var} ~ {predictor} by {moderator_var}")
         
         return subgroup_results if subgroup_results else None
     
@@ -1079,7 +1162,8 @@ class ImprovedMultilevelAnalysis:
                         'Participants': model_result.get('n_participants', 0),
                         'ICC': model_result.get('icc', np.nan),
                         'AIC': model_result.get('aic', np.nan),
-                        'BIC': model_result.get('bic', np.nan)
+                        'BIC': model_result.get('bic', np.nan),
+                        'Formula': model_result.get('formula', '')  # Add model formula to output
                     })
             
             # Process models with demographic controls
@@ -1111,7 +1195,8 @@ class ImprovedMultilevelAnalysis:
                         'Participants': model_result.get('n_participants', 0),
                         'ICC': model_result.get('icc', np.nan),
                         'AIC': model_result.get('aic', np.nan),
-                        'BIC': model_result.get('bic', np.nan)
+                        'BIC': model_result.get('bic', np.nan),
+                        'Formula': model_result.get('formula', '')  # Add model formula to output
                     })
                     
                     # Extract control variable effects if present
@@ -1141,13 +1226,15 @@ class ImprovedMultilevelAnalysis:
                                     'Outcome': outcome_var,
                                     'Predictor': predictor,
                                     'Control Variable': control_name,
+                                    'Parameter': param_name,  # Add full parameter name
                                     'Level': level,
                                     'Coefficient': coefficient,
                                     'P-value': p_value,
                                     'Significance': significance,
                                     'CI': ci_str,
                                     'CI Low': ci_low,
-                                    'CI High': ci_high
+                                    'CI High': ci_high,
+                                    'Formula': model_result.get('formula', '')  # Add model formula to output
                                 })
             
             # Process cross-fragmentation models
