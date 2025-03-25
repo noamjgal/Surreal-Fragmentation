@@ -85,8 +85,8 @@ class PooledSTAIAnalysis:
                 'location': 'School',  # Assuming 'suburb' or other values
                 'fragmentation': {
                     'digital': 'digital_fragmentation_index',
-                    'mobility': 'moving_fragmentation_index',
-                    'overlap': 'digital_frag_during_mobility',
+                    'mobility': 'mobility_fragmentation_index',
+                    'overlap': 'overlap_fragmentation_index',
                     'digital_home': 'digital_home_fragmentation_index',
                     'digital_home_mobility_delta': 'digital_home_mobility_delta'
                 },
@@ -98,6 +98,11 @@ class PooledSTAIAnalysis:
                     'active_transport': 'active_transport_total_duration_minutes',
                     'mechanized_transport': 'mechanized_transport_total_duration_minutes',
                     'home': 'home_total_duration_minutes'
+                },
+                'demographics': {
+                    'gender': 'Gender',
+                    'location': 'School',
+                    'class': 'Class'
                 }
             },
             'standardized': {
@@ -110,6 +115,8 @@ class PooledSTAIAnalysis:
                 'gender': 'gender_standardized',
                 'location': 'location_type',  # city_center or suburb
                 'age_group': 'age_group',  # adult or adolescent
+                'age': 'age',  # Added age field
+                'class': 'class',  # Added class field for TLV
                 'fragmentation': {
                     'digital': 'digital_fragmentation',
                     'mobility': 'mobility_fragmentation',
@@ -298,6 +305,11 @@ class PooledSTAIAnalysis:
             df = pd.read_csv(self.tlv_path)
             self.logger.info(f"TLV data loaded with shape: {df.shape}")
             
+            # Print available columns for debugging
+            self.logger.info("Available TLV columns:")
+            for col in df.columns:
+                self.logger.info(f"  {col}")
+            
             # Check for required columns
             required_cols = [self.variable_mappings['tlv']['id'], 
                             self.variable_mappings['tlv']['anxiety']]
@@ -335,7 +347,6 @@ class PooledSTAIAnalysis:
                 )
             
             # Extract happiness score if available and invert it for mood comparison
-            # (higher happiness = lower depression, so we invert for consistency)
             if self.variable_mappings['tlv']['happiness'] in df.columns:
                 happiness_col = self.variable_mappings['tlv']['happiness']
                 # Store raw happiness score
@@ -382,17 +393,27 @@ class PooledSTAIAnalysis:
             # Add age group (all TLV participants are adolescents)
             df[self.variable_mappings['standardized']['age_group']] = 'adolescent'
             
+            # Extract class information if available
+            if 'Class' in df.columns:
+                df[self.variable_mappings['standardized']['class']] = df['Class']
+            
             # Extract fragmentation metrics if available
             for frag_type, col_name in self.variable_mappings['tlv']['fragmentation'].items():
                 if col_name in df.columns:
                     std_col = self.variable_mappings['standardized']['fragmentation'][frag_type]
                     df[std_col] = df[col_name]
+                    self.logger.info(f"Extracted {frag_type} fragmentation from {col_name}")
+                else:
+                    self.logger.warning(f"Missing fragmentation column: {col_name}")
             
             # Extract duration metrics if available
             for duration_type, col_name in self.variable_mappings['tlv']['duration'].items():
                 if col_name in df.columns:
                     std_col = self.variable_mappings['standardized']['duration'][duration_type]
                     df[std_col] = df[col_name]
+                    self.logger.info(f"Extracted {duration_type} duration from {col_name}")
+                else:
+                    self.logger.warning(f"Missing duration column: {col_name}")
                     
                     # Set missing out_of_home duration to NaN since it's not available in TLV
                     if duration_type == 'out_of_home':
