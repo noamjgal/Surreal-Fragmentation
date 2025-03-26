@@ -34,11 +34,11 @@ class PooledSTAIAnalysis:
         # Hardcoded paths to data files - will be adjusted based on standardization type
         
         if self.standardization_type == 'population':
-            self.surreal_path = Path('pooled/data/ema_fragmentation_demographics_population.csv')
+            self.surreal_path = Path('data/ema_fragmentation_demographics_population.csv')
         else:  # participant level
-            self.surreal_path = Path('pooled/data/ema_fragmentation_demographics_participant.csv')
+            self.surreal_path = Path('data/ema_fragmentation_demographics_participant.csv')
             
-        self.tlv_path = Path('pooled/data/combined_metrics.csv')
+        self.tlv_path = Path('data/combined_metrics.csv')
         
         # Set output directory relative to script location
         script_dir = Path(__file__).parent
@@ -59,6 +59,7 @@ class PooledSTAIAnalysis:
                 'depression_raw': 'ema_CES-D-8_raw',
                 'gender': 'Gender',
                 'location': 'City.center',  # Yes = city center, No = suburb
+                'date': 'date',  # Column containing date information
                 'fragmentation': {
                     'digital': 'frag_digital_fragmentation_index',
                     'mobility': 'frag_mobility_fragmentation_index',
@@ -83,6 +84,7 @@ class PooledSTAIAnalysis:
                 'happiness': 'HAPPY',
                 'gender': 'Gender',
                 'location': 'School',  # Assuming 'suburb' or other values
+                'date': 'associated_data_date',  # Column containing date information 
                 'fragmentation': {
                     'digital': 'digital_fragmentation_index',
                     'mobility': 'mobility_fragmentation_index',
@@ -117,6 +119,7 @@ class PooledSTAIAnalysis:
                 'age_group': 'age_group',  # adult or adolescent
                 'age': 'age',  # Added age field
                 'class': 'class',  # Added class field for TLV
+                'is_weekend': 'is_weekend',  # Added weekend status field
                 'fragmentation': {
                     'digital': 'digital_fragmentation',
                     'mobility': 'mobility_fragmentation',
@@ -258,6 +261,27 @@ class PooledSTAIAnalysis:
             # Add age group (all SURREAL participants are adults)
             df[self.variable_mappings['standardized']['age_group']] = 'adult'
             
+            # Add weekend status if date column is available
+            if self.variable_mappings['surreal']['date'] in df.columns:
+                date_col = self.variable_mappings['surreal']['date']
+                try:
+                    # Convert to datetime if not already
+                    if not pd.api.types.is_datetime64_any_dtype(df[date_col]):
+                        df['date_parsed'] = pd.to_datetime(df[date_col], errors='coerce')
+                    else:
+                        df['date_parsed'] = df[date_col]
+                    
+                    # Extract day of week and determine weekend status (4=Friday, 5=Saturday)
+                    df[self.variable_mappings['standardized']['is_weekend']] = df['date_parsed'].dt.dayofweek.isin([4, 5]).astype(int)
+                    self.logger.info(f"Added weekend status based on {date_col}")
+                    self.logger.info(f"Weekend observations: {df[self.variable_mappings['standardized']['is_weekend']].sum()} ({df[self.variable_mappings['standardized']['is_weekend']].mean():.1%})")
+                except Exception as e:
+                    self.logger.warning(f"Could not derive weekend status from {date_col}: {str(e)}")
+                    df[self.variable_mappings['standardized']['is_weekend']] = np.nan
+            else:
+                self.logger.warning(f"Date column {self.variable_mappings['surreal']['date']} not found, cannot determine weekend status")
+                df[self.variable_mappings['standardized']['is_weekend']] = np.nan
+            
             # Extract fragmentation metrics if available
             for frag_type, col_name in self.variable_mappings['surreal']['fragmentation'].items():
                 if col_name in df.columns:
@@ -393,6 +417,42 @@ class PooledSTAIAnalysis:
             # Add age group (all TLV participants are adolescents)
             df[self.variable_mappings['standardized']['age_group']] = 'adolescent'
             
+            # Add weekend status if date column is available
+            if self.variable_mappings['tlv']['date'] in df.columns:
+                date_col = self.variable_mappings['tlv']['date']
+                try:
+                    # Convert to datetime if not already
+                    if not pd.api.types.is_datetime64_any_dtype(df[date_col]):
+                        df['date_parsed'] = pd.to_datetime(df[date_col], errors='coerce')
+                    else:
+                        df['date_parsed'] = df[date_col]
+                    
+                    # Extract day of week and determine weekend status (4=Friday, 5=Saturday)
+                    df[self.variable_mappings['standardized']['is_weekend']] = df['date_parsed'].dt.dayofweek.isin([4, 5]).astype(int)
+                    self.logger.info(f"Added weekend status based on {date_col}")
+                    self.logger.info(f"Weekend observations: {df[self.variable_mappings['standardized']['is_weekend']].sum()} ({df[self.variable_mappings['standardized']['is_weekend']].mean():.1%})")
+                    
+                    # If 'is_weekend' column already exists in the original data, check for consistency
+                    if 'is_weekend' in df.columns:
+                        matches = (df['is_weekend'] == df[self.variable_mappings['standardized']['is_weekend']]).mean()
+                        self.logger.info(f"Consistency check with existing 'is_weekend' column: {matches:.1%} match")
+                except Exception as e:
+                    self.logger.warning(f"Could not derive weekend status from {date_col}: {str(e)}")
+                    
+                    # If 'is_weekend' already exists in the dataset, use that instead
+                    if 'is_weekend' in df.columns:
+                        self.logger.info("Using existing 'is_weekend' column from dataset")
+                        df[self.variable_mappings['standardized']['is_weekend']] = df['is_weekend']
+                    else:
+                        df[self.variable_mappings['standardized']['is_weekend']] = np.nan
+            elif 'is_weekend' in df.columns:
+                # If no date column but is_weekend exists, use the existing column
+                self.logger.info("No date column found, using existing 'is_weekend' column")
+                df[self.variable_mappings['standardized']['is_weekend']] = df['is_weekend']
+            else:
+                self.logger.warning(f"Date column {self.variable_mappings['tlv']['date']} not found, cannot determine weekend status")
+                df[self.variable_mappings['standardized']['is_weekend']] = np.nan
+            
             # Extract class information if available
             if 'Class' in df.columns:
                 df[self.variable_mappings['standardized']['class']] = df['Class']
@@ -443,6 +503,8 @@ class PooledSTAIAnalysis:
         std_mood_raw = self.variable_mappings['standardized']['mood_raw']
         std_gender = self.variable_mappings['standardized']['gender']
         std_location = self.variable_mappings['standardized']['location']
+        std_age_group = self.variable_mappings['standardized']['age_group']
+        std_is_weekend = self.variable_mappings['standardized']['is_weekend']
         
         # Count participants and observations
         n_participants = df[std_id].nunique()
@@ -556,7 +618,8 @@ class PooledSTAIAnalysis:
                 self.variable_mappings['standardized']['mood_raw'],
                 self.variable_mappings['standardized']['gender'],
                 self.variable_mappings['standardized']['location'],
-                self.variable_mappings['standardized']['age_group']
+                self.variable_mappings['standardized']['age_group'],
+                self.variable_mappings['standardized']['is_weekend']
             ]
             
             # Add fragmentation columns if available
@@ -648,6 +711,7 @@ class PooledSTAIAnalysis:
             std_gender = self.variable_mappings['standardized']['gender']
             std_location = self.variable_mappings['standardized']['location']
             std_age_group = self.variable_mappings['standardized']['age_group']
+            std_is_weekend = self.variable_mappings['standardized']['is_weekend']
             std_dataset = self.variable_mappings['standardized']['dataset']
             
             # Get duration column names
@@ -814,7 +878,8 @@ class PooledSTAIAnalysis:
             std_mood = self.variable_mappings['standardized']['mood']
             std_gender = self.variable_mappings['standardized']['gender']
             std_location = self.variable_mappings['standardized']['location']
-            std_age = self.variable_mappings['standardized']['age_group']
+            std_age_group = self.variable_mappings['standardized']['age_group']
+            std_is_weekend = self.variable_mappings['standardized']['is_weekend']
             
             self.logger.info("="*50)
             self.logger.info("POOLED DATASET SUMMARY")
@@ -867,7 +932,7 @@ class PooledSTAIAnalysis:
             
             # Age group distribution
             self.logger.info("\nAGE GROUP DISTRIBUTION:")
-            age_groups = self.pooled_data[std_age].value_counts()
+            age_groups = self.pooled_data[std_age_group].value_counts()
             for age, count in age_groups.items():
                 age_pct = 100 * count / total_obs
                 self.logger.info(f"  {age.upper()}: {count} obs ({age_pct:.1f}%)")
@@ -936,6 +1001,28 @@ class PooledSTAIAnalysis:
                 mood_mean = ds_data[std_mood].mean()
                 mood_std = ds_data[std_mood].std()
                 self.logger.info(f"  {dataset.upper()}: mean={mood_mean:.3f}, sd={mood_std:.3f}")
+            
+            self.logger.info("\nWEEKEND STATUS DISTRIBUTION:")
+            if self.variable_mappings['standardized']['is_weekend'] in self.pooled_data.columns:
+                weekend_counts = self.pooled_data[self.variable_mappings['standardized']['is_weekend']].value_counts()
+                for status, count in weekend_counts.items():
+                    status_label = "Weekend" if status == 1 else "Weekday"
+                    status_pct = 100 * count / total_obs
+                    self.logger.info(f"  {status_label}: {count} obs ({status_pct:.1f}%)")
+                
+                # Weekend distribution by dataset
+                self.logger.info("\nWEEKEND STATUS BY DATASET:")
+                for dataset in datasets:
+                    ds_data = self.pooled_data[self.pooled_data[std_dataset] == dataset]
+                    if len(ds_data) > 0 and not ds_data[self.variable_mappings['standardized']['is_weekend']].isna().all():
+                        weekend_count = ds_data[self.variable_mappings['standardized']['is_weekend']].sum()
+                        weekday_count = len(ds_data) - weekend_count
+                        weekend_pct = 100 * weekend_count / len(ds_data) if len(ds_data) > 0 else 0
+                        self.logger.info(f"  {dataset.upper()}:")
+                        self.logger.info(f"    Weekend: {weekend_count} obs ({weekend_pct:.1f}%)")
+                        self.logger.info(f"    Weekday: {weekday_count} obs ({100-weekend_pct:.1f}%)")
+            else:
+                self.logger.info("  No weekend status data available")
             
             self.logger.info("\nOutput file: " + str(self.output_dir / f"pooled_stai_data_{self.standardization_type}.csv"))
             self.logger.info("="*50)
