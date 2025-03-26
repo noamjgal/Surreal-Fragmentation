@@ -17,6 +17,84 @@ import logging
 from datetime import datetime
 import warnings
 
+# Add function to calculate R-squared for multilevel models
+def calculate_r_squared(model, y_true):
+    """Calculate R² for multilevel models.
+    
+    Calculates two types of R²:
+    1. Marginal R² - variance explained by fixed effects
+    2. Conditional R² - variance explained by fixed and random effects together
+    
+    Args:
+        model: Fitted statsmodels MixedLM model
+        y_true: True outcome values
+        
+    Returns:
+        dict: Dictionary with marginal and conditional R² values
+    """
+    try:
+        # Get fixed effects predictions using the model's predict method
+        # This is more reliable than trying to access exog directly
+        y_pred = model.predict()
+        fixed_effects_var = np.var(y_pred)
+        
+        # Get residual variance
+        var_residual = model.scale
+        
+        # Get random effects variance (intercept variance)
+        # Handle different types of cov_re objects
+        try:
+            if hasattr(model.cov_re, 'iloc'):
+                var_random = float(model.cov_re.iloc[0, 0])
+            elif hasattr(model.cov_re, 'item'):
+                var_random = float(model.cov_re.item())
+            elif isinstance(model.cov_re, np.ndarray):
+                var_random = float(model.cov_re.flat[0])
+            else:
+                var_random = float(model.cov_re)
+        except (AttributeError, IndexError, ValueError):
+            var_random = 0.0
+            
+        # Ensure variances are valid positive numbers
+        fixed_effects_var = max(0.0, fixed_effects_var)
+        var_residual = max(0.0, var_residual)
+        var_random = max(0.0, var_random)
+        
+        # Total variance
+        var_total = fixed_effects_var + var_random + var_residual
+        
+        # Calculate R-squared values with safety checks
+        if var_total > 0:
+            r2_marginal = fixed_effects_var / var_total
+            r2_conditional = (fixed_effects_var + var_random) / var_total
+        else:
+            # If total variance is zero, fall back to traditional R² calculation
+            residuals = y_true - y_pred
+            total_ss = np.sum((y_true - np.mean(y_true))**2)
+            residual_ss = np.sum(residuals**2)
+            
+            if total_ss > 0:
+                r2_marginal = 1 - (residual_ss / total_ss)
+                r2_conditional = r2_marginal  # In this fallback, we can't distinguish
+            else:
+                r2_marginal = 0.0
+                r2_conditional = 0.0
+        
+        # Ensure R² values are in valid range [0,1]
+        r2_marginal = max(0.0, min(1.0, r2_marginal))
+        r2_conditional = max(0.0, min(1.0, r2_conditional))
+        
+        return {
+            'r2_marginal': r2_marginal,
+            'r2_conditional': r2_conditional
+        }
+    except Exception as e:
+        logging.warning(f"Error calculating R-squared: {str(e)}")
+        return {
+            'r2_marginal': 0.0,
+            'r2_conditional': 0.0
+        }
+
 class ImprovedMultilevelAnalysis:
     def __init__(self, output_dir=None, debug=False, data_path=None):
         """Initialize the multilevel analysis.
@@ -347,21 +425,19 @@ class ImprovedMultilevelAnalysis:
                         }
             
             # Safely extract random effects variance components
-            random_effects = result.cov_re
-            if isinstance(random_effects, np.ndarray):
-                var_intercept = float(random_effects[0])
-            elif isinstance(random_effects, pd.DataFrame):
-                var_intercept = float(random_effects.iloc[0, 0])
-            elif hasattr(random_effects, 'iloc'):
-                var_intercept = float(random_effects.iloc[0])
-            elif hasattr(random_effects, 'item'):  
-                var_intercept = float(random_effects.item())
-            else:
-                try:
+            try:
+                random_effects = result.cov_re
+                if hasattr(random_effects, 'iloc'):
+                    var_intercept = float(random_effects.iloc[0, 0])
+                elif hasattr(random_effects, 'item'):
+                    var_intercept = float(random_effects.item())
+                elif isinstance(random_effects, np.ndarray):
+                    var_intercept = float(random_effects.flat[0])
+                else:
                     var_intercept = float(random_effects)
-                except:
-                    var_intercept = np.nan
-                    self.logger.warning(f"Could not extract random intercept variance, setting to NaN")
+            except (AttributeError, IndexError, ValueError):
+                var_intercept = 0.0
+                self.logger.warning(f"Could not extract random intercept variance, setting to 0")
             
             var_residual = float(result.scale)
             
@@ -369,7 +445,12 @@ class ImprovedMultilevelAnalysis:
             if var_intercept > 0 and var_residual > 0:
                 icc = var_intercept / (var_intercept + var_residual)
             else:
-                icc = np.nan
+                icc = 0.0
+                
+            # Calculate R-squared values
+            r_squared = calculate_r_squared(result, model_data[outcome_var])
+            r2_marginal = r_squared['r2_marginal']
+            r2_conditional = r_squared['r2_conditional']
             
             # Calculate AIC and BIC manually if necessary
             aic = result.aic
@@ -419,6 +500,8 @@ class ImprovedMultilevelAnalysis:
                 'var_intercept': var_intercept,
                 'var_residual': var_residual,
                 'icc': icc,
+                'r2_marginal': r2_marginal,  # Add R² values
+                'r2_conditional': r2_conditional,
                 'aic': aic,
                 'bic': bic,
                 'log_likelihood': result.llf,
@@ -434,7 +517,8 @@ class ImprovedMultilevelAnalysis:
             self.logger.info(f"Model results for {outcome_var} ~ {predictor} ({model_type}):")
             self.logger.info(f"  Within-person effect: {within_coef:.4f}, p={within_pval:.4f} {within_sig}")
             self.logger.info(f"  Between-person effect: {between_coef:.4f}, p={between_pval:.4f} {between_sig}")
-            self.logger.info(f"  ICC: {icc:.4f}, AIC: {aic:.1f}")
+            self.logger.info(f"  ICC: {icc:.4f}, R² marginal: {r2_marginal:.4f}, R² conditional: {r2_conditional:.4f}")
+            self.logger.info(f"  AIC: {aic:.1f}")
             
             return model_results
             
@@ -445,7 +529,7 @@ class ImprovedMultilevelAnalysis:
                 self.logger.error(traceback.format_exc())
             return None
     
-    def run_cross_fragmentation_model(self, df, outcome_var, primary_predictor, control_predictor):
+    def run_cross_fragmentation_model(self, df, outcome_var, primary_predictor, control_predictor, with_full_controls=True):
         """Run a multilevel model with one fragmentation controlling for another.
         
         Args:
@@ -453,11 +537,13 @@ class ImprovedMultilevelAnalysis:
             outcome_var (str): Outcome variable name
             primary_predictor (str): Main predictor variable
             control_predictor (str): Fragmentation variable to control for
+            with_full_controls (bool): Whether to include demographic control variables
             
         Returns:
             dict: Model results
         """
-        self.logger.info(f"Running cross-fragmentation model: {outcome_var} ~ {primary_predictor} controlling for {control_predictor}")
+        model_type = "Cross-Fragmentation" + (" with Full Controls" if with_full_controls else "")
+        self.logger.info(f"Running {model_type} model: {outcome_var} ~ {primary_predictor} controlling for {control_predictor}")
         
         # Define predictor components for both primary and control
         primary_within = f"{primary_predictor}_within"
@@ -469,9 +555,12 @@ class ImprovedMultilevelAnalysis:
         model_vars = [outcome_var, primary_within, primary_between, 
                       control_within, control_between, 'participant_id']
         
-        # Add demographic control variables too
-        for control_var in self.control_variables.values():
-            model_vars.append(control_var)
+        # Add demographic control variables too if requested
+        control_terms = [control_within, control_between]
+        if with_full_controls:
+            for control_var in self.control_variables.values():
+                model_vars.append(control_var)
+                control_terms.append(control_var)
         
         model_data = df[model_vars].dropna()
         
@@ -480,11 +569,7 @@ class ImprovedMultilevelAnalysis:
             return None
             
         try:
-            # Build formula with control fragmentation and demographic controls
-            control_terms = [control_within, control_between]
-            for control_var in self.control_variables.values():
-                control_terms.append(control_var)
-                
+            # Build formula with control fragmentation and demographic controls if requested
             control_formula = " + " + " + ".join(control_terms)
             model_formula = f"{outcome_var} ~ {primary_within} + {primary_between}{control_formula}"
             
@@ -547,21 +632,19 @@ class ImprovedMultilevelAnalysis:
             control_between_sig = '***' if control_between_pval < 0.001 else '**' if control_between_pval < 0.01 else '*' if control_between_pval < 0.05 else ''
             
             # Safely extract random effects variance components
-            random_effects = result.cov_re
-            if isinstance(random_effects, np.ndarray):
-                var_intercept = float(random_effects[0])
-            elif isinstance(random_effects, pd.DataFrame):
-                var_intercept = float(random_effects.iloc[0, 0])
-            elif hasattr(random_effects, 'iloc'):
-                var_intercept = float(random_effects.iloc[0])
-            elif hasattr(random_effects, 'item'):  
-                var_intercept = float(random_effects.item())
-            else:
-                try:
+            try:
+                random_effects = result.cov_re
+                if hasattr(random_effects, 'iloc'):
+                    var_intercept = float(random_effects.iloc[0, 0])
+                elif hasattr(random_effects, 'item'):
+                    var_intercept = float(random_effects.item())
+                elif isinstance(random_effects, np.ndarray):
+                    var_intercept = float(random_effects.flat[0])
+                else:
                     var_intercept = float(random_effects)
-                except:
-                    var_intercept = np.nan
-                    self.logger.warning(f"Could not extract random intercept variance, setting to NaN")
+            except (AttributeError, IndexError, ValueError):
+                var_intercept = 0.0
+                self.logger.warning(f"Could not extract random intercept variance, setting to 0")
             
             var_residual = float(result.scale)
             
@@ -569,14 +652,48 @@ class ImprovedMultilevelAnalysis:
             if var_intercept > 0 and var_residual > 0:
                 icc = var_intercept / (var_intercept + var_residual)
             else:
-                icc = np.nan
+                icc = 0.0
+                
+            # Calculate R-squared values
+            r_squared = calculate_r_squared(result, model_data[outcome_var])
+            r2_marginal = r_squared['r2_marginal']
+            r2_conditional = r_squared['r2_conditional']
+            
+            # Calculate AIC and BIC manually if necessary
+            aic = result.aic
+            bic = result.bic
+            
+            # If AIC/BIC are NaN, calculate them manually
+            if np.isnan(aic) or np.isnan(bic):
+                n = len(model_data)  # Sample size
+                k = len(params)  # Number of parameters
+                llf = result.llf  # Log-likelihood
+                
+                if not np.isnan(llf):
+                    # Calculate AIC and BIC
+                    aic = 2 * k - 2 * llf
+                    bic = k * np.log(n) - 2 * llf
+                    self.logger.info(f"Calculated AIC/BIC manually: AIC={aic:.2f}, BIC={bic:.2f}")
+                else:
+                    # If log-likelihood is NaN, try to calculate from deviance
+                    try:
+                        deviance = result.deviance
+                        if not np.isnan(deviance):
+                            # For normal distribution, deviance = -2 * log-likelihood
+                            llf = -deviance / 2
+                            aic = 2 * k - 2 * llf
+                            bic = k * np.log(n) - 2 * llf
+                            self.logger.info(f"Calculated AIC/BIC from deviance: AIC={aic:.2f}, BIC={bic:.2f}")
+                    except:
+                        self.logger.warning("Could not calculate AIC/BIC - both log-likelihood and deviance are NaN")
+                        aic = bic = np.nan
             
             # Create results dictionary
             model_results = {
                 'outcome': outcome_var,
                 'predictor': primary_predictor,
                 'control_predictor': control_predictor,
-                'model_type': 'Cross-Fragmentation',
+                'model_type': 'Cross-Fragmentation' + (" With Full Controls" if with_full_controls else ""),
                 'n_obs': len(model_data),
                 'n_participants': model_data['participant_id'].nunique(),
                 'within_coef': within_coef,
@@ -598,19 +715,24 @@ class ImprovedMultilevelAnalysis:
                 'var_intercept': var_intercept,
                 'var_residual': var_residual,
                 'icc': icc,
-                'aic': result.aic,
-                'bic': result.bic,
+                'r2_marginal': r2_marginal,  # Properly calculated R² values
+                'r2_conditional': r2_conditional,
+                'aic': aic,  # Properly calculated AIC
+                'bic': bic,  # Properly calculated BIC
                 'log_likelihood': result.llf,
-                'method': method
+                'method': method,
+                'formula': model_formula  # Add formula to results for reference
             }
             
             # Log key results
-            self.logger.info(f"Cross-fragmentation model results for {outcome_var} ~ {primary_predictor} | {control_predictor}:")
+            model_type_str = "Cross-fragmentation" + (" with controls" if with_full_controls else "")
+            self.logger.info(f"{model_type_str} model results for {outcome_var} ~ {primary_predictor} | {control_predictor}:")
             self.logger.info(f"  Primary within-effect: {within_coef:.4f}, p={within_pval:.4f} {within_sig}")
             self.logger.info(f"  Primary between-effect: {between_coef:.4f}, p={between_pval:.4f} {between_sig}")
             self.logger.info(f"  Control within-effect: {control_within_coef:.4f}, p={control_within_pval:.4f} {control_within_sig}")
             self.logger.info(f"  Control between-effect: {control_between_coef:.4f}, p={control_between_pval:.4f} {control_between_sig}")
-            self.logger.info(f"  ICC: {icc:.4f}, AIC: {result.aic:.1f}")
+            self.logger.info(f"  ICC: {icc:.4f}, R² marginal: {r2_marginal:.4f}, R² conditional: {r2_conditional:.4f}")
+            self.logger.info(f"  AIC: {aic:.1f}, BIC: {bic:.1f}")
             
             return model_results
             
@@ -728,6 +850,11 @@ class ImprovedMultilevelAnalysis:
                 else:
                     between_ci_low = between_ci_high = np.nan
                 
+                # Calculate R-squared values
+                r_squared = calculate_r_squared(result, model_data[outcome_var])
+                r2_marginal = r_squared['r2_marginal']
+                r2_conditional = r_squared['r2_conditional']
+                
                 # Calculate AIC and BIC manually if necessary
                 aic = result.aic
                 bic = result.bic
@@ -775,6 +902,8 @@ class ImprovedMultilevelAnalysis:
                     'between_sig': between_sig,
                     'between_ci_low': between_ci_low,
                     'between_ci_high': between_ci_high,
+                    'r2_marginal': r2_marginal,  # Add R² values
+                    'r2_conditional': r2_conditional,
                     'aic': aic,
                     'bic': bic,
                     'method': method,
@@ -784,6 +913,7 @@ class ImprovedMultilevelAnalysis:
                 # Log key results
                 self.logger.info(f"Subgroup results for {moderator_var}={value}:")
                 self.logger.info(f"  Within-person effect: {within_coef:.4f}, p={within_pval:.4f} {within_sig}")
+                self.logger.info(f"  R² marginal: {r2_marginal:.4f}, R² conditional: {r2_conditional:.4f}")
                 
                 # Store results
                 subgroup_results[str(value)] = group_results
@@ -923,6 +1053,34 @@ class ImprovedMultilevelAnalysis:
             pvalues = result.pvalues
             conf_int = result.conf_int()
             
+            # Safely extract random effects variance components for ICC calculation
+            try:
+                random_effects = result.cov_re
+                if hasattr(random_effects, 'iloc'):
+                    var_intercept = float(random_effects.iloc[0, 0])
+                elif hasattr(random_effects, 'item'):
+                    var_intercept = float(random_effects.item())
+                elif isinstance(random_effects, np.ndarray):
+                    var_intercept = float(random_effects.flat[0])
+                else:
+                    var_intercept = float(random_effects)
+            except (AttributeError, IndexError, ValueError):
+                var_intercept = 0.0
+                self.logger.warning(f"Could not extract random intercept variance, setting to 0")
+            
+            var_residual = float(result.scale)
+            
+            # Calculate ICC
+            if var_intercept > 0 and var_residual > 0:
+                icc = var_intercept / (var_intercept + var_residual)
+            else:
+                icc = 0.0
+            
+            # Calculate R-squared values
+            r_squared = calculate_r_squared(result, model_data[outcome_var])
+            r2_marginal = r_squared['r2_marginal']
+            r2_conditional = r_squared['r2_conditional']
+            
             # Create results dictionary with coefficients for both predictors
             model_results = {
                 'outcome': outcome_var,
@@ -930,6 +1088,11 @@ class ImprovedMultilevelAnalysis:
                 'n_obs': len(model_data),
                 'n_participants': model_data['participant_id'].nunique(),
                 'method': method,
+                'r2_marginal': r2_marginal,  # Add R² values
+                'r2_conditional': r2_conditional,
+                'var_intercept': var_intercept,
+                'var_residual': var_residual,
+                'icc': icc,
                 'aic': result.aic,
                 'bic': result.bic
             }
@@ -971,6 +1134,8 @@ class ImprovedMultilevelAnalysis:
             self.logger.info(f"Home-Mobility comparison for {outcome_var}:")
             self.logger.info(f"  Home within-effect: {model_results['Home_within_coef']:.4f}, p={model_results['Home_within_pval']:.4f} {model_results['Home_within_sig']}")
             self.logger.info(f"  Mobility within-effect: {model_results['Mobility_within_coef']:.4f}, p={model_results['Mobility_within_pval']:.4f} {model_results['Mobility_within_sig']}")
+            self.logger.info(f"  R² marginal: {r2_marginal:.4f}, R² conditional: {r2_conditional:.4f}")
+            self.logger.info(f"  ICC: {icc:.4f}")
             
             return model_results
             
@@ -997,7 +1162,8 @@ class ImprovedMultilevelAnalysis:
         # Results containers
         basic_models = {}          # Models without controls
         controlled_models = {}     # Models with demographic controls
-        cross_frag_models = {}     # Digital vs. mobility fragmentation models
+        cross_frag_models = {}     # Digital vs. mobility fragmentation models (basic)
+        cross_frag_controlled_models = {}  # Digital vs. mobility with full demographic controls
         moderation_analyses = {}   # Subgroup analyses
         home_mobility_comparisons = {}  # NEW: Home vs. mobility comparisons
         successful_models = 0
@@ -1028,54 +1194,103 @@ class ImprovedMultilevelAnalysis:
             if outcome_models:
                 controlled_models[outcome_var] = outcome_models
         
-        # 3. Run cross-fragmentation models (digital vs. mobility)
-        self.logger.info("Running cross-fragmentation models")
+        # 3a. Run basic cross-fragmentation models (without full demographic controls)
+        self.logger.info("Running basic cross-fragmentation models")
         for outcome_var in self.outcome_variables:
             outcome_models = {}
             
-            # Original cross-fragmentation models
+            # Original cross-fragmentation models (without full controls)
             model_result = self.run_cross_fragmentation_model(
-                df, outcome_var, 'digital_fragmentation', 'mobility_fragmentation')
+                df, outcome_var, 'digital_fragmentation', 'mobility_fragmentation', with_full_controls=False)
             if model_result:
                 outcome_models['digital_controlling_for_mobility'] = model_result
                 successful_models += 1
             
             model_result = self.run_cross_fragmentation_model(
-                df, outcome_var, 'mobility_fragmentation', 'digital_fragmentation')
+                df, outcome_var, 'mobility_fragmentation', 'digital_fragmentation', with_full_controls=False)
             if model_result:
                 outcome_models['mobility_controlling_for_digital'] = model_result
                 successful_models += 1
             
-            # NEW: Digital home fragmentation controlling for mobility
+            # Digital home fragmentation controlling for mobility (without full controls)
             model_result = self.run_cross_fragmentation_model(
-                df, outcome_var, 'digital_home_fragmentation', 'mobility_fragmentation')
+                df, outcome_var, 'digital_home_fragmentation', 'mobility_fragmentation', with_full_controls=False)
             if model_result:
                 outcome_models['digital_home_controlling_for_mobility'] = model_result
                 successful_models += 1
             
-            # NEW: Digital home fragmentation controlling for digital during mobility
+            # Digital home fragmentation controlling for digital during mobility (without full controls)
             model_result = self.run_cross_fragmentation_model(
-                df, outcome_var, 'digital_home_fragmentation', 'overlap_fragmentation')
+                df, outcome_var, 'digital_home_fragmentation', 'overlap_fragmentation', with_full_controls=False)
             if model_result:
                 outcome_models['digital_home_controlling_for_overlap'] = model_result
                 successful_models += 1
             
-            # NEW: Digital-mobility delta controlling for mobility 
+            # Digital-mobility delta controlling for mobility (without full controls)
             model_result = self.run_cross_fragmentation_model(
-                df, outcome_var, 'digital_home_mobility_delta', 'mobility_fragmentation')
+                df, outcome_var, 'digital_home_mobility_delta', 'mobility_fragmentation', with_full_controls=False)
             if model_result:
                 outcome_models['home_mobility_delta_controlling_for_mobility'] = model_result
                 successful_models += 1
             
-            # NEW: Digital-mobility delta controlling for digital
+            # Digital-mobility delta controlling for digital (without full controls)
             model_result = self.run_cross_fragmentation_model(
-                df, outcome_var, 'digital_home_mobility_delta', 'digital_fragmentation')
+                df, outcome_var, 'digital_home_mobility_delta', 'digital_fragmentation', with_full_controls=False)
             if model_result:
                 outcome_models['home_mobility_delta_controlling_for_digital'] = model_result
                 successful_models += 1
             
             if outcome_models:
                 cross_frag_models[outcome_var] = outcome_models
+        
+        # 3b. Run cross-fragmentation models WITH full demographic controls
+        self.logger.info("Running cross-fragmentation models with full demographic controls")
+        for outcome_var in self.outcome_variables:
+            outcome_models = {}
+            
+            # Original cross-fragmentation models (with full controls)
+            model_result = self.run_cross_fragmentation_model(
+                df, outcome_var, 'digital_fragmentation', 'mobility_fragmentation', with_full_controls=True)
+            if model_result:
+                outcome_models['digital_controlling_for_mobility'] = model_result
+                successful_models += 1
+            
+            model_result = self.run_cross_fragmentation_model(
+                df, outcome_var, 'mobility_fragmentation', 'digital_fragmentation', with_full_controls=True)
+            if model_result:
+                outcome_models['mobility_controlling_for_digital'] = model_result
+                successful_models += 1
+            
+            # Digital home fragmentation controlling for mobility (with full controls)
+            model_result = self.run_cross_fragmentation_model(
+                df, outcome_var, 'digital_home_fragmentation', 'mobility_fragmentation', with_full_controls=True)
+            if model_result:
+                outcome_models['digital_home_controlling_for_mobility'] = model_result
+                successful_models += 1
+            
+            # Digital home fragmentation controlling for digital during mobility (with full controls)
+            model_result = self.run_cross_fragmentation_model(
+                df, outcome_var, 'digital_home_fragmentation', 'overlap_fragmentation', with_full_controls=True)
+            if model_result:
+                outcome_models['digital_home_controlling_for_overlap'] = model_result
+                successful_models += 1
+            
+            # Digital-mobility delta controlling for mobility (with full controls)
+            model_result = self.run_cross_fragmentation_model(
+                df, outcome_var, 'digital_home_mobility_delta', 'mobility_fragmentation', with_full_controls=True)
+            if model_result:
+                outcome_models['home_mobility_delta_controlling_for_mobility'] = model_result
+                successful_models += 1
+            
+            # Digital-mobility delta controlling for digital (with full controls)
+            model_result = self.run_cross_fragmentation_model(
+                df, outcome_var, 'digital_home_mobility_delta', 'digital_fragmentation', with_full_controls=True)
+            if model_result:
+                outcome_models['home_mobility_delta_controlling_for_digital'] = model_result
+                successful_models += 1
+            
+            if outcome_models:
+                cross_frag_controlled_models[outcome_var] = outcome_models
         
         # 4. Run moderation analyses
         self.logger.info("Running moderation analyses")
@@ -1111,8 +1326,9 @@ class ImprovedMultilevelAnalysis:
         self.model_results['basic_models'] = basic_models
         self.model_results['controlled_models'] = controlled_models
         self.model_results['cross_frag_models'] = cross_frag_models
+        self.model_results['cross_frag_controlled_models'] = cross_frag_controlled_models  # NEW: models with full controls
         self.model_results['moderation_analyses'] = moderation_analyses
-        self.model_results['home_mobility_comparisons'] = home_mobility_comparisons  # NEW
+        self.model_results['home_mobility_comparisons'] = home_mobility_comparisons
         
         self.logger.info(f"Completed multilevel analysis with {successful_models} successful models")
         
@@ -1132,6 +1348,7 @@ class ImprovedMultilevelAnalysis:
             basic_summary = []
             controlled_summary = []
             cross_frag_summary = []
+            cross_frag_controlled_summary = []  # NEW: for cross-frag models with full controls
             moderation_summary = []
             comparison_summary = []
             
@@ -1161,6 +1378,8 @@ class ImprovedMultilevelAnalysis:
                         'N': model_result.get('n_obs', 0),
                         'Participants': model_result.get('n_participants', 0),
                         'ICC': model_result.get('icc', np.nan),
+                        'R² Marginal': model_result.get('r2_marginal', np.nan),
+                        'R² Conditional': model_result.get('r2_conditional', np.nan),
                         'AIC': model_result.get('aic', np.nan),
                         'BIC': model_result.get('bic', np.nan),
                         'Formula': model_result.get('formula', '')  # Add model formula to output
@@ -1194,6 +1413,8 @@ class ImprovedMultilevelAnalysis:
                         'N': model_result.get('n_obs', 0),
                         'Participants': model_result.get('n_participants', 0),
                         'ICC': model_result.get('icc', np.nan),
+                        'R² Marginal': model_result.get('r2_marginal', np.nan),
+                        'R² Conditional': model_result.get('r2_conditional', np.nan),
                         'AIC': model_result.get('aic', np.nan),
                         'BIC': model_result.get('bic', np.nan),
                         'Formula': model_result.get('formula', '')  # Add model formula to output
@@ -1237,7 +1458,7 @@ class ImprovedMultilevelAnalysis:
                                     'Formula': model_result.get('formula', '')  # Add model formula to output
                                 })
             
-            # Process cross-fragmentation models
+            # Process cross-fragmentation models (basic versions - without full controls)
             for outcome_var, outcome_models in self.model_results.get('cross_frag_models', {}).items():
                 for model_name, model_result in outcome_models.items():
                     primary_pred = model_result.get('predictor', '')
@@ -1251,14 +1472,19 @@ class ImprovedMultilevelAnalysis:
                         'Outcome': outcome_var,
                         'Primary Predictor': primary_pred,
                         'Control Predictor': control_pred,
+                        'Model Type': 'Cross-Fragmentation Basic',
                         'Within-Effect': model_result.get('within_coef', np.nan),
                         'Within-P': model_result.get('within_pval', np.nan),
                         'Within-Sig': model_result.get('within_sig', ''),
                         'Within-CI': within_ci,
+                        'Within-CI Low': model_result.get('within_ci_low', np.nan),
+                        'Within-CI High': model_result.get('within_ci_high', np.nan),
                         'Between-Effect': model_result.get('between_coef', np.nan),
                         'Between-P': model_result.get('between_pval', np.nan),
                         'Between-Sig': model_result.get('between_sig', ''),
                         'Between-CI': between_ci,
+                        'Between-CI Low': model_result.get('between_ci_low', np.nan), 
+                        'Between-CI High': model_result.get('between_ci_high', np.nan),
                         'Control Within-Effect': model_result.get('control_within_coef', np.nan),
                         'Control Within-P': model_result.get('control_within_pval', np.nan),
                         'Control Within-Sig': model_result.get('control_within_sig', ''),
@@ -1267,8 +1493,55 @@ class ImprovedMultilevelAnalysis:
                         'Control Between-Sig': model_result.get('control_between_sig', ''),
                         'N': model_result.get('n_obs', 0),
                         'Participants': model_result.get('n_participants', 0),
+                        'ICC': model_result.get('icc', np.nan),
+                        'R² Marginal': model_result.get('r2_marginal', np.nan),
+                        'R² Conditional': model_result.get('r2_conditional', np.nan),
                         'AIC': model_result.get('aic', np.nan),
-                        'BIC': model_result.get('bic', np.nan)
+                        'BIC': model_result.get('bic', np.nan),
+                        'Formula': model_result.get('formula', '')  # Add model formula to output
+                    })
+            
+            # NEW: Process cross-fragmentation models with full controls
+            for outcome_var, outcome_models in self.model_results.get('cross_frag_controlled_models', {}).items():
+                for model_name, model_result in outcome_models.items():
+                    primary_pred = model_result.get('predictor', '')
+                    control_pred = model_result.get('control_predictor', '')
+                    
+                    # Create CI strings for cleaner presentation
+                    within_ci = f"[{model_result.get('within_ci_low', np.nan):.2f}, {model_result.get('within_ci_high', np.nan):.2f}]"
+                    between_ci = f"[{model_result.get('between_ci_low', np.nan):.2f}, {model_result.get('between_ci_high', np.nan):.2f}]"
+                    
+                    cross_frag_controlled_summary.append({
+                        'Outcome': outcome_var,
+                        'Primary Predictor': primary_pred,
+                        'Control Predictor': control_pred,
+                        'Model Type': 'Cross-Fragmentation With Full Controls',
+                        'Within-Effect': model_result.get('within_coef', np.nan),
+                        'Within-P': model_result.get('within_pval', np.nan),
+                        'Within-Sig': model_result.get('within_sig', ''),
+                        'Within-CI': within_ci,
+                        'Within-CI Low': model_result.get('within_ci_low', np.nan),
+                        'Within-CI High': model_result.get('within_ci_high', np.nan),
+                        'Between-Effect': model_result.get('between_coef', np.nan),
+                        'Between-P': model_result.get('between_pval', np.nan),
+                        'Between-Sig': model_result.get('between_sig', ''),
+                        'Between-CI': between_ci,
+                        'Between-CI Low': model_result.get('between_ci_low', np.nan),
+                        'Between-CI High': model_result.get('between_ci_high', np.nan),
+                        'Control Within-Effect': model_result.get('control_within_coef', np.nan),
+                        'Control Within-P': model_result.get('control_within_pval', np.nan),
+                        'Control Within-Sig': model_result.get('control_within_sig', ''),
+                        'Control Between-Effect': model_result.get('control_between_coef', np.nan),
+                        'Control Between-P': model_result.get('control_between_pval', np.nan),
+                        'Control Between-Sig': model_result.get('control_between_sig', ''),
+                        'N': model_result.get('n_obs', 0),
+                        'Participants': model_result.get('n_participants', 0),
+                        'ICC': model_result.get('icc', np.nan),
+                        'R² Marginal': model_result.get('r2_marginal', np.nan),
+                        'R² Conditional': model_result.get('r2_conditional', np.nan),
+                        'AIC': model_result.get('aic', np.nan),
+                        'BIC': model_result.get('bic', np.nan),
+                        'Formula': model_result.get('formula', '')  # Add model formula to output
                     })
                     
             # Process moderation analyses
@@ -1292,6 +1565,8 @@ class ImprovedMultilevelAnalysis:
                                     'Between-Sig': subgroup_result.get('between_sig', ''),
                                     'Between-CI Low': subgroup_result.get('between_ci_low', np.nan),
                                     'Between-CI High': subgroup_result.get('between_ci_high', np.nan),
+                                    'R² Marginal': subgroup_result.get('r2_marginal', np.nan),
+                                    'R² Conditional': subgroup_result.get('r2_conditional', np.nan),
                                     'N': subgroup_result.get('n_obs', 0),
                                     'Participants': subgroup_result.get('n_participants', 0)
                                 })
@@ -1327,6 +1602,8 @@ class ImprovedMultilevelAnalysis:
                     'Mobility Within-Sig': result.get('Mobility_within_sig', ''),
                     'Mobility Within-CI Low': result.get('Mobility_within_ci_low', np.nan),
                     'Mobility Within-CI High': result.get('Mobility_within_ci_high', np.nan),
+                    'R² Marginal': result.get('r2_marginal', np.nan),
+                    'R² Conditional': result.get('r2_conditional', np.nan),
                     'N': result.get('n_obs', 0),
                     'Participants': result.get('n_participants', 0),
                     'AIC': result.get('aic', np.nan),
@@ -1337,13 +1614,14 @@ class ImprovedMultilevelAnalysis:
             basic_df = pd.DataFrame(basic_summary) if basic_summary else pd.DataFrame()
             controlled_df = pd.DataFrame(controlled_summary) if controlled_summary else pd.DataFrame()
             cross_frag_df = pd.DataFrame(cross_frag_summary) if cross_frag_summary else pd.DataFrame()
+            cross_frag_controlled_df = pd.DataFrame(cross_frag_controlled_summary) if cross_frag_controlled_summary else pd.DataFrame()
             moderation_df = pd.DataFrame(moderation_summary) if moderation_summary else pd.DataFrame()
             comparison_df = pd.DataFrame(comparison_summary) if comparison_summary else pd.DataFrame()
             control_var_df = pd.DataFrame(control_var_effects) if control_var_effects else pd.DataFrame()
             home_mobility_df = pd.DataFrame(home_mobility_summary) if home_mobility_summary else pd.DataFrame()
             
             # Round numeric columns
-            for df in [basic_df, controlled_df, cross_frag_df, moderation_df, comparison_df, control_var_df, home_mobility_df]:
+            for df in [basic_df, controlled_df, cross_frag_df, cross_frag_controlled_df, moderation_df, comparison_df, control_var_df, home_mobility_df]:
                 if not df.empty:
                     numeric_cols = df.select_dtypes(include=[np.number]).columns
                     df[numeric_cols] = df[numeric_cols].round(4)
@@ -1360,7 +1638,11 @@ class ImprovedMultilevelAnalysis:
                     controlled_df.to_excel(writer, sheet_name='Controlled Models', index=False)
                 
                 if not cross_frag_df.empty:
-                    cross_frag_df.to_excel(writer, sheet_name='Cross-Frag Models', index=False)
+                    cross_frag_df.to_excel(writer, sheet_name='Cross-Frag Basic', index=False)
+                
+                # NEW: Save cross-fragmentation models with full controls
+                if not cross_frag_controlled_df.empty:
+                    cross_frag_controlled_df.to_excel(writer, sheet_name='Cross-Frag With Controls', index=False)
                 
                 if not moderation_df.empty:
                     moderation_df.to_excel(writer, sheet_name='Subgroup Effects', index=False)
@@ -1381,6 +1663,14 @@ class ImprovedMultilevelAnalysis:
                 if not combined_models.empty:
                     combined_models.to_excel(writer, sheet_name='All Models Overview', index=False)
                 
+                # Create combined cross-fragmentation sheet
+                if not (cross_frag_df.empty and cross_frag_controlled_df.empty):
+                    all_cross_frag = pd.concat([
+                        cross_frag_df,
+                        cross_frag_controlled_df
+                    ])
+                    all_cross_frag.to_excel(writer, sheet_name='All Cross-Frag Models', index=False)
+                
                 # Create outcome-specific sheets
                 for outcome_var in self.outcome_variables:
                     # Combine basic and controlled models for this outcome
@@ -1398,8 +1688,12 @@ class ImprovedMultilevelAnalysis:
                             sheet_name = sheet_name[:30]
                         outcome_combined.to_excel(writer, sheet_name=sheet_name, index=False)
                     
-                    # Cross-fragmentation results for this outcome
-                    outcome_cross = cross_frag_df[cross_frag_df['Outcome'] == outcome_var] if not cross_frag_df.empty else pd.DataFrame()
+                    # Cross-fragmentation results for this outcome (combine basic and controlled)
+                    outcome_cross_basic = cross_frag_df[cross_frag_df['Outcome'] == outcome_var] if not cross_frag_df.empty else pd.DataFrame()
+                    outcome_cross_controlled = cross_frag_controlled_df[cross_frag_controlled_df['Outcome'] == outcome_var] if not cross_frag_controlled_df.empty else pd.DataFrame()
+                    
+                    outcome_cross = pd.concat([outcome_cross_basic, outcome_cross_controlled]) if not (outcome_cross_basic.empty and outcome_cross_controlled.empty) else pd.DataFrame()
+                    
                     if not outcome_cross.empty:
                         sheet_name = f"{outcome_var.replace('_std', '')}_CrossFrag"
                         if len(sheet_name) > 30:  # Excel sheet name limit
@@ -1427,11 +1721,11 @@ class ImprovedMultilevelAnalysis:
                                 # Select key columns for presentation
                                 presenter_cols = ['Outcome', 'Predictor', 'Within-Effect', 'Within-P', 'Within-Sig', 
                                                 'Within-CI', 'Between-Effect', 'Between-P', 'Between-Sig', 
-                                                'Between-CI', 'N', 'Participants']
+                                                'Between-CI', 'R² Marginal', 'R² Conditional', 'N', 'Participants']
                                 presenter_df = controlled_df[presenter_cols].copy()
                                 
                                 # Format numeric columns for presentation
-                                for col in ['Within-Effect', 'Between-Effect']:
+                                for col in ['Within-Effect', 'Between-Effect', 'R² Marginal', 'R² Conditional']:
                                     presenter_df[col] = presenter_df[col].round(2)
                                 for col in ['Within-P', 'Between-P']:
                                     presenter_df[col] = presenter_df[col].round(3)
@@ -1443,7 +1737,7 @@ class ImprovedMultilevelAnalysis:
                                     lambda x: f"{x['Between-Effect']:.2f}{x['Within-Sig']}", axis=1)
                                 
                                 presenter_df = presenter_df[['Outcome', 'Predictor', 'Within-Coef', 'Within-CI', 
-                                                         'Between-Coef', 'Between-CI', 'N', 'Participants']]
+                                                         'Between-Coef', 'Between-CI', 'R² Marginal', 'R² Conditional', 'N', 'Participants']]
                                 presenter_df.to_excel(writer, sheet_name='Presentation Table', index=False)
                 
                 # Create control-variable specific sheets
