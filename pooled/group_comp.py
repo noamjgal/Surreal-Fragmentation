@@ -36,7 +36,9 @@ class PooledGroupAnalysis:
         self.fragmentation_metrics = [
             'digital_fragmentation', 
             'mobility_fragmentation', 
-            'overlap_fragmentation'
+            'overlap_fragmentation',
+            'digital_home_fragmentation',  # Added digital home fragmentation
+            'digital_home_mobility_delta'  # Added digital home mobility delta
         ]
         
         self.episode_metrics = [
@@ -48,7 +50,12 @@ class PooledGroupAnalysis:
         self.duration_metrics = [
             'digital_duration',
             'mobility_duration',
-            'overlap_duration'
+            'overlap_duration',
+            'digital_home_total_duration',  # Added digital home total duration
+            'home_duration',               # Added home duration
+            'active_transport_duration',    # Added active transport duration
+            'mechanized_transport_duration',# Added mechanized transport duration
+            'out_of_home_duration'          # Added out of home duration
         ]
         
         # Define emotion metrics - updated to only use standardized scores
