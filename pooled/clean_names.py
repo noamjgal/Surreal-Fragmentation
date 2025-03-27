@@ -13,6 +13,7 @@ df = pd.read_csv(file_path)
 
 print("Original columns:")
 print(df.columns)
+print(f"Original dataset shape: {df.shape}")
 
 # Define a mapping of current column names to more human-readable names
 column_mapping = {
@@ -47,24 +48,29 @@ df.rename(columns=column_mapping, inplace=True)
 print("\nRenamed columns:")
 print(df.columns)
 
-print(df.head())
+# Replace NaN values with 0
+df.fillna(0, inplace=True)
+
+# Recalculate Digital Home Mobility Delta after NaN replacements
+df['Digital Home Mobility Delta'] = df['Digital Mobile Fragmentation'] - df['Digital Home Fragmentation']
+
+# Drop observations where home duration is 0
+zero_home_count = len(df[df['Home Duration'] == 0])
+print(f"\nDropping {zero_home_count} observations where Home Duration is 0")
+df = df[df['Home Duration'] > 0]
+print(f"Dataset shape after dropping zero home duration: {df.shape}")
+
+# Drop the Out of Home Duration column
+df.drop(columns=['Out of Home Duration'], inplace=True)
 
 # Save the updated DataFrame to a new file
-output_file_path = file_path.replace('.csv', '_renamed.csv')
+output_file_path = file_path.replace('.csv', '_cleaned.csv')
 df.to_csv(output_file_path, index=False)
-print(f"\nSaved renamed data to: {output_file_path}")
+print(f"\nSaved cleaned data to: {output_file_path}")
 
-'''
-columns:
-Index(['participant_id', 'dataset_source', 'anxiety_score_std',
-       'anxiety_score_raw', 'mood_score_std', 'mood_score_raw',
-       'gender_standardized', 'location_type', 'age_group',
-       'is_weekend', 'digital_fragmentation', 'mobility_fragmentation',
-       'overlap_fragmentation', 'digital_home_fragmentation',
-       'digital_home_mobility_delta', 'digital_total_duration',
-       'mobility_total_duration', 'overlap_total_duration',
-       'digital_home_total_duration', 'active_transport_duration',
-       'mechanized_transport_duration', 'home_duration',
-       'out_of_home_duration'],
-      dtype='object')
-'''
+# Print summary statistics for the key variables
+print("\nSummary statistics for key variables after cleaning:")
+summary_vars = ['Anxiety (Z)', 'Depressed Mood (Z)', 'Digital Fragmentation', 
+                'Mobility Fragmentation', 'Digital Mobile Fragmentation', 
+                'Home Duration']
+print(df[summary_vars].describe())
