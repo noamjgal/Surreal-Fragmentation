@@ -7,7 +7,7 @@ import os
 import warnings
 from tqdm import tqdm
 
-file_path = "pooled/processed/pooled_stai_data_population_renamed.csv"
+file_path = "pooled/processed/pooled_stai_data_population_cleaned.csv"
 
 df = pd.read_csv(file_path)
 
@@ -17,19 +17,20 @@ print(df.columns)
 columns:
 Index(['Participant ID', 'Dataset Source', 'Anxiety (Z)', 'Anxiety (Raw)',
        'Depressed Mood (Z)', 'Depressed Mood (Raw)', 'Gender', 'Location Type',
-       'Age Group', 'Digital Fragmentation', 'Mobility Fragmentation',
-       'Digital Mobile Fragmentation', 'Digital Home Fragmentation',
-       'Digital Home Mobility Delta', 'Digital Duration', 'Mobile Duration',
-       'Digital Mobile Duration', 'Digital Home Duration',
-       'Active Transport Duration', 'Mechanized Transport Duration',
-       'Home Duration', 'Out of Home Duration'],
+       'Age Group', 'Weekend Status', 'Digital Fragmentation',
+       'Mobility Fragmentation', 'Digital Mobile Fragmentation',
+       'Digital Home Fragmentation', 'Digital Home Mobility Delta',
+       'Digital Duration', 'Mobile Duration', 'Digital Mobile Duration',
+       'Digital Home Duration', 'Active Transport Duration',
+       'Mechanized Transport Duration', 'Home Duration']
       dtype='object')
 '''
 
 dep_vars = ['Anxiety (Z)', 'Depressed Mood (Z)']
 main_ind_var = 'Digital Fragmentation'
-control_vars = ['Age Group', 'Gender', 'Digital Duration']
-
+control_vars = ['Digital Duration', 'Gender', 'Weekend Status',  'Age Group']
+interaction_terms = []
+    
 
 '''notes about participant ids, there is overlap between participants in the two subsidiary datasets, we therefore need to treat participant ids from the tlv dataset as a separate individual from participant ids in the surreal dataset'''
 
@@ -164,30 +165,40 @@ def run_multilevel_models(data, dependent_vars, main_indep_var, control_vars, ou
         
         # --------- Model: With Controls ---------
         # Add control variables to the formula
-        control_between = " + ".join([var for var in control_vars_clean if var not in time_varying_controls_clean])
+        control_vars_list = [var for var in control_vars_clean if var not in time_varying_controls_clean]
+        if control_vars_list:
+            control_between = " + " + " + ".join(control_vars_list)
+        else:
+            control_between = ""
         
         # For time-varying controls, add both their between and within components
         if time_varying_controls_clean:
-            control_between += " + " + " + ".join([f"{var}_mean" for var in time_varying_controls_clean])
+            if control_between:
+                control_between += " + " + " + ".join([f"{var}_mean" for var in time_varying_controls_clean])
+            else:
+                control_between = " + " + " + ".join([f"{var}_mean" for var in time_varying_controls_clean])
             control_within = " + " + " + ".join([f"{var}_centered" for var in time_varying_controls_clean])
         else:
             control_within = ""
         
         # Start with basic formula
-        full_formula = f"{dep_var_clean} ~ {main_indep_var_clean}_mean + {main_indep_var_clean}_centered + {control_between}{control_within}"
+        full_formula = f"{dep_var_clean} ~ {main_indep_var_clean}_mean + {main_indep_var_clean}_centered{control_between}{control_within}"
         
         # Add interaction terms if specified
         interaction_parts = []
         for interaction_var in interaction_terms:
             # For categorical variables, we interact with both between and within components of main variable
             if interaction_var in ['Gender', 'Age Group', 'Location Type']:
+                # Clean the interaction variable name to make it formula-compatible
+                interaction_var_clean = interaction_var.replace(' ', '_')
+                
                 # Create interaction with between-person effect
-                interaction_parts.append(f"{interaction_var}:{main_indep_var_clean}_mean")
+                interaction_parts.append(f"{interaction_var_clean}:{main_indep_var_clean}_mean")
                 # Create interaction with within-person effect
-                interaction_parts.append(f"{interaction_var}:{main_indep_var_clean}_centered")
+                interaction_parts.append(f"{interaction_var_clean}:{main_indep_var_clean}_centered")
                 
                 # Log the interaction terms
-                print(f"Adding interaction terms: {interaction_var}:{main_indep_var_clean}_mean and {interaction_var}:{main_indep_var_clean}_centered")
+                print(f"Adding interaction terms: {interaction_var_clean}:{main_indep_var_clean}_mean and {interaction_var_clean}:{main_indep_var_clean}_centered")
             else:
                 # For continuous variables, different approach needed
                 warnings.warn(f"Interaction with continuous variable {interaction_var} not currently supported")
@@ -447,11 +458,14 @@ def run_multilevel_models(data, dependent_vars, main_indep_var, control_vars, ou
     if interaction_terms:
         print("\nLooking for interaction parameters:")
         for interaction_var in interaction_terms:
+            # Clean the interaction variable name to match how it was used in the formula
+            interaction_var_clean = interaction_var.replace(' ', '_')
+            
             # More flexible pattern matching for interaction parameters
             interaction_patterns = [
-                f"{interaction_var}:", 
-                f"interaction_{interaction_var}", 
-                f"{interaction_var}_"
+                f"{interaction_var_clean}:", 
+                f"interaction_{interaction_var_clean}", 
+                f"{interaction_var_clean}_"
             ]
             found_params = []
             for pattern in interaction_patterns:
@@ -621,10 +635,16 @@ def run_multilevel_models(data, dependent_vars, main_indep_var, control_vars, ou
                 if '_coef' in row_id or '_se' in row_id or '_ci_' in row_id:
                     row_values.append(f"{value:.3f}")
                 elif '_p' in row_id:
+                    # Get the corresponding parameter base name to look up significance
+                    param_base = row_id.replace('_p', '')
+                    sig_key = f"{param_base}_sig"
+                    sig_symbol = all_model_results[dep_var].get(sig_key, "")
+                    
+                    # Format p-value with significance symbol
                     if value < 0.001:
-                        row_values.append("<0.001")
+                        row_values.append(f"<0.001{sig_symbol}")
                     else:
-                        row_values.append(f"{value:.3f}")
+                        row_values.append(f"{value:.3f}{sig_symbol}")
                 elif 'r2' in row_id:
                     row_values.append(f"{value:.3f}")
                 elif row_id == 'icc':
@@ -648,10 +668,16 @@ def run_multilevel_models(data, dependent_vars, main_indep_var, control_vars, ou
     # Set column names from the header row
     results_df.columns = header
     
-    # Save to CSV without the significance legend
+    # Save to CSV
     results_df.to_csv(output_file, index=False)
     
+    # Create and save a version with significance note
+    note = "Note: † p<0.1, * p<0.05, ** p<0.01, *** p<0.001"
+    with open(output_file, 'a') as f:
+        f.write(f"\n{note}")
+    
     print(f"\nResults saved to {output_file}")
+    print(f"Significance levels: {note}")
     
     # Report any convergence issues
     if convergence_issues:
@@ -665,10 +691,6 @@ def run_multilevel_models(data, dependent_vars, main_indep_var, control_vars, ou
 if __name__ == "__main__":
     # Add Intercept column required by statsmodels
     df["Intercept"] = 1
-    
-    # Define interaction term - set this to None to run without interactions
-    # Example: interaction with gender
-    interaction_terms = None #['gender_standardized']
     
     print(f"Running multilevel models for {len(dep_vars)} dependent variables")
     print(f"Main independent variable: {main_ind_var}")
