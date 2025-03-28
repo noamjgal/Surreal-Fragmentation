@@ -1002,8 +1002,8 @@ if __name__ == "__main__":
 
         # Define variables
         dep_vars = ['Anxiety (Z)', 'Depressed Mood (Z)']
-        main_ind_var = 'Digital Mobile Fragmentation'
-        control_vars = ['Digital Mobile Duration', 'Age Group', 'Weekend Status', 'Gender', 'Mobility Fragmentation', 'Mobile Duration']
+        main_ind_var = 'Digital Fragmentation'
+        control_vars = ['Digital Duration', 'Age Group', 'Weekend Status', 'Gender',]
         
         # Add Intercept column required by statsmodels
         df["Intercept"] = 1
