@@ -143,9 +143,13 @@ def run_multilevel_models(data, dependent_vars, main_indep_var, control_vars, ou
             icc = random_effect_var / (random_effect_var + residual_var)
             
             print(f"ICC for {dep_var}: {icc:.3f}")
+            print(f"Random effect variance: {random_effect_var:.3f}")
+            print(f"Residual variance: {residual_var:.3f}")
         except Exception as e:
             print(f"Error calculating ICC for {dep_var}: {str(e)}")
             icc = np.nan
+            random_effect_var = np.nan
+            residual_var = np.nan
         
         # --------- Model: With Controls ---------
         # Add control variables to the formula
@@ -258,6 +262,8 @@ def run_multilevel_models(data, dependent_vars, main_indep_var, control_vars, ou
                 'n_observations': len(model_data),
                 'n_participants': model_data['unique_participant_id'].nunique(),
                 'icc': icc,
+                'random_effect_var': random_effect_var,
+                'residual_var': residual_var,
                 'log_likelihood': llf,
                 'AIC': aic,
                 'BIC': bic,
@@ -457,6 +463,7 @@ def run_multilevel_models(data, dependent_vars, main_indep_var, control_vars, ou
     # Define the order of rows in the table
     row_order = [
         'n_observations', 'n_participants', 'icc', 
+        'random_effect_var', 'residual_var',
         'Intercept_coef', 'Intercept_se', 'Intercept_p', 
         f'between_{main_indep_var_clean}_coef', f'between_{main_indep_var_clean}_se', f'between_{main_indep_var_clean}_p', 
         f'within_{main_indep_var_clean}_coef', f'within_{main_indep_var_clean}_se', f'within_{main_indep_var_clean}_p'
@@ -504,7 +511,7 @@ def run_multilevel_models(data, dependent_vars, main_indep_var, control_vars, ou
                     f'{control_clean}_coef', f'{control_clean}_se', f'{control_clean}_p'
                 ])
     
-    # Add model fit metrics to row order
+    # Add model fit metric names
     row_order.extend(['log_likelihood', 'AIC', 'BIC', 'marginal_r2', 'conditional_r2'])
     
     # Create a list for each row
@@ -513,6 +520,7 @@ def run_multilevel_models(data, dependent_vars, main_indep_var, control_vars, ou
     # First, add descriptive metric names
     metric_names = [
         'Observations (N)', 'Participants', 'ICC', 
+        'Random Effect Variance', 'Residual Variance',
         'Intercept', 'SE', 'p-value',
         f'Between {main_indep_var}', 'SE', 'p-value',
         f'Within {main_indep_var}', 'SE', 'p-value'
@@ -1002,14 +1010,14 @@ if __name__ == "__main__":
 
         # Define variables
         dep_vars = ['Anxiety (Z)', 'Depressed Mood (Z)']
-        main_ind_var = 'Digital Fragmentation'
-        control_vars = ['Digital Duration', 'Age Group', 'Weekend Status', 'Gender',]
+        main_ind_var = 'Mobility Fragmentation'
+        control_vars = ['Mobile Duration', 'Age Group', 'Weekend Status', 'Gender',]
         
         # Add Intercept column required by statsmodels
         df["Intercept"] = 1
         
         # Specify interaction term - can be changed as needed
-        interaction_terms = ['Gender']
+        interaction_terms = ["Gender"]
         
         print(f"Running multilevel models for {len(dep_vars)} dependent variables")
         print(f"Main independent variable: {main_ind_var}")
