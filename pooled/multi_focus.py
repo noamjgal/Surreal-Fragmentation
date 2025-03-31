@@ -608,7 +608,7 @@ def run_multilevel_models(data, dependent_vars, main_indep_var, control_vars, ou
                 
                 # Format numbers appropriately
                 if '_coef' in row_id or '_se' in row_id or '_ci_' in row_id:
-                    row_values.append(f"{value:.3f}")
+                    row_values.append(format_small_number(value))
                 elif '_p' in row_id:
                     # Get the corresponding parameter base name to look up significance
                     param_base = row_id.replace('_p', '')
@@ -722,9 +722,15 @@ def create_interaction_plots(data, dependent_vars, main_indep_var, interaction_v
                 y_mean = y_pred.predicted_mean
                 y_ci = y_pred.conf_int(alpha=0.05)  # 95% confidence interval
                 
+                # Format legend label based on interaction variable
+                if interaction_var.lower() == 'gender':
+                    legend_label = 'Male' if value == 'male' else 'Female'
+                else:
+                    legend_label = f'{interaction_var}={value}'
+                
                 # Plot regression line with confidence interval
                 plt.plot(x_range, y_mean, linewidth=2, 
-                        label=f'{interaction_var}={value} (slope={model.params.iloc[1]:.3f})')
+                        label=f'{legend_label} (slope={model.params.iloc[1]:.3f})')
                 plt.fill_between(x_range, y_ci[:, 0], y_ci[:, 1], alpha=0.2)
                 
                 print(f"  Fitted model for {interaction_var}={value}, slope={model.params.iloc[1]:.3f}")
@@ -777,9 +783,15 @@ def create_interaction_plots(data, dependent_vars, main_indep_var, interaction_v
                         y_mean = y_pred.predicted_mean
                         y_ci = y_pred.conf_int(alpha=0.05)  # 95% confidence interval
                         
+                        # Format legend label based on interaction variable
+                        if interaction_var.lower() == 'gender':
+                            legend_label = 'Male' if value == 'male' else 'Female'
+                        else:
+                            legend_label = f'{interaction_var}={value}'
+                        
                         # Plot regression line with confidence interval
                         plt.plot(x_range, y_mean, linewidth=3, 
-                                label=f'{interaction_var}={value} (slope={model.params.iloc[1]:.3f})')
+                                label=f'{legend_label} (slope={model.params.iloc[1]:.3f})')
                         plt.fill_between(x_range, y_ci[:, 0], y_ci[:, 1], alpha=0.2)
                         
                         print(f"  Fitted within-person model for {interaction_var}={value}, slope={model.params.iloc[1]:.3f}")
@@ -987,6 +999,17 @@ def create_marginal_effects_plot(results_file, dependent_vars, main_indep_var, i
         plt.close()
         print(f"  Saved predicted values plot to {output_file}")
 
+def format_small_number(value):
+    """Format small numbers with more significant digits."""
+    if abs(value) < 0.001:
+        return f"{value:.6f}"
+    elif abs(value) < 0.01:
+        return f"{value:.5f}"
+    elif abs(value) < 0.1:
+        return f"{value:.4f}"
+    else:
+        return f"{value:.3f}"
+
 # Example usage
 if __name__ == "__main__":
     # Load the dataset
@@ -1010,8 +1033,8 @@ if __name__ == "__main__":
 
         # Define variables
         dep_vars = ['Anxiety (Z)', 'Depressed Mood (Z)']
-        main_ind_var = 'Mobility Fragmentation'
-        control_vars = ['Mobile Duration', 'Age Group', 'Weekend Status', 'Gender',]
+        main_ind_var = 'Digital Home Fragmentation'
+        control_vars = ['Digital Home Duration', 'Age Group', 'Weekend Status', 'Gender', 'Home Duration']
         
         # Add Intercept column required by statsmodels
         df["Intercept"] = 1
@@ -1042,3 +1065,5 @@ if __name__ == "__main__":
         print(f"Error during script execution: {e}")
         import traceback
         traceback.print_exc()
+		
+	
