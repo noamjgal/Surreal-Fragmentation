@@ -5,6 +5,9 @@ Simplified Group Comparison T-Test Script with Confidence Intervals
 This script performs t-tests using standardized data from the pooled dataset (SURREAL and TLV),
 properly accounting for unique participants across datasets and includes 95% confidence intervals.
 """
+import sys
+print(sys.executable)  # This will show which Python is actually running
+print(sys.path)        # This will show the module search paths
 
 import pandas as pd
 import numpy as np
@@ -275,35 +278,6 @@ class SimplifiedGroupAnalysis:
             
             return None
     
-    def save_results(self, beautify=True):
-        """Save results to CSV file and optionally create a beautified table version."""
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        
-        # Save t-test results to CSV
-        if self.ttest_results:
-            ttest_df = pd.DataFrame(self.ttest_results)
-            
-            # Round numeric columns
-            numeric_cols = ttest_df.select_dtypes(include=[np.number]).columns
-            ttest_df[numeric_cols] = ttest_df[numeric_cols].round(4)
-            
-            # Save to CSV
-            csv_path = os.path.join(self.output_dir, f'group_ttest_results_{timestamp}.csv')
-            ttest_df.to_csv(csv_path, index=False)
-            self.logger.info(f"Saved {len(ttest_df)} t-test results to {csv_path}")
-            
-            # Create beautified table if requested
-            if beautify:
-                beautified_table = self._create_beautified_table(ttest_df)
-                table_path = os.path.join(self.output_dir, f'group_ttest_beautiful_table_{timestamp}.csv')
-                beautified_table.to_csv(table_path, index=False)
-                self.logger.info(f"Saved beautified table to {table_path}")
-            
-            return csv_path
-        else:
-            self.logger.warning("No results to save")
-            return None
-    
     def _create_beautified_table(self, df):
         """Create a beautified version of the results for presentation."""
         # Map column names to more readable versions
@@ -363,6 +337,78 @@ class SimplifiedGroupAnalysis:
         beautified_df = pd.DataFrame(rows)
         
         return beautified_df
+
+    def _create_descriptive_stats_table(self, df):
+        """Create a descriptive statistics table for fragmentation metrics by age group."""
+        # Define the metrics to include (excluding digital_home_mobility_delta)
+        metrics = ['digital_fragmentation', 'mobility_fragmentation', 
+                  'overlap_fragmentation', 'digital_home_fragmentation']
+        
+        # Create a new dataframe for descriptive statistics
+        rows = []
+        
+        # Process each metric
+        for metric in metrics:
+            # Get data for each age group
+            adolescent_data = df[df['age_group'] == 'adolescent'][metric].dropna()
+            adult_data = df[df['age_group'] == 'adult'][metric].dropna()
+            all_data = df[metric].dropna()
+            
+            # Calculate statistics for each group
+            stats = {
+                'Measure': metric.replace('_', ' ').title(),
+                'Adolescents': f"{len(adolescent_data)}",
+                'Adolescents M (SD)': f"{adolescent_data.mean():.3g} ({adolescent_data.std():.3g})",
+                'Adults': f"{len(adult_data)}",
+                'Adults M (SD)': f"{adult_data.mean():.3g} ({adult_data.std():.3g})",
+                'Total N': f"{len(all_data)}",
+                'Total M (SD)': f"{all_data.mean():.3g} ({all_data.std():.3g})"
+            }
+            rows.append(stats)
+        
+        # Create the dataframe
+        desc_stats_df = pd.DataFrame(rows)
+        
+        return desc_stats_df
+
+    def save_results(self, beautify=True):
+        """Save results to CSV file and optionally create a beautified table version."""
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        
+        # Load the data for descriptive statistics
+        population_df = self.load_data()
+        
+        # Save t-test results to CSV
+        if self.ttest_results:
+            ttest_df = pd.DataFrame(self.ttest_results)
+            
+            # Round numeric columns
+            numeric_cols = ttest_df.select_dtypes(include=[np.number]).columns
+            ttest_df[numeric_cols] = ttest_df[numeric_cols].round(4)
+            
+            # Save to CSV
+            csv_path = os.path.join(self.output_dir, f'group_ttest_results_{timestamp}.csv')
+            ttest_df.to_csv(csv_path, index=False)
+            self.logger.info(f"Saved {len(ttest_df)} t-test results to {csv_path}")
+            
+            # Create and save descriptive statistics table
+            if population_df is not None:
+                desc_stats_df = self._create_descriptive_stats_table(population_df)
+                desc_stats_path = os.path.join(self.output_dir, f'descriptive_statistics_{timestamp}.csv')
+                desc_stats_df.to_csv(desc_stats_path, index=False)
+                self.logger.info(f"Saved descriptive statistics to {desc_stats_path}")
+            
+            # Create beautified table if requested
+            if beautify:
+                beautified_table = self._create_beautified_table(ttest_df)
+                table_path = os.path.join(self.output_dir, f'group_ttest_beautiful_table_{timestamp}.csv')
+                beautified_table.to_csv(table_path, index=False)
+                self.logger.info(f"Saved beautified table to {table_path}")
+            
+            return csv_path
+        else:
+            self.logger.warning("No results to save")
+            return None
 
 def main():
     """Main function to run the group comparison analysis."""
