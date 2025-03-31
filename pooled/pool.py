@@ -31,17 +31,19 @@ class PooledSTAIAnalysis:
         # Set standardization type
         self.standardization_type = standardization_type
         
-        # Hardcoded paths to data files - will be adjusted based on standardization type
+        # Get script directory and set up data paths
+        script_dir = Path(__file__).parent
+        data_dir = script_dir / "data"
         
+        # Set up data file paths
         if self.standardization_type == 'population':
-            self.surreal_path = Path('data/ema_fragmentation_demographics_population.csv')
+            self.surreal_path = data_dir / 'ema_fragmentation_demographics_population.csv'
         else:  # participant level
-            self.surreal_path = Path('data/ema_fragmentation_demographics_participant.csv')
+            self.surreal_path = data_dir / 'ema_fragmentation_demographics_participant.csv'
             
-        self.tlv_path = Path('data/combined_metrics.csv')
+        self.tlv_path = data_dir / 'combined_metrics.csv'
         
         # Set output directory relative to script location
-        script_dir = Path(__file__).parent
         self.output_dir = script_dir / "processed" 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.debug = debug
