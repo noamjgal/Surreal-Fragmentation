@@ -698,6 +698,70 @@ class PooledSTAIAnalysis:
         self.pooled_data.to_csv(output_file, index=False)
         self.logger.info(f"Pooled data saved to {output_file}")
 
+    def _output_fragmentation_stats(self):
+        """Output fragmentation statistics to a CSV file."""
+        self.logger.info("Starting fragmentation statistics calculation...")
+        
+        if not hasattr(self, 'pooled_data') or self.pooled_data is None:
+            self.logger.warning("No pooled data available for fragmentation statistics")
+            return
+            
+        try:
+            # Get standardized column names
+            std_dataset = self.variable_mappings['standardized']['dataset']
+            frag_cols = self.variable_mappings['standardized']['fragmentation']
+            
+            self.logger.info(f"Calculating statistics for fragmentation columns: {frag_cols}")
+            
+            # Initialize results dictionary
+            results = {}
+            
+            # Calculate statistics for each fragmentation type
+            for frag_type, col_name in frag_cols.items():
+                if col_name in self.pooled_data.columns:
+                    self.logger.info(f"Processing {frag_type} ({col_name})")
+                    
+                    # Calculate for SURREAL
+                    surreal_data = self.pooled_data[self.pooled_data[std_dataset] == 'surreal'][col_name].dropna()
+                    surreal_mean = surreal_data.mean()
+                    surreal_std = surreal_data.std()
+                    
+                    # Calculate for TLV
+                    tlv_data = self.pooled_data[self.pooled_data[std_dataset] == 'tlv'][col_name].dropna()
+                    tlv_mean = tlv_data.mean()
+                    tlv_std = tlv_data.std()
+                    
+                    # Calculate for pooled
+                    pooled_data = self.pooled_data[col_name].dropna()
+                    pooled_mean = pooled_data.mean()
+                    pooled_std = pooled_data.std()
+                    
+                    # Store results
+                    results[frag_type] = {
+                        'surreal_mean': surreal_mean,
+                        'surreal_std': surreal_std,
+                        'tlv_mean': tlv_mean,
+                        'tlv_std': tlv_std,
+                        'pooled_mean': pooled_mean,
+                        'pooled_std': pooled_std
+                    }
+                else:
+                    self.logger.warning(f"Column {col_name} not found in pooled data")
+            
+            # Convert to DataFrame
+            stats_df = pd.DataFrame(results).T
+            
+            # Save to CSV
+            output_file = self.output_dir / f"fragmentation_stats_{self.standardization_type}.csv"
+            stats_df.to_csv(output_file)
+            self.logger.info(f"Fragmentation statistics saved to {output_file}")
+            print(f"\nFragmentation statistics saved to {output_file}")
+            
+        except Exception as e:
+            self.logger.error(f"Error outputting fragmentation statistics: {str(e)}")
+            if self.debug:
+                self.logger.exception("Detailed error:")
+
     def run_quality_checks(self):
         """Run quality checks on the pooled dataset."""
         if not hasattr(self, 'pooled_data') or self.pooled_data is None:
@@ -734,9 +798,10 @@ class PooledSTAIAnalysis:
             if missing_report:
                 self.logger.info("Missing value report:")
                 for col, count in missing_report.items():
-                    self.logger.info(f"  {col}: {count} missing values ({count/len(self.pooled_data):.1%})")
-            else:
-                self.logger.info("No missing values found in any columns")
+                    self.logger.info(f"  {col}: {count} ({count/len(self.pooled_data):.1%})")
+            
+            # Output fragmentation statistics
+            self._output_fragmentation_stats()
             
             # Check duration distributions 
             self.logger.info("Duration metrics distributions:")
@@ -1047,6 +1112,9 @@ class PooledSTAIAnalysis:
         output_file = self.output_dir / f"pooled_stai_data_{self.standardization_type}.csv"
         pooled_data.to_csv(output_file, index=False)
         self.logger.info(f"Saved pooled data to {output_file}")
+        
+        # Run quality checks
+        self.run_quality_checks()
         
         # Return the pooled data
         return pooled_data
