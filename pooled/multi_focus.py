@@ -36,19 +36,17 @@ def run_multilevel_models(data, dependent_vars, main_indep_var, control_vars, ou
     Returns:
         pd.DataFrame: DataFrame with model results
     """
-    # Set default for interaction_terms if None
+    # Set interaction terms to empty list if interaction_terms is None
     if interaction_terms is None:
         interaction_terms = []
     
-    # Create a unique participant identifier that differentiates between datasets
+    # Create a unique participant identifier to differentiate between duplicate participant ids in the two datasets
     data['unique_participant_id'] = data['Dataset Source'] + '_' + data['Participant ID'].astype(str)
     
     # Check that we have the expected number of unique participants
     expected_count = len(data.groupby(['Dataset Source', 'Participant ID']).size())
     actual_count = len(data['unique_participant_id'].unique())
-    
-    if expected_count != actual_count:
-        warnings.warn(f"Expected {expected_count} unique participants but found {actual_count}. Check participant ID creation.")
+    assert expected_count == actual_count, f"Expected {expected_count} unique participants but found {actual_count}. Check participant ID creation."
     
     # Track model convergence
     convergence_issues = []
@@ -741,7 +739,7 @@ def create_interaction_plots(data, dependent_vars, main_indep_var, interaction_v
         plt.ylabel(f'{dep_var.replace("_", " ").title()}')
         plt.title(f'Interaction Effect: {interaction_var.replace("_", " ").title()} × '
                 f'{main_indep_var.replace("_", " ").title()} (Between-Person)')
-        plt.legend()
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
         plt.grid(True, alpha=0.3)
         
         output_file = f'pooled/visualizations/between_interaction_{dep_var_clean}_{main_indep_var_clean}_{interaction_var_clean}.png'
@@ -804,7 +802,7 @@ def create_interaction_plots(data, dependent_vars, main_indep_var, interaction_v
             plt.ylabel(f'{dep_var.replace("_", " ").title()}')
             plt.title(f'Within-Person Effect: {interaction_var.replace("_", " ").title()} × '
                     f'{main_indep_var.replace("_", " ").title()}')
-            plt.legend()
+            plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
             plt.grid(True, alpha=0.3)
             
             output_file = f'pooled/visualizations/within_interaction_{dep_var_clean}_{main_indep_var_clean}_{interaction_var_clean}.png'
@@ -989,7 +987,7 @@ def create_marginal_effects_plot(results_file, dependent_vars, main_indep_var, i
         plt.xlabel(f'{main_indep_var} (Standardized)')
         plt.ylabel(f'Predicted {dep_var}')
         plt.title(f'Predicted Effect of {main_indep_var} by {interaction_var}')
-        plt.legend()
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
         plt.grid(True, alpha=0.3)
         
         plt.tight_layout()
@@ -1033,8 +1031,8 @@ if __name__ == "__main__":
 
         # Define variables
         dep_vars = ['Anxiety (Z)', 'Depressed Mood (Z)']
-        main_ind_var = 'Digital Home Fragmentation'
-        control_vars = ['Digital Home Duration', 'Age Group', 'Weekend Status', 'Gender', 'Home Duration']
+        main_ind_var = 'Mobility Fragmentation'
+        control_vars = ['Mobile Duration', 'Age Group', 'Weekend Status', 'Gender', 'Location Type']
         
         # Add Intercept column required by statsmodels
         df["Intercept"] = 1
