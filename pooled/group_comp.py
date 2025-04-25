@@ -21,7 +21,7 @@ class SimplifiedGroupAnalysis:
     def __init__(self, output_dir=None, debug=False):
         """Initialize the group comparison analysis class."""
         # Set paths for pooled data
-        self.population_file = "pooled/processed/pooled_stai_data_population.csv"
+        self.population_file = "processed/pooled_stai_data_population.csv"
         
         # Set output directory
         if output_dir:
@@ -339,7 +339,7 @@ class SimplifiedGroupAnalysis:
         return beautified_df
 
     def _create_descriptive_stats_table(self, df):
-        """Create a descriptive statistics table for fragmentation metrics by age group."""
+        """Create a descriptive statistics table for fragmentation metrics by age group at the observation level."""
         # Define the metrics to include (excluding digital_home_mobility_delta)
         metrics = ['digital_fragmentation', 'mobility_fragmentation', 
                   'overlap_fragmentation', 'digital_home_fragmentation']
@@ -349,20 +349,29 @@ class SimplifiedGroupAnalysis:
         
         # Process each metric
         for metric in metrics:
-            # Get data for each age group
-            adolescent_data = df[df['age_group'] == 'adolescent'][metric].dropna()
-            adult_data = df[df['age_group'] == 'adult'][metric].dropna()
-            all_data = df[metric].dropna()
+            # Get observation-level data for each age group
+            adolescent_obs = df[df['age_group'] == 'adolescent'][metric].dropna()
+            adult_obs = df[df['age_group'] == 'adult'][metric].dropna()
+            all_obs = df[metric].dropna()
             
-            # Calculate statistics for each group
+            # Calculate detailed statistics
+            adolescent_mean = adolescent_obs.mean()
+            adolescent_sd = adolescent_obs.std()
+            adult_mean = adult_obs.mean()
+            adult_sd = adult_obs.std()
+            sd_ratio = adult_sd / adolescent_sd if adolescent_sd > 0 else float('inf')
+            
+            # Calculate statistics for each group at observation level
             stats = {
                 'Measure': metric.replace('_', ' ').title(),
-                'Adolescents': f"{len(adolescent_data)}",
-                'Adolescents M (SD)': f"{adolescent_data.mean():.3g} ({adolescent_data.std():.3g})",
-                'Adults': f"{len(adult_data)}",
-                'Adults M (SD)': f"{adult_data.mean():.3g} ({adult_data.std():.3g})",
-                'Total N': f"{len(all_data)}",
-                'Total M (SD)': f"{all_data.mean():.3g} ({all_data.std():.3g})"
+                'Adolescents N': f"{len(adolescent_obs)}",
+                'Adolescents M (SD)': f"{adolescent_mean:.2f} ({adolescent_sd:.2f})",
+                'Adults N': f"{len(adult_obs)}",
+                'Adults M (SD)': f"{adult_mean:.2f} ({adult_sd:.2f})",
+                'Total N': f"{len(all_obs)}",
+                'Total M (SD)': f"{all_obs.mean():.2f} ({all_obs.std():.2f})",
+                'Adult/Adol SD Ratio': f"{sd_ratio:.2f}",
+                'Mean Diff': f"{adult_mean - adolescent_mean:.2f}"
             }
             rows.append(stats)
         
