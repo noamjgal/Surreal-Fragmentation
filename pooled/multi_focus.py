@@ -15,9 +15,13 @@ import patsy
 warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 
-# Create directories for results and visualizations
-os.makedirs('pooled/results', exist_ok=True)
-os.makedirs('pooled/visualizations', exist_ok=True)
+# Get the script's directory and project root directory
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)  # One level up from script directory
+
+# Create directories for results and visualizations using absolute paths
+os.makedirs(os.path.join(script_dir, 'results'), exist_ok=True)
+os.makedirs(os.path.join(script_dir, 'visualizations'), exist_ok=True)
 
 def run_multilevel_models(data, dependent_vars, main_indep_var, control_vars, output_file="multilevel_results.csv", 
                       interaction_terms=None, create_visualizations=True):
@@ -673,6 +677,9 @@ def create_interaction_plots(data, dependent_vars, main_indep_var, interaction_v
     Create plots showing the interaction between main_indep_var and interaction_var
     for each dependent variable.
     """
+    # Get the script's directory for output paths
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
     # Ensure column names are clean for patsy
     data = data.copy()
     data.columns = [col.replace(' ', '_').replace('(', '').replace(')', '') for col in data.columns]
@@ -742,7 +749,7 @@ def create_interaction_plots(data, dependent_vars, main_indep_var, interaction_v
         plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
         plt.grid(True, alpha=0.3)
         
-        output_file = f'pooled/visualizations/between_interaction_{dep_var_clean}_{main_indep_var_clean}_{interaction_var_clean}.png'
+        output_file = os.path.join(script_dir, 'visualizations', f'between_interaction_{dep_var_clean}_{main_indep_var_clean}_{interaction_var_clean}.png')
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         print(f"  Saved between-person plot to {output_file}")
         plt.close()
@@ -805,7 +812,7 @@ def create_interaction_plots(data, dependent_vars, main_indep_var, interaction_v
             plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
             plt.grid(True, alpha=0.3)
             
-            output_file = f'pooled/visualizations/within_interaction_{dep_var_clean}_{main_indep_var_clean}_{interaction_var_clean}.png'
+            output_file = os.path.join(script_dir, 'visualizations', f'within_interaction_{dep_var_clean}_{main_indep_var_clean}_{interaction_var_clean}.png')
             plt.savefig(output_file, dpi=300, bbox_inches='tight')
             print(f"  Saved within-person plot to {output_file}")
         else:
@@ -818,6 +825,9 @@ def create_marginal_effects_plot(results_file, dependent_vars, main_indep_var, i
     """
     Create marginal effects plots based on the model results.
     """
+    # Get the script's directory for output paths
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
     print(f"\nCreating marginal effects plot for {main_indep_var} × {interaction_var}")
     
     try:
@@ -953,7 +963,7 @@ def create_marginal_effects_plot(results_file, dependent_vars, main_indep_var, i
         
         plt.tight_layout()
         
-        output_file = f'pooled/visualizations/marginal_effects_{dep_var_clean}_{main_indep_var.replace(" ", "_")}_{interaction_var.replace(" ", "_")}.png'
+        output_file = os.path.join(script_dir, 'visualizations', f'marginal_effects_{dep_var_clean}_{main_indep_var.replace(" ", "_")}_{interaction_var.replace(" ", "_")}.png')
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         plt.close()
         print(f"  Saved marginal effects plot to {output_file}")
@@ -992,7 +1002,7 @@ def create_marginal_effects_plot(results_file, dependent_vars, main_indep_var, i
         
         plt.tight_layout()
         
-        output_file = f'pooled/visualizations/predicted_values_{dep_var_clean}_{main_indep_var.replace(" ", "_")}_{interaction_var.replace(" ", "_")}.png'
+        output_file = os.path.join(script_dir, 'visualizations', f'predicted_values_{dep_var_clean}_{main_indep_var.replace(" ", "_")}_{interaction_var.replace(" ", "_")}.png')
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         plt.close()
         print(f"  Saved predicted values plot to {output_file}")
@@ -1010,9 +1020,10 @@ def format_small_number(value):
 
 # Example usage
 if __name__ == "__main__":
-    # Load the dataset
-    file_path = "pooled/processed/pooled_stai_data_population_cleaned.csv"
+    # Load the dataset using relative path
+    file_path = "processed/pooled_stai_data_population_cleaned.csv"
     try:
+        print(f"Attempting to load data from: {file_path}")
         df = pd.read_csv(file_path)
         print(f"Dataset loaded successfully! Shape: {df.shape}")
         
@@ -1026,13 +1037,14 @@ if __name__ == "__main__":
             'Digital Duration', 'Mobile Duration', 'Digital Mobile Duration',
             'Digital Home Duration', 'Active Transport Duration',
             'Mechanized Transport Duration', 'Home Duration',
+            'Mobility Episode Count', 'Intercept', 'unique_participant_id'],
             dtype='object')
         '''
 
         # Define variables
         dep_vars = ['Anxiety (Z)', 'Depressed Mood (Z)']
-        main_ind_var = 'Mobility Fragmentation'
-        control_vars = ['Mobile Duration', 'Age Group', 'Weekend Status', 'Gender', 'Location Type']
+        main_ind_var = 'Digital Mobile Fragmentation'
+        control_vars = ['Digital Mobile Duration', 'Mobility Episode Count', 'Mobile Duration','Age Group', 'Weekend Status', 'Gender', 'Location Type']
         
         # Add Intercept column required by statsmodels
         df["Intercept"] = 1
@@ -1046,6 +1058,9 @@ if __name__ == "__main__":
         if interaction_terms:
             print(f"Interaction terms: {main_ind_var} × {', '.join(interaction_terms)}")
         
+        # Also use absolute path for output file
+        output_file = os.path.join(script_dir, "results", "multilevel_fragmentation_results_with_interactions.csv")
+        
         # Run the analyses
         results = run_multilevel_models(
             data=df,
@@ -1053,11 +1068,12 @@ if __name__ == "__main__":
             main_indep_var=main_ind_var,
             control_vars=control_vars,
             interaction_terms=interaction_terms,
-            output_file="pooled/results/multilevel_fragmentation_results_with_interactions.csv",
+            output_file=output_file,
             create_visualizations=True
         )
         
         print("\nAnalysis complete!")
+        print(df.columns)
         
     except Exception as e:
         print(f"Error during script execution: {e}")

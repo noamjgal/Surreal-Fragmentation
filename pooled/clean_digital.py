@@ -7,7 +7,7 @@ import os
 import warnings
 from tqdm import tqdm
 
-file_path = "pooled/processed/pooled_stai_data_population.csv"
+file_path = "processed/pooled_stai_data_population.csv"
 
 df = pd.read_csv(file_path)
 
@@ -39,7 +39,8 @@ column_mapping = {
     'active_transport_duration': 'Active Transport Duration',
     'mechanized_transport_duration': 'Mechanized Transport Duration',
     'home_duration': 'Home Duration',
-    'out_of_home_duration': 'Out of Home Duration'
+    'out_of_home_duration': 'Out of Home Duration',
+    'mobility_episode_count': 'Mobility Episode Count'
 }
 
 # Rename the columns
@@ -60,7 +61,8 @@ spatial_columns = [
     'Active Transport Duration',
     'Mechanized Transport Duration', 
     'Home Duration',
-    'Out of Home Duration'
+    'Out of Home Duration',
+    'Mobility Episode Count'
 ]
 
 # Drop the spatial behavior columns
